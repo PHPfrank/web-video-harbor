@@ -18,6 +18,7 @@
     for (const video of document.querySelectorAll('video')) {
       const details = {
         baseUrl: location.href,
+        pageUrl: location.href,
         title: pageTitle(),
         source: 'dom',
         width: video.videoWidth || undefined,
@@ -46,6 +47,7 @@
       const candidate = media.normalizeCandidate({
         url: entry && entry.name,
         baseUrl: location.href,
+        pageUrl: location.href,
         title: pageTitle(),
         source: 'performance',
       });
@@ -62,7 +64,11 @@
   function sendCandidates(candidates) {
     if (!candidates.length) return;
     try {
-      chrome.runtime.sendMessage({ type: 'ADD_CANDIDATES', candidates }, function ignoreResponse() {
+      chrome.runtime.sendMessage({
+        type: 'ADD_CANDIDATES',
+        pageUrl: location.href,
+        candidates,
+      }, function ignoreResponse() {
         void chrome.runtime.lastError;
       });
     } catch (_error) {
@@ -130,5 +136,15 @@
     });
   }
 
+  try {
+    chrome.runtime.sendMessage({
+      type: 'CLAIM_DOCUMENT',
+      pageUrl: location.href,
+    }, function ignoreClaimResponse() {
+      void chrome.runtime.lastError;
+    });
+  } catch (_error) {
+    // The extension may have been reloaded while this page was open.
+  }
   scan(false);
 }());

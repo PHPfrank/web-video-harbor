@@ -36,6 +36,8 @@ test('content scanner covers DOM, performance, rescan, playback, and dynamic pag
   assert.match(source, /currentSrc/);
   assert.match(source, /querySelectorAll\(['"]source['"]\)/);
   assert.match(source, /getEntriesByType\(['"]resource['"]\)/);
+  assert.match(source, /pageUrl:\s*location\.href/);
+  assert.match(source, /CLAIM_DOCUMENT/);
   assert.match(source, /RESCAN/);
   assert.match(source, /loadedmetadata/);
   assert.match(source, /MutationObserver/);

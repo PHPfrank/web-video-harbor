@@ -82,6 +82,8 @@
       title: normalizeTitle(input.title),
       source: VALID_SOURCES.has(input.source) ? input.source : 'unknown',
     };
+    const pageUrl = normalizeUrl(input.pageUrl);
+    if (pageUrl) candidate.pageUrl = pageUrl;
     const width = positiveDimension(input.width);
     const height = positiveDimension(input.height);
     if (width !== undefined) candidate.width = width;
@@ -105,6 +107,7 @@
     if (!merged.width && incoming.width) merged.width = incoming.width;
     if (!merged.height && incoming.height) merged.height = incoming.height;
     if (!merged.contentType && incoming.contentType) merged.contentType = incoming.contentType;
+    if (!merged.pageUrl && incoming.pageUrl) merged.pageUrl = incoming.pageUrl;
     return merged;
   }
 

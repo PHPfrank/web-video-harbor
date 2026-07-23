@@ -71,6 +71,7 @@ test('normalizeCandidate sanitizes and bounds metadata without carrying secrets'
   const normalized = normalizeCandidate({
     url: './movie.mp4#watch',
     baseUrl: 'https://example.com/page/',
+    pageUrl: 'https://example.com/watch?id=1#player',
     title: `  ${'片'.repeat(220)}  `,
     source: 'dom',
     width: '1920',
@@ -83,6 +84,7 @@ test('normalizeCandidate sanitizes and bounds metadata without carrying secrets'
   });
 
   assert.equal(normalized.url, 'https://example.com/page/movie.mp4');
+  assert.equal(normalized.pageUrl, 'https://example.com/watch?id=1');
   assert.equal(normalized.title.length, 120);
   assert.equal(normalized.source, 'dom');
   assert.equal(normalized.kind, 'mp4');
@@ -90,8 +92,16 @@ test('normalizeCandidate sanitizes and bounds metadata without carrying secrets'
   assert.equal(normalized.height, 1080);
   assert.equal(normalized.contentType, 'video/mp4');
   assert.deepEqual(Object.keys(normalized).sort(), [
-    'contentType', 'height', 'kind', 'source', 'title', 'url', 'width',
+    'contentType', 'height', 'kind', 'pageUrl', 'source', 'title', 'url', 'width',
   ]);
+});
+
+test('normalizeCandidate rejects an invalid pageUrl instead of retaining unsafe page context', () => {
+  const normalized = normalizeCandidate({
+    url: 'https://example.com/movie.mp4',
+    pageUrl: 'https://user:secret@example.com/watch',
+  });
+  assert.equal(normalized.pageUrl, undefined);
 });
 
 test('normalizeCandidate uses safe fallbacks and rejects unknown media', () => {
