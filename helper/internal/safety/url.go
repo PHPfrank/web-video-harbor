@@ -9,25 +9,6 @@ import (
 	"strings"
 )
 
-var nonPublicNetworks = []*net.IPNet{
-	mustCIDR("100.64.0.0/10"),   // carrier-grade NAT
-	mustCIDR("192.0.0.0/24"),    // IETF protocol assignments
-	mustCIDR("192.0.2.0/24"),    // documentation
-	mustCIDR("192.88.99.0/24"),  // deprecated 6to4 relay anycast
-	mustCIDR("198.18.0.0/15"),   // benchmarking
-	mustCIDR("198.51.100.0/24"), // documentation
-	mustCIDR("203.0.113.0/24"),  // documentation
-	mustCIDR("240.0.0.0/4"),     // reserved
-	mustCIDR("2001:10::/28"),    // deprecated ORCHID
-	mustCIDR("2001:db8::/32"),   // documentation
-	mustCIDR("fec0::/10"),       // deprecated site-local
-}
-
-var globallyReachableProtocolAssignments = []*net.IPNet{
-	mustCIDR("192.0.0.9/32"),  // Port Control Protocol anycast
-	mustCIDR("192.0.0.10/32"), // Traversal Using Relays around NAT anycast
-}
-
 const (
 	CodeInvalidURL            = "invalid_url"
 	CodeSchemeNotAllowed      = "scheme_not_allowed"
@@ -78,28 +59,16 @@ func ValidateRemoteURL(ctx context.Context, rawURL string, resolver Resolver) (*
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
 		return nil, validationError(CodeAddressNotPublic, "下载地址不能指向本机或局域网", fmt.Sprintf("host %q is local", host))
 	}
-
-	if literal := net.ParseIP(host); literal != nil {
-		if !isPublicIP(literal) {
-			return nil, validationError(CodeAddressNotPublic, "下载地址不能指向本机或局域网", fmt.Sprintf("address %s is not public", literal))
-		}
-		return parsed, nil
+	if isIPv4MappedLiteral(host) {
+		return nil, validationError(CodeAddressNotPublic, "下载地址不能指向本机或局域网", fmt.Sprintf("host %q is an IPv4-mapped IPv6 literal", host))
 	}
 
-	if resolver == nil {
-		resolver = net.DefaultResolver
-	}
-	addresses, err := resolver.LookupIPAddr(ctx, host)
+	addresses, err := resolveOnce(ctx, host, resolver)
 	if err != nil {
-		return nil, validationError(CodeResolveFailed, "无法确认下载地址是否安全", fmt.Sprintf("resolve %q: %v", host, err))
+		return nil, err
 	}
-	if len(addresses) == 0 {
-		return nil, validationError(CodeResolveFailed, "无法确认下载地址是否安全", fmt.Sprintf("resolve %q: no addresses", host))
-	}
-	for _, address := range addresses {
-		if !isPublicIP(address.IP) {
-			return nil, validationError(CodeAddressNotPublic, "下载地址不能指向本机或局域网", fmt.Sprintf("host %q resolved to non-public address %s", host, address.IP))
-		}
+	if err := validateAllAddresses(host, addresses); err != nil {
+		return nil, err
 	}
 
 	return parsed, nil
@@ -132,23 +101,8 @@ func isPublicIP(ip net.IP) bool {
 		ip.IsUnspecified() {
 		return false
 	}
-	for _, network := range globallyReachableProtocolAssignments {
-		if network.Contains(ip) {
-			return true
-		}
+	if globallyReachable, found := specialPurposeReachability(ip); found {
+		return globallyReachable
 	}
-	for _, network := range nonPublicNetworks {
-		if network.Contains(ip) {
-			return false
-		}
-	}
-	return true
-}
-
-func mustCIDR(cidr string) *net.IPNet {
-	_, network, err := net.ParseCIDR(cidr)
-	if err != nil {
-		panic(err)
-	}
-	return network
+	return isIANAAllocatedGlobalUnicast(ip)
 }

@@ -6,12 +6,105 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"unicode"
 )
 
 // Eighty CJK runes plus an extension and collision suffix remain below the
 // common 255-byte file-name limit on macOS filesystems.
 const maxBaseNameRunes = 80
+
+const (
+	maxFilenameComponentBytes = 255
+	maxExtensionBytes         = 8
+)
+
+var allowedExtensions = map[string]struct{}{
+	".m4v":  {},
+	".mkv":  {},
+	".mp4":  {},
+	".ts":   {},
+	".webm": {},
+}
+
+var errReservationFinalized = errors.New("output reservation is already finalized")
+
+// Reservation owns an exclusively created output file until it is published
+// or released. Write through File so no path lookup can replace the reserved
+// file before publication.
+type Reservation struct {
+	path string
+	file *os.File
+
+	mu        sync.Mutex
+	finalized bool
+}
+
+func (r *Reservation) Path() string {
+	return r.path
+}
+
+func (r *Reservation) File() *os.File {
+	return r.file
+}
+
+// Publish synchronizes and closes the reserved file, leaving it at Path.
+func (r *Reservation) Publish() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finalized {
+		return errReservationFinalized
+	}
+	if err := r.file.Sync(); err != nil {
+		return fmt.Errorf("sync reserved output: %w", err)
+	}
+	err := r.file.Close()
+	r.finalized = true
+	if err != nil {
+		return fmt.Errorf("close reserved output: %w", err)
+	}
+	return nil
+}
+
+// Release closes and removes an unpublished reservation. It refuses to remove
+// the path if it no longer names the originally reserved file.
+func (r *Reservation) Release() error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.finalized {
+		return errReservationFinalized
+	}
+
+	openedInfo, err := r.file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect open reservation: %w", err)
+	}
+	pathInfo, err := os.Lstat(r.path)
+	if err != nil {
+		closeErr := r.file.Close()
+		r.finalized = true
+		if errors.Is(err, os.ErrNotExist) {
+			return closeErr
+		}
+		return errors.Join(fmt.Errorf("inspect reserved output path: %w", err), closeErr)
+	}
+	if !os.SameFile(openedInfo, pathInfo) {
+		closeErr := r.file.Close()
+		r.finalized = true
+		return errors.Join(errors.New("reserved output path no longer names the owned file"), closeErr)
+	}
+
+	removeErr := os.Remove(r.path)
+	closeErr := r.file.Close()
+	r.finalized = true
+	if removeErr != nil {
+		removeErr = fmt.Errorf("remove reserved output: %w", removeErr)
+	}
+	if closeErr != nil {
+		closeErr = fmt.Errorf("close reserved output: %w", closeErr)
+	}
+	return errors.Join(removeErr, closeErr)
+}
 
 // SanitizeBaseName produces a readable single path component while preserving
 // non-ASCII text such as Chinese titles.
@@ -50,46 +143,67 @@ func SanitizeBaseName(name string) string {
 	return cleaned
 }
 
-// NextAvailablePath selects a non-existing file name below dir. Callers that
-// create the file themselves should still use an exclusive create operation to
-// handle another process choosing the same path after this function returns.
+// NextAvailablePath atomically reserves a unique 0600 placeholder below dir.
+// The caller owns that placeholder and must either write/publish it or remove
+// it. New code that writes in-process should prefer ReserveAvailablePath and
+// its open file handle.
 func NextAvailablePath(dir, base, ext string) (string, error) {
-	cleanExt, err := normalizeExtension(ext)
+	reservation, err := ReserveAvailablePath(dir, base, ext)
 	if err != nil {
 		return "", err
+	}
+	path := reservation.Path()
+	if err := reservation.Publish(); err != nil {
+		_ = reservation.Release()
+		return "", err
+	}
+	return path, nil
+}
+
+// ReserveAvailablePath atomically creates and returns a unique output
+// reservation below dir.
+func ReserveAvailablePath(dir, base, ext string) (*Reservation, error) {
+	cleanExt, err := normalizeExtension(ext)
+	if err != nil {
+		return nil, err
 	}
 
 	absDir, err := filepath.Abs(dir)
 	if err != nil {
-		return "", fmt.Errorf("resolve output directory: %w", err)
+		return nil, fmt.Errorf("resolve output directory: %w", err)
 	}
 	info, err := os.Stat(absDir)
 	if err != nil {
-		return "", fmt.Errorf("inspect output directory: %w", err)
+		return nil, fmt.Errorf("inspect output directory: %w", err)
 	}
 	if !info.IsDir() {
-		return "", errors.New("output path is not a directory")
+		return nil, errors.New("output path is not a directory")
 	}
 
 	cleanBase := SanitizeBaseName(base)
 	for index := 1; ; index++ {
-		candidateBase := cleanBase
+		suffix := ""
 		if index > 1 {
-			candidateBase = fmt.Sprintf("%s (%d)", cleanBase, index)
+			suffix = fmt.Sprintf(" (%d)", index)
 		}
-		candidate := filepath.Join(absDir, candidateBase+cleanExt)
+		baseBudget := maxFilenameComponentBytes - len(suffix) - len(cleanExt)
+		if baseBudget < 1 {
+			return nil, errors.New("file extension and collision suffix leave no room for a base name")
+		}
+		candidateBase := truncateUTF8(cleanBase, baseBudget)
+		candidate := filepath.Join(absDir, candidateBase+suffix+cleanExt)
 		if !isWithinDirectory(absDir, candidate) {
-			return "", errors.New("output path escapes output directory")
+			return nil, errors.New("output path escapes output directory")
 		}
 
-		_, err := os.Lstat(candidate)
+		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
 		switch {
 		case err == nil:
+			return &Reservation{path: candidate, file: file}, nil
+		case errors.Is(err, os.ErrExist):
 			continue
-		case errors.Is(err, os.ErrNotExist):
-			return candidate, nil
 		default:
-			return "", fmt.Errorf("inspect output path: %w", err)
+			return nil, fmt.Errorf("reserve output path: %w", err)
 		}
 	}
 }
@@ -105,15 +219,34 @@ func normalizeExtension(ext string) (string, error) {
 	if !strings.HasPrefix(ext, ".") {
 		ext = "." + ext
 	}
+	ext = strings.ToLower(ext)
 	if len(ext) < 2 {
 		return "", errors.New("file extension is empty")
 	}
-	for _, r := range ext[1:] {
-		if !unicode.IsLetter(r) && !unicode.IsDigit(r) {
-			return "", errors.New("file extension contains unsafe characters")
-		}
+	if len(ext) > maxExtensionBytes {
+		return "", errors.New("file extension is too long")
+	}
+	if _, ok := allowedExtensions[ext]; !ok {
+		return "", errors.New("file extension is not an allowed video format")
 	}
 	return ext, nil
+}
+
+func truncateUTF8(value string, byteLimit int) string {
+	if len(value) <= byteLimit {
+		return value
+	}
+	used := 0
+	for index, r := range value {
+		runeBytes := len(string(r))
+		if used+runeBytes > byteLimit {
+			return strings.TrimRightFunc(value[:index], func(r rune) bool {
+				return unicode.IsSpace(r) || r == '.' || r == '-'
+			})
+		}
+		used += runeBytes
+	}
+	return value
 }
 
 func isWithinDirectory(dir, path string) bool {

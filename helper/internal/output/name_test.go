@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"unicode/utf8"
 )
@@ -61,6 +62,136 @@ func TestNextAvailablePathAvoidsExistingFile(t *testing.T) {
 	if got != want {
 		t.Fatalf("NextAvailablePath() = %q, want %q", got, want)
 	}
+	info, err := os.Stat(got)
+	if err != nil {
+		t.Fatalf("reserved path was not created: %v", err)
+	}
+	if perm := info.Mode().Perm(); perm != 0o600 {
+		t.Fatalf("reserved path permissions = %o, want 600", perm)
+	}
+}
+
+func TestNextAvailablePathAtomicallyReservesConcurrentNames(t *testing.T) {
+	dir := t.TempDir()
+	const workers = 24
+	start := make(chan struct{})
+	paths := make(chan string, workers)
+	errs := make(chan error, workers)
+	var group sync.WaitGroup
+
+	for range workers {
+		group.Add(1)
+		go func() {
+			defer group.Done()
+			<-start
+			path, err := NextAvailablePath(dir, "并发视频", ".mp4")
+			if err != nil {
+				errs <- err
+				return
+			}
+			paths <- path
+		}()
+	}
+	close(start)
+	group.Wait()
+	close(paths)
+	close(errs)
+
+	for err := range errs {
+		t.Errorf("NextAvailablePath() error = %v", err)
+	}
+	seen := make(map[string]bool, workers)
+	for path := range paths {
+		if seen[path] {
+			t.Errorf("duplicate reserved path: %q", path)
+		}
+		seen[path] = true
+		if _, err := os.Stat(path); err != nil {
+			t.Errorf("reserved path %q missing: %v", path, err)
+		}
+	}
+	if len(seen) != workers {
+		t.Fatalf("unique reserved paths = %d, want %d", len(seen), workers)
+	}
+}
+
+func TestNextAvailablePathDoesNotOverwriteSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.txt")
+	if err := os.WriteFile(target, []byte("keep me"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	symlink := filepath.Join(dir, "视频.mp4")
+	if err := os.Symlink(target, symlink); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := NextAvailablePath(dir, "视频", ".mp4")
+	if err != nil {
+		t.Fatalf("NextAvailablePath() error = %v", err)
+	}
+	if got != filepath.Join(dir, "视频 (2).mp4") {
+		t.Fatalf("reserved path = %q", got)
+	}
+	contents, err := os.ReadFile(target)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "keep me" {
+		t.Fatalf("symlink target was modified: %q", contents)
+	}
+}
+
+func TestReservationPublishAndRelease(t *testing.T) {
+	dir := t.TempDir()
+
+	published, err := ReserveAvailablePath(dir, "发布", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := published.File().Write([]byte("video")); err != nil {
+		t.Fatal(err)
+	}
+	if err := published.Publish(); err != nil {
+		t.Fatalf("Publish() error = %v", err)
+	}
+	contents, err := os.ReadFile(published.Path())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(contents) != "video" {
+		t.Fatalf("published contents = %q", contents)
+	}
+
+	released, err := ReserveAvailablePath(dir, "取消", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	releasedPath := released.Path()
+	if err := released.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if _, err := os.Stat(releasedPath); !os.IsNotExist(err) {
+		t.Fatalf("released reservation still exists: %v", err)
+	}
+}
+
+func TestReservationReleaseClosesHandleWhenPathIsAlreadyGone(t *testing.T) {
+	dir := t.TempDir()
+	reservation, err := ReserveAvailablePath(dir, "已移除", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(reservation.Path()); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reservation.Release(); err != nil {
+		t.Fatalf("Release() error = %v", err)
+	}
+	if _, err := reservation.File().Write([]byte("must be closed")); err == nil {
+		t.Fatal("reservation file remained open after release")
+	}
 }
 
 func TestNextAvailablePathSanitizesNameAndStaysInsideDirectory(t *testing.T) {
@@ -84,7 +215,25 @@ func TestNextAvailablePathSanitizesNameAndStaysInsideDirectory(t *testing.T) {
 
 func TestNextAvailablePathRejectsUnsafeExtension(t *testing.T) {
 	dir := t.TempDir()
-	if _, err := NextAvailablePath(dir, "视频", "../outside"); err == nil {
-		t.Fatal("unsafe extension was accepted")
+	tests := []string{
+		"../outside",
+		"." + strings.Repeat("a", 64),
+		".exe",
+	}
+	for _, ext := range tests {
+		if _, err := NextAvailablePath(dir, "视频", ext); err == nil {
+			t.Errorf("unsafe or unsupported extension %q was accepted", ext)
+		}
+	}
+}
+
+func TestNextAvailablePathKeepsCompleteComponentWithinMacOSByteLimit(t *testing.T) {
+	dir := t.TempDir()
+	got, err := NextAvailablePath(dir, strings.Repeat("😀", maxBaseNameRunes), ".webm")
+	if err != nil {
+		t.Fatalf("NextAvailablePath() error = %v", err)
+	}
+	if size := len(filepath.Base(got)); size > maxFilenameComponentBytes {
+		t.Fatalf("file-name component bytes = %d, want <= %d", size, maxFilenameComponentBytes)
 	}
 }
