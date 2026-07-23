@@ -122,6 +122,7 @@ done
 
 (
   cd "$repo_root"
+  node --test tests/integration/*.test.mjs
   node --test extension/tests/*.test.js
   for javascript_file in extension/background.js extension/content.js extension/popup.js \
     extension/options.js extension/lib/*.js; do

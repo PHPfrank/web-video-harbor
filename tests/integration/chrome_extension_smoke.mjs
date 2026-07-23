@@ -1,7 +1,8 @@
 import assert from 'node:assert/strict';
-import { spawn } from 'node:child_process';
+import { spawn, spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
+import { selectChromeLaunch } from './chrome_launch.mjs';
 
 const repoRoot = process.env.SMOKE_REPO_ROOT;
 const fixtureURL = process.env.SMOKE_FIXTURE_URL;
@@ -116,7 +117,7 @@ const chromeLogPath = path.join(browserRoot, 'chrome-cdp.log');
 const snapshotPath = path.join(browserRoot, 'popup-snapshot.txt');
 const screenshotPath = path.join(browserRoot, 'popup.png');
 const chromeLog = fs.openSync(chromeLogPath, 'w', 0o600);
-const chrome = spawn(chromePath, [
+const chromeArguments = [
   '--headless=new',
   `--user-data-dir=${profileDir}`,
   '--remote-debugging-port=0',
@@ -129,7 +130,11 @@ const chrome = spawn(chromePath, [
   '--no-first-run',
   '--no-default-browser-check',
   'about:blank',
-], { stdio: ['ignore', 'ignore', chromeLog] });
+];
+const nativeArm64Available = process.platform === 'darwin' && process.arch === 'x64'
+  && spawnSync('/usr/bin/arch', ['-arm64', '/usr/bin/true'], { stdio: 'ignore' }).status === 0;
+const chromeLaunch = selectChromeLaunch({ chromePath, chromeArguments, nativeArm64Available });
+const chrome = spawn(chromeLaunch.command, chromeLaunch.arguments, { stdio: ['ignore', 'ignore', chromeLog] });
 try {
   if (!Number.isSafeInteger(chrome.pid) || chrome.pid <= 1) {
     throw new Error('Chrome did not publish a valid process ID');
