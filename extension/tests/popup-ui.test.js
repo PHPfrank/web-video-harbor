@@ -28,9 +28,11 @@ test('popup is semantic, keyboard accessible, and loads scripts without inline h
   assert.match(html, /<main\b/);
   assert.match(html, /<section\b[^>]*aria-labelledby=/);
   assert.match(html, /aria-live=["']polite["']/);
+  assert.match(html, /class=["']connection-panel["'][^>]*role=["']status["']/);
   assert.match(html, /<button\b[^>]*id=["']rescan-button["']/);
   assert.match(html, /<script src=["']lib\/popup-state\.js["']><\/script>/);
   assert.match(html, /<script src=["']lib\/helper-client\.js["']><\/script>/);
+  assert.match(html, /<script src=["']lib\/popup-controller\.js["']><\/script>/);
   assert.match(html, /<script src=["']popup\.js["']><\/script>/);
   assert.doesNotMatch(html, /\son\w+=/i);
   assert.doesNotMatch(html, /https?:\/\//i);
@@ -38,12 +40,13 @@ test('popup is semantic, keyboard accessible, and loads scripts without inline h
 
 test('popup controller covers scan, inspect, download, polling, and task actions safely', () => {
   const javascript = source('popup.js');
+  const controller = source('lib/popup-controller.js');
 
   for (const marker of ['GET_TAB_MEDIA', 'RESCAN', '.inspect(', '.createTask(', '.cancelTask(', '.retryTask(', '.revealTask(']) {
-    assert.match(javascript, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), marker);
+    assert.match(`${javascript}\n${controller}`, new RegExp(marker.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')), marker);
   }
-  assert.match(javascript, /setInterval\s*\(/);
-  assert.match(javascript, /clearInterval\s*\(/);
+  assert.match(javascript, /createPopupController\s*\(/);
+  assert.doesNotMatch(javascript, /setInterval\s*\(/);
   assert.match(javascript, /replaceChildren\s*\(/);
   assert.match(javascript, /textContent/);
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
@@ -59,7 +62,9 @@ test('options page stores only a token locally and offers connection testing and
   assert.match(html, /隐私/);
   assert.match(javascript, /chrome\.storage\.local/);
   assert.match(javascript, /\.saveToken\s*\(/);
+  assert.match(javascript, /\.health\s*\(/);
   assert.match(javascript, /\.listTasks\s*\(/);
+  assert.match(javascript, /\.describeHealth\s*\(/);
   assert.doesNotMatch(combined, /storage\.sync|Cookie\s*导入|自定义\s*(host|地址)/i);
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
 });

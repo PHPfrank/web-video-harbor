@@ -114,6 +114,26 @@ test('request timeout aborts work and returns a short Chinese message', async ()
   await assert.rejects(client.health(), { message: '本地助手响应超时' });
 });
 
+test('timeout also covers a stalled JSON response body', async () => {
+  const client = helper.createHelperClient({
+    storageLocal: localStorage(),
+    timeoutMs: 5,
+    async fetchImpl(_url, options) {
+      return {
+        ok: true,
+        status: 200,
+        json() {
+          return new Promise((_resolve, reject) => {
+            options.signal.addEventListener('abort', () => reject(new Error('body aborted')));
+          });
+        },
+      };
+    },
+  });
+
+  await assert.rejects(client.health(), { message: '本地助手响应超时', code: 'timeout' });
+});
+
 test('remote and network errors never expose response text, URL, or token', async () => {
   const secret = 'very-private-token';
   const videoURL = 'https://private.example/video.m3u8?signature=sensitive';
@@ -152,4 +172,52 @@ test('local storage failures are converted to a short safe message', async () =>
     assert.doesNotMatch(error.message, /private|profile|path/i);
     return true;
   });
+});
+
+test('known safe API error codes map to specific short Chinese messages', async () => {
+  const cases = [
+    ['http_status', '视频服务器拒绝了请求'],
+    ['response_too_large', '视频清单过大'],
+    ['invalid_request', '下载请求参数无效'],
+    ['task_error', '本地助手无法执行该任务'],
+  ];
+  for (const [code, message] of cases) {
+    const client = helper.createHelperClient({
+      storageLocal: localStorage('secret'),
+      async fetchImpl() { return jsonResponse(400, { code, message: 'untrusted detail' }); },
+    });
+    await assert.rejects(client.listTasks(), { message });
+  }
+});
+
+test('health summary distinguishes a connected helper without FFmpeg', () => {
+  assert.deepEqual(helper.describeHealth({ ready: true, version: '0.1.0', ffmpeg: false }), {
+    message: '助手已连接，但未安装 FFmpeg',
+    tone: 'error',
+  });
+  assert.deepEqual(helper.describeHealth({ ready: true, version: '0.1.0', ffmpeg: true }), {
+    message: '连接成功，本地助手可以使用。',
+    tone: 'success',
+  });
+});
+
+test('abortAll cancels every active helper request', async () => {
+  let aborts = 0;
+  const client = helper.createHelperClient({
+    storageLocal: localStorage(),
+    fetchImpl(_url, options) {
+      return new Promise((_resolve, reject) => {
+        options.signal.addEventListener('abort', () => {
+          aborts += 1;
+          reject(new Error('aborted'));
+        });
+      });
+    },
+  });
+  const pending = client.health();
+
+  client.abortAll();
+
+  await assert.rejects(pending, { code: 'aborted' });
+  assert.equal(aborts, 1);
 });

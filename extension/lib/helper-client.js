@@ -13,12 +13,16 @@
   const ERROR_MESSAGES = {
     unauthorized: '配对密钥无效，请重新配对',
     unsafe_source: '视频地址不安全或无效',
+    http_status: '视频服务器拒绝了请求',
     unsupported_media: '未识别到支持的视频格式',
     invalid_manifest: '视频清单格式无效',
     encrypted_hls: '不支持加密或 DRM 视频',
+    response_too_large: '视频清单过大',
     network: '无法读取视频地址',
+    invalid_request: '下载请求参数无效',
     not_found: '未找到该下载任务',
     invalid_state: '任务当前状态不允许此操作',
+    task_error: '本地助手无法执行该任务',
     not_revealable: '任务文件尚不可显示',
     reveal_failed: '无法在 Finder 中显示文件',
   };
@@ -82,12 +86,20 @@
     return new HelperClientError('本地助手暂时无法完成此操作', 'helper_error');
   }
 
+  function describeHealth(health) {
+    if (health && health.ready === true && health.ffmpeg === false) {
+      return { message: '助手已连接，但未安装 FFmpeg', tone: 'error' };
+    }
+    return { message: '连接成功，本地助手可以使用。', tone: 'success' };
+  }
+
   function createHelperClient(options) {
     const settings = options || {};
     const fetchImpl = settings.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
     const storageLocal = settings.storageLocal;
     const timeoutMs = Number.isFinite(settings.timeoutMs) && settings.timeoutMs > 0
       ? settings.timeoutMs : DEFAULT_TIMEOUT_MS;
+    const activeControllers = new Set();
 
     async function request(path, requestOptions) {
       if (!fetchImpl) throw new HelperClientError('当前浏览器无法访问本地助手', 'fetch_unavailable');
@@ -104,32 +116,40 @@
         body = JSON.stringify(config.body);
       }
       const controller = new AbortController();
-      const timer = setTimeout(() => controller.abort(), timeoutMs);
-      let response;
+      let timedOut = false;
+      activeControllers.add(controller);
+      const timer = setTimeout(() => {
+        timedOut = true;
+        controller.abort();
+      }, timeoutMs);
       try {
-        response = await fetchImpl(`${BASE_URL}${path}`, {
+        const response = await fetchImpl(`${BASE_URL}${path}`, {
           method: config.method || 'GET',
           headers,
           body,
           signal: controller.signal,
           cache: 'no-store',
         });
-      } catch (_error) {
-        if (controller.signal.aborted) {
+        let result = null;
+        try {
+          result = await response.json();
+        } catch (error) {
+          if (controller.signal.aborted) throw error;
+          if (response.ok) throw new HelperClientError('本地助手返回了无效数据', 'invalid_response');
+        }
+        if (!response.ok) throw errorForResponse(response.status, result);
+        return result;
+      } catch (error) {
+        if (error instanceof HelperClientError) throw error;
+        if (controller.signal.aborted && timedOut) {
           throw new HelperClientError('本地助手响应超时', 'timeout');
         }
+        if (controller.signal.aborted) throw new HelperClientError('操作已取消', 'aborted');
         throw new HelperClientError('无法连接本地助手', 'connection_failed');
       } finally {
         clearTimeout(timer);
+        activeControllers.delete(controller);
       }
-      let result = null;
-      try {
-        result = await response.json();
-      } catch (_error) {
-        if (response.ok) throw new HelperClientError('本地助手返回了无效数据', 'invalid_response');
-      }
-      if (!response.ok) throw errorForResponse(response.status, result);
-      return result;
     }
 
     function taskAction(id, action) {
@@ -145,8 +165,11 @@
       cancelTask(id) { return taskAction(id, 'cancel'); },
       retryTask(id) { return taskAction(id, 'retry'); },
       revealTask(id) { return taskAction(id, 'reveal'); },
+      abortAll() {
+        for (const controller of activeControllers) controller.abort();
+      },
     };
   }
 
-  return { BASE_URL, TOKEN_KEY, HelperClientError, createHelperClient, readToken, saveToken };
+  return { BASE_URL, TOKEN_KEY, HelperClientError, createHelperClient, describeHealth, readToken, saveToken };
 }));

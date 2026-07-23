@@ -16,7 +16,7 @@
       <button id="options-button" class="button button-quiet header-action" type="button">设置</button>
     </header>
 
-    <section class="connection-panel" aria-labelledby="connection-title">
+    <section class="connection-panel" role="status" aria-live="polite" aria-labelledby="connection-title">
       <span id="connection-dot" class="status-dot" aria-hidden="true"></span>
       <div class="connection-copy">
         <h2 id="connection-title">正在连接本地助手</h2>
@@ -55,6 +55,7 @@
 
   <script src="lib/popup-state.js"></script>
   <script src="lib/helper-client.js"></script>
+  <script src="lib/popup-controller.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

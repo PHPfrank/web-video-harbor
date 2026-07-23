@@ -19,17 +19,20 @@
 
   async function testConnection() {
     testButton.disabled = true;
+    testButton.setAttribute('aria-busy', 'true');
     showStatus('正在测试连接…', '');
     try {
-      await client.health();
+      const health = await client.health();
       await client.listTasks();
-      showStatus('连接成功，本地助手可以使用。', 'success');
+      const summary = helper.describeHealth(health);
+      showStatus(summary.message, summary.tone);
       return true;
     } catch (error) {
       showStatus(error && error.message ? error.message : '无法连接本地助手', 'error');
       return false;
     } finally {
       testButton.disabled = false;
+      testButton.setAttribute('aria-busy', 'false');
     }
   }
 

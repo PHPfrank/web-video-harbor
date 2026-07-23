@@ -85,7 +85,7 @@
     const isHls = candidate && candidate.kind === 'hls';
     const width = Number(candidate && candidate.width) || 0;
     const height = Number(candidate && candidate.height) || 0;
-    return {
+    const view = {
       id: `candidate-${index}`,
       url: candidate && typeof candidate.url === 'string' ? candidate.url : '',
       kind: isHls ? 'hls' : 'mp4',
@@ -94,8 +94,13 @@
       detail: width && height ? `${width} × ${height}` : (isHls ? '需要检查可用画质' : '可直接下载'),
       variants: sortHlsVariants(candidate && candidate.variants),
       inspecting: Boolean(candidate && candidate.inspecting),
+      pending: Boolean(candidate && candidate.pending),
+      canUse: candidate && typeof candidate.canUse === 'boolean' ? candidate.canUse : true,
+      selectedVariant: candidate && typeof candidate.selectedVariant === 'string' ? candidate.selectedVariant : '',
       error: shortText(candidate && candidate.error, '', 80),
     };
+    if (candidate && candidate.blockedReason) view.detail = shortText(candidate.blockedReason, view.detail, 80);
+    return view;
   }
 
   function taskView(task) {
@@ -114,6 +119,7 @@
       canCancel: Boolean(descriptor.canCancel),
       canRetry: Boolean(descriptor.canRetry),
       canReveal: Boolean(descriptor.canReveal),
+      pending: Boolean(task && task.pending),
     };
   }
 
@@ -125,8 +131,12 @@
     let emptyMessage = '尚未发现可下载的视频';
     if (source.scanning) emptyMessage = '正在重新扫描当前页面…';
     else if (isWeChatPage(source.pageUrl)) emptyMessage = '请先在浏览器中播放视频几秒，再重新扫描';
+    const connection = { ...CONNECTIONS[connectionName] };
+    if (connectionName === 'connected' && source.ffmpegAvailable === false) {
+      connection.detail = '本地助手已连接；未安装 FFmpeg，MP4 仍可下载。';
+    }
     return {
-      connection: { ...CONNECTIONS[connectionName] },
+      connection,
       candidates,
       tasks,
       scanning: Boolean(source.scanning),
