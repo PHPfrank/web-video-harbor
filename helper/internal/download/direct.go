@@ -88,6 +88,7 @@ type Downloader struct {
 	onProgress   ProgressFunc
 	sleep        SleepFunc
 	validateURLs bool
+	partWriter   func(io.Writer) io.Writer
 }
 
 // New constructs a downloader with explicit dependencies.
@@ -130,6 +131,7 @@ func New(config Config) (*Downloader, error) {
 		onProgress:   config.OnProgress,
 		sleep:        sleep,
 		validateURLs: !config.skipURLCheck,
+		partWriter:   identityWriter,
 	}, nil
 }
 
@@ -285,16 +287,20 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 		total = 0
 	}
 	written, copyErr := io.CopyBuffer(&progressWriter{
-		writer:     part,
+		writer:     &destinationWriter{writer: d.partWriter(part)},
 		totalBytes: total,
 		callback:   d.onProgress,
-	}, response.Body, make([]byte, copyBufferSize))
+	}, &sourceReader{reader: response.Body}, make([]byte, copyBufferSize))
 	closeErr := response.Body.Close()
 	if ctx.Err() != nil {
 		return canceledError(ctx), false
 	}
 	if copyErr != nil {
-		return &Error{Code: CodeTransfer, Message: "视频传输中断", cause: errors.New("copy response body failed")}, true
+		var writeErr *destinationWriteError
+		if errors.As(copyErr, &writeErr) {
+			return outputError("无法写入临时下载文件", errors.New("destination write failed")), false
+		}
+		return &Error{Code: CodeTransfer, Message: "视频传输中断", cause: errors.New("copy response body failed")}, isTransientTransferError(copyErr)
 	}
 	if closeErr != nil {
 		return &Error{Code: CodeTransfer, Message: "视频传输未正常结束", cause: errors.New("close response body failed")}, true
@@ -304,6 +310,49 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 	}
 	return nil, false
 }
+
+func identityWriter(writer io.Writer) io.Writer { return writer }
+
+type sourceReader struct {
+	reader io.Reader
+}
+
+func (r *sourceReader) Read(buffer []byte) (int, error) {
+	n, err := r.reader.Read(buffer)
+	if err != nil && err != io.EOF {
+		return n, &sourceReadError{cause: err}
+	}
+	return n, err
+}
+
+type sourceReadError struct {
+	cause error
+}
+
+func (e *sourceReadError) Error() string { return "response body read failed" }
+func (e *sourceReadError) Unwrap() error { return e.cause }
+
+type destinationWriter struct {
+	writer io.Writer
+}
+
+func (w *destinationWriter) Write(buffer []byte) (int, error) {
+	n, err := w.writer.Write(buffer)
+	if err != nil {
+		return n, &destinationWriteError{cause: err}
+	}
+	if n != len(buffer) {
+		return n, &destinationWriteError{cause: io.ErrShortWrite}
+	}
+	return n, nil
+}
+
+type destinationWriteError struct {
+	cause error
+}
+
+func (e *destinationWriteError) Error() string { return "destination write failed" }
+func (e *destinationWriteError) Unwrap() error { return e.cause }
 
 type progressWriter struct {
 	writer     io.Writer
@@ -408,6 +457,14 @@ func isTransientNetworkError(err error) bool {
 	}
 	var networkErr net.Error
 	return errors.As(err, &networkErr) && (networkErr.Timeout() || networkErr.Temporary())
+}
+
+func isTransientTransferError(err error) bool {
+	var readErr *sourceReadError
+	if errors.As(err, &readErr) {
+		return isTransientNetworkError(readErr.cause)
+	}
+	return false
 }
 
 func syncDirectory(path string) error {

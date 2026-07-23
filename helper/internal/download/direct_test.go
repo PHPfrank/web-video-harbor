@@ -214,6 +214,65 @@ func TestDirectDoesNotRetryPermanentNetworkError(t *testing.T) {
 	}
 }
 
+func TestDirectDoesNotRetryPermanentResponseReadError(t *testing.T) {
+	transport := &readFailureTransport{err: errors.New("permanent response corruption")}
+	client := &http.Client{Transport: transport}
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+	_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "permanent-read")
+	assertDownloadCode(t, err, CodeTransfer)
+	if transport.attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", transport.attempts.Load())
+	}
+	assertDirectoryEmpty(t, dir)
+}
+
+func TestDirectRetriesOnlyExplicitlyTransientResponseReadErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+	}{
+		{name: "timeout", err: readTimeoutError{}},
+		{name: "unexpected EOF", err: io.ErrUnexpectedEOF},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &readFailureTransport{err: tt.err}
+			client := &http.Client{Transport: transport}
+			dir := t.TempDir()
+			downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+			_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "transient-read")
+			assertDownloadCode(t, err, CodeTransfer)
+			if transport.attempts.Load() != 3 {
+				t.Fatalf("attempts = %d, want 3", transport.attempts.Load())
+			}
+			assertDirectoryEmpty(t, dir)
+		})
+	}
+}
+
+func TestDirectDoesNotRetryLocalPartWriteFailureAndCleansStaging(t *testing.T) {
+	transport := &successfulBodyTransport{}
+	client := &http.Client{Transport: transport}
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+	downloader.partWriter = func(io.Writer) io.Writer {
+		return writerFunc(func([]byte) (int, error) {
+			return 0, errors.New("local disk write failed")
+		})
+	}
+
+	_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "disk-failure")
+	if transport.attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", transport.attempts.Load())
+	}
+	assertDownloadCode(t, err, CodeOutput)
+	assertDirectoryEmpty(t, dir)
+}
+
 func TestDirectRetriesTransientHTTPStatusesExactlyThreeTotalAttempts(t *testing.T) {
 	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -514,6 +573,59 @@ type sequenceTransport struct {
 type permanentFailureTransport struct {
 	attempts atomic.Int32
 }
+
+type readFailureTransport struct {
+	err      error
+	attempts atomic.Int32
+}
+
+type successfulBodyTransport struct {
+	attempts atomic.Int32
+}
+
+func (t *successfulBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.attempts.Add(1)
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(strings.NewReader("video")),
+		ContentLength: 5,
+	}, nil
+}
+
+type writerFunc func([]byte) (int, error)
+
+func (f writerFunc) Write(data []byte) (int, error) { return f(data) }
+
+func (t *readFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.attempts.Add(1)
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(&errorAfterReader{data: []byte("partial"), err: t.err}),
+		ContentLength: -1,
+	}, nil
+}
+
+type errorAfterReader struct {
+	data []byte
+	err  error
+}
+
+func (r *errorAfterReader) Read(destination []byte) (int, error) {
+	if len(r.data) > 0 {
+		n := copy(destination, r.data)
+		r.data = r.data[n:]
+		return n, nil
+	}
+	return 0, r.err
+}
+
+type readTimeoutError struct{}
+
+func (readTimeoutError) Error() string   { return "response read timed out" }
+func (readTimeoutError) Timeout() bool   { return true }
+func (readTimeoutError) Temporary() bool { return true }
 
 func (t *permanentFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
 	t.attempts.Add(1)
