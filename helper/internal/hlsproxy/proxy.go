@@ -23,20 +23,22 @@ import (
 )
 
 const (
-	maxPlaylistBytes = 2 * 1024 * 1024
-	maxRangeBytes    = 256
+	maxPlaylistBytes       = 2 * 1024 * 1024
+	maxRangeBytes          = 256
+	maxRegisteredResources = 4096
 )
 
 type Code string
 
 const (
-	CodeUnsafeSource Code = "unsafe_source"
-	CodeManifest     Code = "invalid_manifest"
-	CodeEncrypted    Code = "encrypted_hls"
-	CodeUpstream     Code = "upstream"
-	CodeTooLarge     Code = "playlist_too_large"
-	CodeLifecycle    Code = "lifecycle"
-	CodeCanceled     Code = "canceled"
+	CodeUnsafeSource  Code = "unsafe_source"
+	CodeManifest      Code = "invalid_manifest"
+	CodeEncrypted     Code = "encrypted_hls"
+	CodeUpstream      Code = "upstream"
+	CodeTooLarge      Code = "playlist_too_large"
+	CodeResourceLimit Code = "resource_limit"
+	CodeLifecycle     Code = "lifecycle"
+	CodeCanceled      Code = "canceled"
 )
 
 type Error struct {
@@ -377,6 +379,18 @@ func (p *Proxy) rewritePlaylist(manifestURL string, manifest []byte) ([]byte, er
 	if err != nil || !base.IsAbs() || base.Host == "" {
 		return nil, &Error{Code: CodeManifest, Message: "M3U8 播放列表无效", cause: errors.New("playlist base URL is invalid")}
 	}
+	p.resourcesMu.Lock()
+	registered := make([]registeredResource, 0)
+	committed := false
+	defer func() {
+		if !committed {
+			for _, item := range registered {
+				delete(p.resources, item.id)
+				delete(p.reverse, item.key)
+			}
+		}
+		p.resourcesMu.Unlock()
+	}()
 	lines := strings.Split(strings.ReplaceAll(string(manifest), "\r\n", "\n"), "\n")
 	pendingPlaylist := false
 	for index, line := range lines {
@@ -394,7 +408,7 @@ func (p *Proxy) rewritePlaylist(manifestURL string, manifest []byte) ([]byte, er
 			if isPlaylistAttributeTag(trimmed) {
 				kind = resourcePlaylist
 			}
-			rewritten, err := p.rewriteURIAttributes(base, line, kind)
+			rewritten, err := p.rewriteURIAttributes(base, line, kind, &registered)
 			if err != nil {
 				return nil, err
 			}
@@ -405,17 +419,18 @@ func (p *Proxy) rewritePlaylist(manifestURL string, manifest []byte) ([]byte, er
 		if pendingPlaylist {
 			kind = resourcePlaylist
 		}
-		rewritten, err := p.registerReference(base, trimmed, kind)
+		rewritten, err := p.registerReference(base, trimmed, kind, &registered)
 		if err != nil {
 			return nil, err
 		}
 		lines[index] = rewritten
 		pendingPlaylist = false
 	}
+	committed = true
 	return []byte(strings.Join(lines, "\n")), nil
 }
 
-func (p *Proxy) rewriteURIAttributes(base *url.URL, line string, kind resourceKind) (string, error) {
+func (p *Proxy) rewriteURIAttributes(base *url.URL, line string, kind resourceKind, registered *[]registeredResource) (string, error) {
 	colon := strings.IndexByte(line, ':')
 	if colon < 0 {
 		return line, nil
@@ -441,7 +456,7 @@ func (p *Proxy) rewriteURIAttributes(base *url.URL, line string, kind resourceKi
 		if len(value) < 2 || value[0] != '"' || value[len(value)-1] != '"' {
 			return "", &Error{Code: CodeManifest, Message: "M3U8 播放列表无效", cause: errors.New("URI attribute is not quoted")}
 		}
-		rewritten, err := p.registerReference(base, value[1:len(value)-1], kind)
+		rewritten, err := p.registerReference(base, value[1:len(value)-1], kind, registered)
 		if err != nil {
 			return "", err
 		}
@@ -492,7 +507,12 @@ func isPlaylistAttributeTag(line string) bool {
 	return false
 }
 
-func (p *Proxy) registerReference(base *url.URL, reference string, kind resourceKind) (string, error) {
+type registeredResource struct {
+	key string
+	id  string
+}
+
+func (p *Proxy) registerReference(base *url.URL, reference string, kind resourceKind, registered *[]registeredResource) (string, error) {
 	parsed, err := url.Parse(reference)
 	if err != nil {
 		return "", &Error{Code: CodeManifest, Message: "M3U8 播放列表无效", cause: errors.New("resource URI is invalid")}
@@ -502,10 +522,11 @@ func (p *Proxy) registerReference(base *url.URL, reference string, kind resource
 		return "", &Error{Code: CodeUnsafeSource, Message: "视频子资源地址不安全", cause: errors.New("resource URI scheme is not allowed")}
 	}
 	key := resolved.String() + "\x00" + strconv.Itoa(int(kind))
-	p.resourcesMu.Lock()
-	defer p.resourcesMu.Unlock()
 	if id, ok := p.reverse[key]; ok {
 		return "http://" + p.host + "/" + p.token + "/r/" + id, nil
+	}
+	if len(p.resources) >= maxRegisteredResources {
+		return "", &Error{Code: CodeResourceLimit, Message: "M3U8 引用的视频资源过多", cause: errors.New("registered resource limit exceeded")}
 	}
 	id, err := randomID(18)
 	if err != nil {
@@ -514,6 +535,7 @@ func (p *Proxy) registerReference(base *url.URL, reference string, kind resource
 	resourceID := id + ffmpegSafeSuffix(resolved, kind)
 	p.resources[resourceID] = resource{url: resolved.String(), kind: kind}
 	p.reverse[key] = resourceID
+	*registered = append(*registered, registeredResource{key: key, id: resourceID})
 	return "http://" + p.host + "/" + p.token + "/r/" + resourceID, nil
 }
 

@@ -24,14 +24,6 @@ type Resolver interface {
 	LookupIPAddr(ctx context.Context, host string) ([]net.IPAddr, error)
 }
 
-// exactHostPortTestAllowlist is an intentionally narrow dependency-injection
-// seam for controlled integration fixtures. Production resolvers do not
-// implement it, and no command-line or configuration option can enable it.
-// The complete URL authority (including its ephemeral port) must match.
-type exactHostPortTestAllowlist interface {
-	AllowExactHostPort(hostPort string) bool
-}
-
 // ValidationError exposes a stable code and Chinese user message while keeping
 // diagnostic detail available separately for logs.
 type ValidationError struct {
@@ -64,7 +56,7 @@ func ValidateRemoteURL(ctx context.Context, rawURL string, resolver Resolver) (*
 	if host == "" {
 		return nil, validationError(CodeHostRequired, "下载地址缺少主机名", "URL hostname is empty")
 	}
-	if testAllowsExactHostPort(resolver, parsed.Host) {
+	if integrationAllowsExactHostPort(resolver, parsed.Host) {
 		return parsed, nil
 	}
 	if strings.EqualFold(strings.TrimSuffix(host, "."), "localhost") {
@@ -83,11 +75,6 @@ func ValidateRemoteURL(ctx context.Context, rawURL string, resolver Resolver) (*
 	}
 
 	return parsed, nil
-}
-
-func testAllowsExactHostPort(resolver Resolver, hostPort string) bool {
-	allowlist, ok := resolver.(exactHostPortTestAllowlist)
-	return ok && hostPort != "" && allowlist.AllowExactHostPort(hostPort)
 }
 
 // SafeRedirectPolicy returns an http.Client CheckRedirect callback that applies

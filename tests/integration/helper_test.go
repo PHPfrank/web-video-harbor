@@ -163,7 +163,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 
 	directURL := fixture.URL + "/direct.mp4"
 	wechatURL := fixture.URL + "/wechat-stream?id=fixture"
-	singleHLSURL := fixture.URL + "/720/index.m3u8"
+	singleHLSURL := fixture.URL + "/extensionless.m3u8"
 	masterURL := fixture.URL + "/master.m3u8"
 	for _, mediaURL := range []string{directURL, wechatURL} {
 		inspection := inspect(t, helperURL, mediaURL, http.StatusOK)
@@ -212,6 +212,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	if cancel.OutputPath != "" {
 		t.Fatalf("canceled task published output %q", cancel.OutputPath)
 	}
+	assertNoDownloadStaging(t, downloadDir)
 
 	var listed []tasks.Task
 	getJSON(t, helperURL+"/v1/tasks", true, &listed)
@@ -290,6 +291,7 @@ func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir str
 		return
 	}
 	logPath := filepath.Join(browserRoot, "chrome-smoke-run.log")
+	pidPath := filepath.Join(browserRoot, fmt.Sprintf("chrome-%d-%d.pid", os.Getpid(), time.Now().UnixNano()))
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 	command := exec.CommandContext(ctx, "node", filepath.Join(repoRoot, "tests", "integration", "chrome_extension_smoke.mjs"))
@@ -301,8 +303,9 @@ func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir str
 		"SMOKE_BROWSER_ROOT="+browserRoot,
 		"SMOKE_BROWSER_RESULTS_PATH="+resultsPath,
 		"SMOKE_CHROME_PATH="+chromePath,
+		"SMOKE_CHROME_PID_PATH="+pidPath,
 	)
-	output, err := command.CombinedOutput()
+	output, err := superviseChromeCommand(command, pidPath, browserRoot)
 	if writeErr := os.WriteFile(logPath, output, 0o600); writeErr != nil {
 		t.Fatalf("write Chrome smoke log: %v", writeErr)
 	}
@@ -327,6 +330,13 @@ func newFixtureServer(t *testing.T, siteRoot, generatedRoot string) *httptest.Se
 		case r.URL.Path == "/encrypted.m3u8":
 			w.Header().Set("Content-Type", "application/vnd.apple.mpegurl")
 			_, _ = io.WriteString(w, "#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI=\"key.bin\"\n#EXTINF:2,\nsegment.ts\n")
+		case r.URL.Path == "/hls-extensionless/0" || r.URL.Path == "/hls-extensionless/1":
+			segmentName := "segment000.ts"
+			if strings.HasSuffix(r.URL.Path, "/1") {
+				segmentName = "segment001.ts"
+			}
+			w.Header().Set("Content-Type", "video/mp2t")
+			http.ServeFile(w, r, filepath.Join(generatedRoot, "hls", "720", segmentName))
 		case strings.HasPrefix(r.URL.Path, "/720/segment") || strings.HasPrefix(r.URL.Path, "/1080/segment"):
 			parts := strings.Split(strings.TrimPrefix(r.URL.Path, "/"), "/")
 			if len(parts) != 2 || (parts[0] != "720" && parts[0] != "1080") || filepath.Base(parts[1]) != parts[1] {
@@ -430,6 +440,44 @@ func assertCompletedOutput(t *testing.T, task tasks.Task, downloadDir string) {
 	if err != nil || relative == "." || relative == ".." || strings.HasPrefix(relative, ".."+string(filepath.Separator)) || filepath.IsAbs(relative) {
 		t.Fatalf("output escaped smoke download directory: path=%q rel=%q err=%v", task.OutputPath, relative, err)
 	}
+}
+
+func assertNoDownloadStaging(t *testing.T, downloadDir string) {
+	t.Helper()
+	if err := waitForNoDownloadStaging(downloadDir, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func waitForNoDownloadStaging(downloadDir string, timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	var lastLeftovers []string
+	var lastErr error
+	for {
+		lastLeftovers, lastErr = downloadStagingLeftovers(downloadDir)
+		if lastErr == nil && len(lastLeftovers) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("canceled download cleanup timed out: leftovers=%v inspect_error=%v", lastLeftovers, lastErr)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+func downloadStagingLeftovers(downloadDir string) ([]string, error) {
+	var leftovers []string
+	err := filepath.WalkDir(downloadDir, func(path string, entry os.DirEntry, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		name := entry.Name()
+		if strings.HasPrefix(name, ".web-video-") || strings.HasSuffix(name, ".part") {
+			leftovers = append(leftovers, path)
+		}
+		return nil
+	})
+	return leftovers, err
 }
 
 func assertErrorCode(t *testing.T, response *http.Response, status int, code string) {

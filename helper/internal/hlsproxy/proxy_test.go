@@ -8,7 +8,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -174,6 +176,87 @@ func TestProxyUsesFFmpegSafeOpaqueResourceExtensions(t *testing.T) {
 				t.Fatalf("opaque resource URL leaked upstream data: %q", resourceURL)
 			}
 		})
+	}
+}
+
+func TestRewritePlaylistRejectsResourceLimitWithoutPartialRegistration(t *testing.T) {
+	proxy := newRewriteTestProxy()
+	manifest := playlistWithUniqueResources("segment", maxRegisteredResources+1)
+
+	_, err := proxy.rewritePlaylist("https://cdn.example/root.m3u8", []byte(manifest))
+
+	assertProxyCode(t, err, CodeResourceLimit)
+	assertRegisteredResourceCount(t, proxy, 0)
+}
+
+func TestRewritePlaylistAppliesResourceLimitAcrossRefreshes(t *testing.T) {
+	proxy := newRewriteTestProxy()
+	initial := playlistWithUniqueResources("old", maxRegisteredResources-1)
+	if _, err := proxy.rewritePlaylist("https://cdn.example/root.m3u8", []byte(initial)); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err := proxy.rewritePlaylist(
+		"https://cdn.example/child.m3u8",
+		[]byte(playlistWithUniqueResources("new", 2)),
+	)
+
+	assertProxyCode(t, err, CodeResourceLimit)
+	assertRegisteredResourceCount(t, proxy, maxRegisteredResources-1)
+	for _, registered := range proxy.resources {
+		if strings.Contains(registered.url, "/new") {
+			t.Fatalf("failed refresh left a partial registration: %q", registered.url)
+		}
+	}
+}
+
+func TestRewritePlaylistDoesNotChargeRepeatedResourcesTwice(t *testing.T) {
+	proxy := newRewriteTestProxy()
+	manifest := mediaPlaylist("same.ts")
+	for range 10 {
+		if _, err := proxy.rewritePlaylist("https://cdn.example/root.m3u8", []byte(manifest)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	assertRegisteredResourceCount(t, proxy, 1)
+}
+
+func TestRewritePlaylistConcurrentRegistrationNeverExceedsResourceLimit(t *testing.T) {
+	proxy := newRewriteTestProxy()
+	const workers = 16
+	const resourcesPerWorker = 300
+	var wait sync.WaitGroup
+	errorsSeen := make(chan error, workers)
+	for worker := range workers {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			prefix := "worker-" + strconv.Itoa(worker)
+			_, err := proxy.rewritePlaylist(
+				"https://cdn.example/root.m3u8",
+				[]byte(playlistWithUniqueResources(prefix, resourcesPerWorker)),
+			)
+			errorsSeen <- err
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+
+	limitErrors := 0
+	for err := range errorsSeen {
+		if err == nil {
+			continue
+		}
+		assertProxyCode(t, err, CodeResourceLimit)
+		limitErrors++
+	}
+	if limitErrors == 0 {
+		t.Fatal("concurrent registration unexpectedly admitted every unique resource")
+	}
+	proxy.resourcesMu.RLock()
+	defer proxy.resourcesMu.RUnlock()
+	if len(proxy.resources) > maxRegisteredResources || len(proxy.reverse) > maxRegisteredResources {
+		t.Fatalf("registered resources = %d/%d, limit = %d", len(proxy.resources), len(proxy.reverse), maxRegisteredResources)
 	}
 }
 
@@ -551,6 +634,36 @@ func firstProxyResource(t *testing.T, playlist, rootURL string) string {
 
 func mediaPlaylist(resource string) string {
 	return "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\n" + resource + "\n#EXT-X-ENDLIST\n"
+}
+
+func newRewriteTestProxy() *Proxy {
+	return &Proxy{
+		host:      "127.0.0.1:12345",
+		token:     "test-token",
+		resources: make(map[string]resource),
+		reverse:   make(map[string]string),
+	}
+}
+
+func playlistWithUniqueResources(prefix string, count int) string {
+	var manifest strings.Builder
+	manifest.WriteString("#EXTM3U\n")
+	for index := range count {
+		manifest.WriteString("#EXTINF:1,\n")
+		manifest.WriteString(prefix)
+		manifest.WriteString(strconv.Itoa(index))
+		manifest.WriteString(".ts\n")
+	}
+	return manifest.String()
+}
+
+func assertRegisteredResourceCount(t *testing.T, proxy *Proxy, want int) {
+	t.Helper()
+	proxy.resourcesMu.RLock()
+	defer proxy.resourcesMu.RUnlock()
+	if len(proxy.resources) != want || len(proxy.reverse) != want {
+		t.Fatalf("registered resources = %d/%d, want %d/%d", len(proxy.resources), len(proxy.reverse), want, want)
+	}
 }
 
 func assertProxyCode(t *testing.T, err error, want Code) {

@@ -45,7 +45,7 @@ func NewSafeDialContext(resolver Resolver, dialer ContextDialer) func(context.Co
 		if err != nil {
 			return nil, err
 		}
-		if !testAllowsExactHostPort(resolver, address) {
+		if !integrationAllowsExactHostPort(resolver, address) {
 			if err := validateAllAddresses(host, addresses); err != nil {
 				return nil, err
 			}

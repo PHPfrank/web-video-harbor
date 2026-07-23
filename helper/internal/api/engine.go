@@ -253,7 +253,15 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 func (e *Engine) run(id string, spec JobSpec) {
 	defer e.wg.Done()
 	ctx, err := e.manager.Context(id)
-	if err != nil || ctx.Err() != nil {
+	if err != nil {
+		return
+	}
+	defer func() {
+		if ctx.Err() != nil {
+			_, _ = e.manager.Cancel(id)
+		}
+	}()
+	if ctx.Err() != nil {
 		return
 	}
 	if _, err := e.manager.Transition(id, tasks.Downloading); err != nil {

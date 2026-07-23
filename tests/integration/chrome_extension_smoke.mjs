@@ -10,7 +10,8 @@ const browserRoot = process.env.SMOKE_BROWSER_ROOT;
 const downloadDir = process.env.SMOKE_DOWNLOAD_DIR;
 const resultsPath = process.env.SMOKE_BROWSER_RESULTS_PATH;
 const chromePath = process.env.SMOKE_CHROME_PATH;
-for (const [name, value] of Object.entries({ repoRoot, fixtureURL, helperToken, browserRoot, downloadDir, resultsPath, chromePath })) {
+const chromePIDPath = process.env.SMOKE_CHROME_PID_PATH;
+for (const [name, value] of Object.entries({ repoRoot, fixtureURL, helperToken, browserRoot, downloadDir, resultsPath, chromePath, chromePIDPath })) {
   if (!value) throw new Error(`missing ${name}`);
 }
 
@@ -20,8 +21,9 @@ class CDPConnection {
     this.pending = new Map();
     this.socket = new WebSocket(webSocketURL);
     this.ready = new Promise((resolve, reject) => {
-      this.socket.addEventListener('open', resolve, { once: true });
-      this.socket.addEventListener('error', reject, { once: true });
+      const timer = setTimeout(() => reject(new Error('CDP connection timed out')), 10000);
+      this.socket.addEventListener('open', () => { clearTimeout(timer); resolve(); }, { once: true });
+      this.socket.addEventListener('error', (error) => { clearTimeout(timer); reject(error); }, { once: true });
     });
     this.socket.addEventListener('message', (event) => {
       const message = JSON.parse(String(event.data));
@@ -65,6 +67,7 @@ async function poll(description, operation, timeout = 10000) {
   const deadline = Date.now() + timeout;
   let lastError;
   while (Date.now() < deadline) {
+    if (terminationError) throw terminationError;
     try {
       const value = await operation();
       if (value) return value;
@@ -127,11 +130,39 @@ const chrome = spawn(chromePath, [
   '--no-default-browser-check',
   'about:blank',
 ], { stdio: ['ignore', 'ignore', chromeLog] });
+try {
+  if (!Number.isSafeInteger(chrome.pid) || chrome.pid <= 1) {
+    throw new Error('Chrome did not publish a valid process ID');
+  }
+  const chromePIDTempPath = `${chromePIDPath}.tmp-${process.pid}`;
+  fs.writeFileSync(chromePIDTempPath, `${JSON.stringify({ pid: chrome.pid, profileDir })}\n`, { mode: 0o600, flag: 'wx' });
+  fs.renameSync(chromePIDTempPath, chromePIDPath);
+} catch (error) {
+  if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGKILL');
+  fs.closeSync(chromeLog);
+  throw error;
+}
 const chromeExit = new Promise((resolve) => chrome.once('exit', (code, signal) => resolve({ code, signal })));
 
 let cdp;
 let evidence = { status: 'failed', profileDir, chromeLogPath };
+let terminationError;
+let rejectTermination;
+const termination = new Promise((_, reject) => { rejectTermination = reject; });
+function handleTermination(signal) {
+  if (terminationError) return;
+  terminationError = new Error(`received ${signal}`);
+  if (cdp) cdp.close();
+  if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
+  rejectTermination(terminationError);
+}
+const onSIGTERM = () => handleTermination('SIGTERM');
+const onSIGINT = () => handleTermination('SIGINT');
+process.once('SIGTERM', onSIGTERM);
+process.once('SIGINT', onSIGINT);
 try {
+  await Promise.race([
+    (async () => {
   const activePort = await poll('Chrome DevToolsActivePort', () => {
     const activePortPath = path.join(profileDir, 'DevToolsActivePort');
     if (!fs.existsSync(activePortPath)) return null;
@@ -166,7 +197,8 @@ try {
     return document.title;
   })()`);
 
-  const messageTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/options.html`, background: true });
+  const messageTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/options.html`, background: false });
+  await cdp.send('Target.activateTarget', { targetId: messageTarget.targetId });
   const messageSession = await attach(cdp, messageTarget.targetId);
   await poll('extension message page ready', () => evaluate(cdp, messageSession, 'document.readyState === "complete"'));
   async function queryBackgroundMedia() {
@@ -278,11 +310,16 @@ try {
   };
   fs.writeFileSync(resultsPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   process.stdout.write(`Chrome CDP extension smoke passed: ${loaded.id}\n`);
+    })(),
+    termination,
+  ]);
 } catch (error) {
   evidence.error = error && error.stack ? error.stack : String(error);
   fs.writeFileSync(resultsPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
   throw error;
 } finally {
+  process.removeListener('SIGTERM', onSIGTERM);
+  process.removeListener('SIGINT', onSIGINT);
   if (cdp) cdp.close();
   if (chrome.exitCode === null && chrome.signalCode === null) chrome.kill('SIGTERM');
   await Promise.race([chromeExit, delay(3000)]);

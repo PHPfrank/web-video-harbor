@@ -13,6 +13,20 @@ results_path="$work_root/smoke-results.json"
 browser_results_path="$work_root/smoke-browser-results.json"
 chrome_path='/Applications/Google Chrome.app/Contents/MacOS/Google Chrome'
 
+reject_symlink_ancestry() {
+  local candidate="$1"
+  while [[ "$candidate" != "/" ]]; do
+    if [[ -L "$candidate" ]]; then
+      print -u2 -- "拒绝使用包含符号链接的工作路径：$candidate"
+      exit 1
+    fi
+    candidate="${candidate:h}"
+  done
+}
+
+repo_real="${repo_root:A}"
+reject_symlink_ancestry "$work_root"
+
 for command_name in go ffmpeg ffprobe node cmp; do
   if ! command -v "$command_name" >/dev/null 2>&1; then
     print -u2 -- "缺少必需命令：$command_name"
@@ -27,9 +41,15 @@ print -- "浏览器自动化：当前 @playwright/mcp 未暴露 playwright-cli�
 
 for directory in "$fixture_root" "$fixture_root/hls/720" "$fixture_root/hls/1080" \
   "$download_dir" "$browser_root" "$go_cache" "$go_tmp"; do
+  reject_symlink_ancestry "$directory"
   mkdir -p "$directory"
   if [[ -L "$directory" || ! -d "$directory" ]]; then
     print -u2 -- "拒绝使用符号链接或非目录路径：$directory"
+    exit 1
+  fi
+  directory_real="${directory:A}"
+  if [[ "$directory_real" != "$repo_real"/* ]]; then
+    print -u2 -- "拒绝使用仓库以外的生成目录：$directory_real"
     exit 1
   fi
 done
@@ -97,7 +117,7 @@ done
     SMOKE_CHROME_PATH="$chrome_path" \
     SMOKE_BROWSER_ROOT="$browser_root" \
     SMOKE_BROWSER_RESULTS_PATH="$browser_results_path" \
-    go test -race -count=1 -v ./...
+    go test -race -tags=integration -count=1 -v ./...
 )
 
 (
