@@ -5,7 +5,6 @@
   "description": "发现网页中的 MP4 和 M3U8 视频，并发送给本地下载助手。",
   "permissions": [
     "storage",
-    "tabs",
     "webRequest"
   ],
   "host_permissions": [

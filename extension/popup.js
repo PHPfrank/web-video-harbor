@@ -227,13 +227,7 @@
     render();
     try {
       const inspection = await client.inspect(candidate.url);
-      if (inspection && inspection.mediaType === 'mp4') {
-        candidate.kind = 'mp4';
-        candidate.variants = [];
-      } else {
-        candidate.variants = viewState.sortHlsVariants(inspection && inspection.variants);
-        if (!candidate.variants.length) candidate.error = '未找到可用画质';
-      }
+      Object.assign(candidate, viewState.applyInspection(candidate, inspection));
     } catch (error) {
       candidate.error = error && error.message ? error.message : '无法检查视频画质';
     } finally {

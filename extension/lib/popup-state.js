@@ -56,6 +56,31 @@
       });
   }
 
+  function downloadableVariant(variant) {
+    if (!variant || typeof variant !== 'object' || typeof variant.url !== 'string') return false;
+    try {
+      const url = new URL(variant.url);
+      return (url.protocol === 'http:' || url.protocol === 'https:') && !url.username && !url.password;
+    } catch (_error) {
+      return false;
+    }
+  }
+
+  function applyInspection(candidate, inspection) {
+    const next = candidate && typeof candidate === 'object' ? { ...candidate } : {};
+    next.inspecting = false;
+    next.error = '';
+    if (inspection && inspection.mediaType === 'mp4') {
+      next.kind = 'mp4';
+      next.variants = [];
+      return next;
+    }
+    next.kind = 'hls';
+    const variants = sortHlsVariants(inspection && inspection.variants).filter(downloadableVariant);
+    next.variants = variants.length ? variants : [{ url: next.url, label: '原始画质' }].filter(downloadableVariant);
+    return next;
+  }
+
   function candidateView(candidate, index) {
     const isHls = candidate && candidate.kind === 'hls';
     const width = Number(candidate && candidate.width) || 0;
@@ -114,5 +139,5 @@
     if (element) element.textContent = value == null ? '' : String(value);
   }
 
-  return { buildViewModel, isWeChatPage, setText, sortHlsVariants };
+  return { applyInspection, buildViewModel, isWeChatPage, setText, sortHlsVariants };
 }));

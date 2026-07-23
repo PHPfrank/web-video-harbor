@@ -16,7 +16,7 @@ test('manifest wires a popup and options page with existing local resources', ()
 
   assert.deepEqual(manifest.action, { default_popup: 'popup.html', default_title: '网页视频下载器' });
   assert.deepEqual(manifest.options_ui, { page: 'options.html', open_in_tab: true });
-  assert.deepEqual(manifest.permissions, ['storage', 'tabs', 'webRequest']);
+  assert.deepEqual(manifest.permissions, ['storage', 'webRequest']);
   for (const name of ['popup.html', 'popup.css', 'popup.js', 'options.html', 'options.js', 'lib/popup-state.js', 'lib/helper-client.js']) {
     assert.equal(fs.existsSync(path.join(extensionDir, name)), true, name);
   }

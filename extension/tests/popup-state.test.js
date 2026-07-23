@@ -60,6 +60,39 @@ test('HLS variants sort by height then bandwidth without mutating input', () => 
   assert.equal(variants[0].label, '720p');
 });
 
+test('HLS media-playlist inspection without variants becomes an original-quality download', () => {
+  const candidate = {
+    url: 'https://cdn.example/media/index.m3u8?signature=kept',
+    kind: 'hls',
+    title: '单清晰度回放',
+  };
+
+  const inspected = state.applyInspection(candidate, { mediaType: 'hls', variants: [] });
+  const [view] = state.buildViewModel({ connection: 'connected', candidates: [inspected] }).candidates;
+
+  assert.deepEqual(view.variants, [{
+    url: candidate.url,
+    label: '原始画质',
+  }]);
+  assert.equal(view.error, '');
+  assert.equal(view.inspecting, false);
+});
+
+test('HLS master-playlist inspection keeps every variant sorted for selection', () => {
+  const inspected = state.applyInspection({
+    url: 'https://cdn.example/master.m3u8', kind: 'hls', title: '多码率回放',
+  }, {
+    mediaType: 'hls',
+    variants: [
+      { url: 'https://cdn.example/720.m3u8', label: '720p', height: 720, bandwidth: 2200000 },
+      { url: 'https://cdn.example/1080.m3u8', label: '1080p', height: 1080, bandwidth: 5000000 },
+    ],
+  });
+
+  assert.deepEqual(inspected.variants.map((variant) => variant.label), ['1080p', '720p']);
+  assert.equal(inspected.url, 'https://cdn.example/master.m3u8');
+});
+
 test('task lifecycle maps to concise Chinese status and valid actions', () => {
   const cases = [
     ['queued', '等待中', true, false, false],
