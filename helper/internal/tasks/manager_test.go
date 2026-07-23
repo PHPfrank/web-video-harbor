@@ -125,6 +125,108 @@ func TestParentContextCancellationMovesQueuedAndActiveTasksToCanceled(t *testing
 	}
 }
 
+func TestCanceledParentWinsBeforeAnyNonCancelMutation(t *testing.T) {
+	tests := []struct {
+		name      string
+		prepare   func(*testing.T, *Manager, Task) Task
+		operation func(*Manager, string) error
+	}{
+		{
+			name:    "transition",
+			prepare: func(_ *testing.T, _ *Manager, task Task) Task { return task },
+			operation: func(m *Manager, id string) error {
+				_, err := m.Transition(id, Downloading)
+				return err
+			},
+		},
+		{
+			name: "progress",
+			prepare: func(t *testing.T, m *Manager, task Task) Task {
+				return mustTransition(t, m, task.ID, Downloading)
+			},
+			operation: func(m *Manager, id string) error {
+				_, err := m.SetProgress(id, 25)
+				return err
+			},
+		},
+		{
+			name: "complete",
+			prepare: func(t *testing.T, m *Manager, task Task) Task {
+				return mustTransition(t, m, task.ID, Downloading)
+			},
+			operation: func(m *Manager, id string) error {
+				_, err := m.Complete(id, "/tmp/video.mp4")
+				return err
+			},
+		},
+		{
+			name:    "fail",
+			prepare: func(_ *testing.T, _ *Manager, task Task) Task { return task },
+			operation: func(m *Manager, id string) error {
+				_, err := m.Fail(id, "下载失败", errors.New("diagnostic"))
+				return err
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parent, cancel := context.WithCancel(context.Background())
+			m := NewManager()
+			task, err := m.CreateWithContext(parent, "https://media.example/video.mp4", "视频")
+			if err != nil {
+				t.Fatalf("CreateWithContext() error = %v", err)
+			}
+			task = tt.prepare(t, m, task)
+
+			// Disable the asynchronous observer to deterministically exercise the
+			// mutation's own canceled-context check.
+			m.mu.Lock()
+			if !m.records[task.ID].stopWatcher() {
+				m.mu.Unlock()
+				t.Fatal("cancellation observer had already started")
+			}
+			m.mu.Unlock()
+			cancel()
+
+			if err := tt.operation(m, task.ID); err == nil {
+				t.Fatal("mutation succeeded after parent context cancellation")
+			}
+			got, err := m.Get(task.ID)
+			if err != nil {
+				t.Fatalf("Get() error = %v", err)
+			}
+			if got.Status != Canceled {
+				t.Fatalf("Status = %q, want %q", got.Status, Canceled)
+			}
+			if got.Progress != task.Progress || got.OutputPath != "" || got.Error != "" {
+				t.Fatalf("canceled task was mutated: %#v", got)
+			}
+		})
+	}
+}
+
+func TestCreateWithCanceledParentReturnsCanceledTask(t *testing.T) {
+	parent, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	m := NewManager()
+	task, err := m.CreateWithContext(parent, "https://media.example/video.mp4", "视频")
+	if err != nil {
+		t.Fatalf("CreateWithContext() error = %v", err)
+	}
+	if task.Status != Canceled {
+		t.Fatalf("CreateWithContext() status = %q, want %q", task.Status, Canceled)
+	}
+	got, err := m.Get(task.ID)
+	if err != nil {
+		t.Fatalf("Get() error = %v", err)
+	}
+	if got.Status != Canceled {
+		t.Fatalf("stored status = %q, want %q", got.Status, Canceled)
+	}
+}
+
 func TestParentContextCancellationDoesNotOverwriteTerminalState(t *testing.T) {
 	parent, cancel := context.WithCancel(context.Background())
 	m := NewManager()
@@ -138,7 +240,6 @@ func TestParentContextCancellationDoesNotOverwriteTerminalState(t *testing.T) {
 	}
 
 	cancel()
-	time.Sleep(10 * time.Millisecond)
 	got, err := m.Get(task.ID)
 	if err != nil {
 		t.Fatalf("Get() error = %v", err)
@@ -317,33 +418,78 @@ func TestGetAndListReturnCopies(t *testing.T) {
 	}
 }
 
-func TestConcurrentListAndGet(t *testing.T) {
+func TestConcurrentMutationsListAndGet(t *testing.T) {
 	m := NewManager()
-	const count = 50
-	ids := make([]string, count)
-	for i := range ids {
-		task := mustCreate(t, m, fmt.Sprintf("https://media.example/%d.mp4", i), fmt.Sprintf("视频 %d", i))
-		ids[i] = task.ID
-	}
+	start := make(chan struct{})
+	done := make(chan struct{})
+	errorsFound := make(chan error, 32)
 
-	var wg sync.WaitGroup
-	for worker := 0; worker < 12; worker++ {
-		wg.Add(1)
+	var writers sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		writers.Add(1)
 		go func(worker int) {
-			defer wg.Done()
-			for round := 0; round < 100; round++ {
-				if worker%3 == 0 {
-					_ = m.List()
-					continue
+			defer writers.Done()
+			<-start
+			for round := 0; round < 40; round++ {
+				task, err := m.Create(
+					fmt.Sprintf("https://media.example/%d/%d.mp4", worker, round),
+					fmt.Sprintf("视频 %d-%d", worker, round),
+				)
+				if err != nil {
+					errorsFound <- err
+					return
 				}
-				if _, err := m.Get(ids[(worker+round)%len(ids)]); err != nil {
-					t.Errorf("Get() error = %v", err)
+				if _, err = m.Transition(task.ID, Downloading); err != nil {
+					errorsFound <- err
+					return
+				}
+				if _, err = m.SetProgress(task.ID, 50); err != nil {
+					errorsFound <- err
+					return
+				}
+				if round%2 == 0 {
+					_, err = m.Cancel(task.ID)
+				} else {
+					_, err = m.Complete(task.ID, "/tmp/video.mp4")
+				}
+				if err != nil {
+					errorsFound <- err
 					return
 				}
 			}
 		}(worker)
 	}
-	wg.Wait()
+
+	var readers sync.WaitGroup
+	for worker := 0; worker < 8; worker++ {
+		readers.Add(1)
+		go func() {
+			defer readers.Done()
+			<-start
+			for {
+				select {
+				case <-done:
+					return
+				default:
+				}
+				for _, task := range m.List() {
+					if _, err := m.Get(task.ID); err != nil {
+						errorsFound <- err
+						return
+					}
+				}
+			}
+		}()
+	}
+
+	close(start)
+	writers.Wait()
+	close(done)
+	readers.Wait()
+	close(errorsFound)
+	for err := range errorsFound {
+		t.Errorf("concurrent manager operation error = %v", err)
+	}
 }
 
 func TestUnknownIDReturnsTypedNotFoundError(t *testing.T) {

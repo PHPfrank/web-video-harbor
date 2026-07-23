@@ -92,9 +92,14 @@ func (m *Manager) CreateWithContext(parent context.Context, url, title string) (
 	m.mu.Lock()
 	m.records[id] = record
 	m.order = append(m.order, id)
-	record.stopWatcher = context.AfterFunc(ctx, func() {
-		m.cancelFromContext(id)
-	})
+	if ctx.Err() != nil {
+		record.task.Status = Canceled
+		releaseContextLocked(record)
+	} else {
+		record.stopWatcher = context.AfterFunc(ctx, func() {
+			m.cancelFromContext(id)
+		})
+	}
 	task := record.task
 	m.mu.Unlock()
 	return task, nil
@@ -146,6 +151,7 @@ func (m *Manager) Transition(id string, to Status) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	syncCanceledLocked(record)
 	if !validTransition(record.task.Status, to) {
 		return Task{}, &TransitionError{ID: id, From: record.task.Status, To: to}
 	}
@@ -163,6 +169,7 @@ func (m *Manager) SetProgress(id string, progress float64) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	syncCanceledLocked(record)
 	if record.task.Status != Downloading && record.task.Status != Merging {
 		return Task{}, &ProgressError{
 			ID: id, Current: record.task.Progress, Proposed: progress,
@@ -195,13 +202,14 @@ func (m *Manager) Complete(id, outputPath string) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	syncCanceledLocked(record)
 	if record.task.Status != Downloading && record.task.Status != Merging {
 		return Task{}, &TransitionError{ID: id, From: record.task.Status, To: Completed}
 	}
 	record.task.Status = Completed
 	record.task.Progress = 100
 	record.task.OutputPath = outputPath
-	stopAndCancel(record)
+	releaseContextLocked(record)
 	return record.task, nil
 }
 
@@ -215,13 +223,14 @@ func (m *Manager) Fail(id, userMessage string, internal error) (Task, error) {
 	if err != nil {
 		return Task{}, err
 	}
+	syncCanceledLocked(record)
 	if isTerminal(record.task.Status) {
 		return Task{}, &TransitionError{ID: id, From: record.task.Status, To: Failed}
 	}
 	record.task.Status = Failed
 	record.task.Error = userMessage
 	record.internalError = internal
-	stopAndCancel(record)
+	releaseContextLocked(record)
 	return record.task, nil
 }
 
@@ -242,26 +251,27 @@ func (m *Manager) Cancel(id string) (Task, error) {
 		return Task{}, &TransitionError{ID: id, From: record.task.Status, To: Canceled}
 	}
 	record.task.Status = Canceled
-	stopAndCancel(record)
+	releaseContextLocked(record)
 	return record.task, nil
 }
 
 // Retry creates an independent queued attempt for a failed or canceled task.
 // The source URL and title are preserved; progress and result fields are reset.
 func (m *Manager) Retry(id string) (Task, error) {
-	m.mu.RLock()
+	m.mu.Lock()
 	record, ok := m.records[id]
 	if !ok {
-		m.mu.RUnlock()
+		m.mu.Unlock()
 		return Task{}, &NotFoundError{ID: id}
 	}
+	syncCanceledLocked(record)
 	if record.task.Status != Failed && record.task.Status != Canceled {
 		from := record.task.Status
-		m.mu.RUnlock()
+		m.mu.Unlock()
 		return Task{}, &TransitionError{ID: id, From: from, To: Queued}
 	}
 	url, title := record.task.URL, record.task.Title
-	m.mu.RUnlock()
+	m.mu.Unlock()
 
 	return m.Create(url, title)
 }
@@ -284,6 +294,7 @@ func (m *Manager) cancelFromContext(id string) {
 		return
 	}
 	record.task.Status = Canceled
+	releaseContextLocked(record)
 }
 
 func (m *Manager) recordLocked(id string) (*record, error) {
@@ -303,11 +314,22 @@ func isTerminal(status Status) bool {
 	return status == Completed || status == Failed || status == Canceled
 }
 
-func stopAndCancel(record *record) {
+func syncCanceledLocked(record *record) {
+	if !isTerminal(record.task.Status) && record.ctx.Err() != nil {
+		record.task.Status = Canceled
+		releaseContextLocked(record)
+	}
+}
+
+func releaseContextLocked(record *record) {
 	if record.stopWatcher != nil {
 		record.stopWatcher()
+		record.stopWatcher = nil
 	}
-	record.cancel()
+	if record.cancel != nil {
+		record.cancel()
+		record.cancel = nil
+	}
 }
 
 func newID() (string, error) {
