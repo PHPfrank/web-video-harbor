@@ -303,7 +303,7 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 		return &Error{Code: CodeTransfer, Message: "视频传输中断", cause: errors.New("copy response body failed")}, isTransientTransferError(copyErr)
 	}
 	if closeErr != nil {
-		return &Error{Code: CodeTransfer, Message: "视频传输未正常结束", cause: errors.New("close response body failed")}, true
+		return &Error{Code: CodeTransfer, Message: "视频传输未正常结束", cause: errors.New("close response body failed")}, isTransientNetworkError(closeErr)
 	}
 	if response.ContentLength >= 0 && written != response.ContentLength {
 		return &Error{Code: CodeTransfer, Message: "视频内容不完整", cause: fmt.Errorf("received %d bytes, expected %d", written, response.ContentLength)}, true

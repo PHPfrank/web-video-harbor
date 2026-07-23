@@ -273,6 +273,40 @@ func TestDirectDoesNotRetryLocalPartWriteFailureAndCleansStaging(t *testing.T) {
 	assertDirectoryEmpty(t, dir)
 }
 
+func TestDirectDoesNotRetryPermanentResponseCloseError(t *testing.T) {
+	transport := &closeFailureTransport{err: errors.New("permanent response close failure")}
+	client := &http.Client{Transport: transport}
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+	_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "permanent-close")
+	if transport.attempts.Load() != 1 {
+		t.Fatalf("attempts = %d, want 1", transport.attempts.Load())
+	}
+	if transport.closes.Load() != 1 {
+		t.Fatalf("body closes = %d, want 1", transport.closes.Load())
+	}
+	assertDownloadCode(t, err, CodeTransfer)
+	assertDirectoryEmpty(t, dir)
+}
+
+func TestDirectRetriesTransientResponseCloseErrorExactlyThreeTimes(t *testing.T) {
+	transport := &closeFailureTransport{err: readTimeoutError{}}
+	client := &http.Client{Transport: transport}
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+	_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "transient-close")
+	if transport.attempts.Load() != 3 {
+		t.Fatalf("attempts = %d, want 3", transport.attempts.Load())
+	}
+	if transport.closes.Load() != 3 {
+		t.Fatalf("body closes = %d, want 3", transport.closes.Load())
+	}
+	assertDownloadCode(t, err, CodeTransfer)
+	assertDirectoryEmpty(t, dir)
+}
+
 func TestDirectRetriesTransientHTTPStatusesExactlyThreeTotalAttempts(t *testing.T) {
 	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
@@ -581,6 +615,33 @@ type readFailureTransport struct {
 
 type successfulBodyTransport struct {
 	attempts atomic.Int32
+}
+
+type closeFailureTransport struct {
+	err      error
+	attempts atomic.Int32
+	closes   atomic.Int32
+}
+
+func (t *closeFailureTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	t.attempts.Add(1)
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          &closeFailureBody{Reader: strings.NewReader("video"), err: t.err, closes: &t.closes},
+		ContentLength: 5,
+	}, nil
+}
+
+type closeFailureBody struct {
+	io.Reader
+	err    error
+	closes *atomic.Int32
+}
+
+func (b *closeFailureBody) Close() error {
+	b.closes.Add(1)
+	return b.err
 }
 
 func (t *successfulBodyTransport) RoundTrip(*http.Request) (*http.Response, error) {
