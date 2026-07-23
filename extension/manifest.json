@@ -22,8 +22,10 @@
         "https://*/*"
       ],
       "js": [
+        "lib/media.js",
         "content.js"
-      ]
+      ],
+      "run_at": "document_idle"
     }
   ]
 }
