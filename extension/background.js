@@ -508,6 +508,13 @@ async function handleMessage(request, sender) {
     await ready;
     return { ok: true, candidates: candidateStore.get(tabId) };
   }
+  if (request.type === 'GET_TAB_MEDIA') {
+    const tabId = requestedTabId(request, sender);
+    if (!validTabId(tabId)) return { ok: false, error: '无效标签页' };
+    await ready;
+    const pageUrl = await trustedPageUrl(tabId);
+    return { ok: true, pageUrl, candidates: candidateStore.get(tabId) };
+  }
   if (request.type === 'CLEAR') {
     const tabId = requestedTabId(request, sender);
     if (!validTabId(tabId)) return { ok: false, error: '无效标签页' };

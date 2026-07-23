@@ -6,7 +6,6 @@
   "permissions": [
     "storage",
     "tabs",
-    "scripting",
     "webRequest"
   ],
   "host_permissions": [
@@ -14,6 +13,14 @@
   ],
   "background": {
     "service_worker": "background.js"
+  },
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "网页视频下载器"
+  },
+  "options_ui": {
+    "page": "options.html",
+    "open_in_tab": true
   },
   "content_scripts": [
     {

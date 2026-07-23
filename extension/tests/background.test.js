@@ -132,6 +132,27 @@ function createHarness(options = {}) {
   };
 }
 
+test('popup bridge returns current page URL and candidates together', async () => {
+  const harness = createHarness();
+  const sender = { tab: { id: 91 }, frameId: 0, documentId: 'popup-bridge-document' };
+  await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://channels.weixin.qq.com/watch/bridge',
+  }, sender);
+  await harness.dispatch({
+    type: 'ADD_CANDIDATES',
+    pageUrl: 'https://channels.weixin.qq.com/watch/bridge',
+    candidates: [{ url: 'https://finder.video.qq.com/media.mp4', title: '视频号视频' }],
+  }, sender);
+
+  const result = await harness.dispatch({ type: 'GET_TAB_MEDIA', tabId: 91 });
+
+  assert.equal(result.ok, true);
+  assert.equal(result.pageUrl, 'https://channels.weixin.qq.com/watch/bridge');
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].pageUrl, result.pageUrl);
+});
+
 test('background detects an extensionless WeChat CDN response from Content-Type per tab', async () => {
   const harness = createHarness();
   harness.hooks.before.listeners[0]({

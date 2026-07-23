@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>网页视频下载器设置</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="options-page">
+  <main class="options-shell">
+    <header class="options-header">
+      <p class="eyebrow">网页视频下载器</p>
+      <h1>连接本地助手</h1>
+      <p>密钥用于确认只有你的浏览器扩展可以操作本地下载。</p>
+    </header>
+
+    <section class="settings-card" aria-labelledby="pairing-title">
+      <div class="settings-heading">
+        <h2 id="pairing-title">配对密钥</h2>
+        <span class="local-address">127.0.0.1:17432</span>
+      </div>
+      <form id="pairing-form">
+        <label for="token-input">从本地助手配置中复制密钥</label>
+        <div class="token-row">
+          <input id="token-input" name="token" type="password" autocomplete="off" spellcheck="false" required>
+          <button id="toggle-token" class="button button-secondary" type="button" aria-pressed="false">显示</button>
+        </div>
+        <div class="settings-actions">
+          <button class="button button-primary" type="submit">保存密钥</button>
+          <button id="test-button" class="button button-secondary" type="button">测试连接</button>
+        </div>
+      </form>
+      <p id="settings-status" class="settings-status" aria-live="polite"></p>
+    </section>
+
+    <section class="privacy-card" aria-labelledby="privacy-title">
+      <h2 id="privacy-title">隐私与安全</h2>
+      <ul>
+        <li>配对密钥只保存在这台 Mac 的 Chrome 本地存储中，不同步到其他设备。</li>
+        <li>扩展不读取或导出 Cookie，不绕过登录、付费或 DRM 保护。</li>
+        <li>本地助手地址固定为本机回环端口，无法改为远程服务器。</li>
+      </ul>
+    </section>
+  </main>
+
+  <script src="lib/helper-client.js"></script>
+  <script src="options.js"></script>
+</body>
+</html>
