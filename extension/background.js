@@ -10,6 +10,7 @@ const documentStates = new Map();
 const navigationInProgress = new Set();
 const tabPageUrls = new Map();
 const authoritativeKinds = new Map();
+const requestContexts = new Map();
 let persistenceQueue = Promise.resolve();
 let sessionPersistenceEnabled = true;
 
@@ -43,6 +44,44 @@ function explicitMediaMime(contentType) {
     || mime === 'application/vnd.apple.mpegurl'
     || mime === 'application/x-mpegurl'
     || mime === 'audio/mpegurl';
+}
+
+function rememberRequestContext(details) {
+  if (!details || !validTabId(details.tabId) || !validDocumentId(details.documentId)
+    || typeof details.requestId !== 'string' || !details.requestId) return;
+  const state = documentState(details.tabId);
+  if (state.blocked.has(details.documentId)
+    || (details.frameId === 0 && state.top && state.top !== details.documentId)) return;
+  requestContexts.delete(details.requestId);
+  requestContexts.set(details.requestId, {
+    tabId: details.tabId,
+    generation: state.generation,
+    documentId: details.documentId,
+  });
+  while (requestContexts.size > 1000) {
+    requestContexts.delete(requestContexts.keys().next().value);
+  }
+}
+
+function consumeCurrentRequestContext(details) {
+  if (!details || typeof details.requestId !== 'string' || !details.requestId) return true;
+  const context = requestContexts.get(details.requestId);
+  if (!context) return true;
+  requestContexts.delete(details.requestId);
+  const state = documentState(details.tabId);
+  return context.tabId === details.tabId
+    && context.generation === state.generation
+    && context.documentId === details.documentId;
+}
+
+function forgetRequestContext(details) {
+  if (details && typeof details.requestId === 'string') requestContexts.delete(details.requestId);
+}
+
+function forgetTabRequestContexts(tabId) {
+  for (const [requestId, context] of requestContexts) {
+    if (context.tabId === tabId) requestContexts.delete(requestId);
+  }
 }
 
 function resetDocumentState(tabId, staleDocumentId, generation) {
@@ -142,7 +181,12 @@ async function hydrateStore() {
   for (const [rawTabId, candidates] of Object.entries(saved)) {
     const tabId = Number(rawTabId);
     if (validTabId(tabId) && Array.isArray(candidates)) {
-      candidateStore.replace(tabId, candidates);
+      const restored = candidateStore.replace(tabId, candidates);
+      for (const candidate of restored) {
+        if (explicitMediaMime(candidate.contentType)) {
+          rememberAuthoritativeKind(tabId, candidate.url, candidate.kind);
+        }
+      }
     }
   }
 }
@@ -184,7 +228,10 @@ function persistStore() {
   persistenceQueue = persistenceQueue.then(async function writeLatestSnapshot() {
     if (!sessionPersistenceEnabled) return;
     const succeeded = await writeSessionSnapshot(session, persistedSnapshot());
-    if (!succeeded) sessionPersistenceEnabled = false;
+    if (!succeeded) {
+      sessionPersistenceEnabled = false;
+      await invokeChromeMethod(session, 'remove', STORAGE_KEY);
+    }
   });
   return persistenceQueue;
 }
@@ -211,6 +258,14 @@ async function removeCandidateUrl(tabId, url) {
   await persistStore();
 }
 
+async function replaceCandidateUrl(tabId, candidate, generation, details) {
+  await ready;
+  if (documentState(tabId).generation !== generation || !belongsToCurrentRequest(details)) return false;
+  candidateStore.replaceUrl(tabId, candidate);
+  await persistStore();
+  return true;
+}
+
 function responseContentType(headers) {
   if (!Array.isArray(headers)) return '';
   const header = headers.find((item) => item && typeof item.name === 'string'
@@ -227,7 +282,8 @@ async function trustedPageUrl(tabId) {
   return pageUrl || null;
 }
 
-async function recordRequest(details, contentType) {
+async function recordRequest(details, contentType, phase) {
+  if (phase === 'headers' && !consumeCurrentRequestContext(details)) return;
   if (!belongsToCurrentRequest(details)) return;
   const generation = documentState(details.tabId).generation;
   const pageUrl = await trustedPageUrl(details.tabId);
@@ -246,7 +302,8 @@ async function recordRequest(details, contentType) {
     }
     const suffixKind = media.inferMediaKind(details.url, '');
     if (contentType && suffixKind !== 'unknown' && suffixKind !== candidate.kind) {
-      await removeCandidateUrl(details.tabId, details.url);
+      await replaceCandidateUrl(details.tabId, candidate, generation, details);
+      return;
     }
     await addCandidates(details.tabId, [candidate]);
     return;
@@ -289,17 +346,28 @@ chrome.webRequest.onBeforeRequest.addListener(
       beginNavigation(details);
       return;
     }
-    void recordRequest(details, '');
+    rememberRequestContext(details);
+    void recordRequest(details, '', 'before');
   },
   { urls: ['<all_urls>'], types: ['main_frame', 'media', 'xmlhttprequest'] },
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
   function onHeadersReceived(details) {
-    void recordRequest(details, responseContentType(details.responseHeaders));
+    void recordRequest(details, responseContentType(details.responseHeaders), 'headers');
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest'] },
   ['responseHeaders'],
+);
+
+chrome.webRequest.onCompleted.addListener(
+  forgetRequestContext,
+  { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest'] },
+);
+
+chrome.webRequest.onErrorOccurred.addListener(
+  forgetRequestContext,
+  { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest'] },
 );
 
 chrome.tabs.onUpdated.addListener(function onTabUpdated(tabId, changeInfo, tab) {
@@ -341,6 +409,7 @@ chrome.tabs.onRemoved.addListener(function onTabRemoved(tabId) {
   documentStates.delete(tabId);
   tabPageUrls.delete(tabId);
   authoritativeKinds.delete(tabId);
+  forgetTabRequestContexts(tabId);
   void clearTab(tabId);
 });
 
@@ -372,6 +441,10 @@ async function handleMessage(request, sender) {
     if (!validTabId(tabId) || !Array.isArray(request.candidates)) {
       return { ok: false, error: '无效媒体列表' };
     }
+    if (!claimDocument(tabId, sender, request.pageUrl)) {
+      return { ok: false, error: '页面已导航' };
+    }
+    await ready;
     if (!claimDocument(tabId, sender, request.pageUrl)) {
       return { ok: false, error: '页面已导航' };
     }

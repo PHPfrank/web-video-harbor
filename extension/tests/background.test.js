@@ -22,13 +22,20 @@ function createHarness(options = {}) {
   const hooks = {
     before: eventHook(),
     headers: eventHook(),
+    completed: eventHook(),
+    requestError: eventHook(),
     updated: eventHook(),
     removed: eventHook(),
     message: eventHook(),
   };
   const storageState = {};
   const pendingTabGets = [];
+  const pendingStorageSets = [];
   let storageSetCalls = 0;
+  let storageRemoveCalls = 0;
+  if (options.initialStorageCandidates) {
+    storageState.videoGrabberCandidatesV1 = options.initialStorageCandidates;
+  }
   let now = 10_000;
   class FakeDate extends Date {
     static now() { return now; }
@@ -40,6 +47,10 @@ function createHarness(options = {}) {
         get(key, callback) { callback({ [key]: storageState[key] }); },
         set(values, callback) {
           storageSetCalls += 1;
+          if (options.deferStorageSet) {
+            pendingStorageSets.push({ values, callback });
+            return;
+          }
           if (options.storageSetFails) {
             chrome.runtime.lastError = { message: 'QUOTA_BYTES quota exceeded' };
             callback();
@@ -49,11 +60,18 @@ function createHarness(options = {}) {
           Object.assign(storageState, values);
           callback();
         },
+        remove(key, callback) {
+          storageRemoveCalls += 1;
+          delete storageState[key];
+          callback();
+        },
       },
     },
     webRequest: {
       onBeforeRequest: hooks.before,
       onHeadersReceived: hooks.headers,
+      onCompleted: hooks.completed,
+      onErrorOccurred: hooks.requestError,
     },
     tabs: {
       onUpdated: hooks.updated,
@@ -97,6 +115,14 @@ function createHarness(options = {}) {
       pending.callback(url ? { id: tabId, url } : undefined);
     },
     storageSetCalls() { return storageSetCalls; },
+    storageRemoveCalls() { return storageRemoveCalls; },
+    pendingStorageSetCount() { return pendingStorageSets.length; },
+    resolveStorageSet() {
+      assert.ok(pendingStorageSets.length, 'missing pending storage.session.set');
+      const pending = pendingStorageSets.shift();
+      Object.assign(storageState, pending.values);
+      pending.callback();
+    },
   };
 }
 
@@ -451,5 +477,107 @@ test('storage.session quota failure disables repeated persistence attempts but k
   }
 
   assert.equal(harness.storageSetCalls(), 1);
+  assert.equal(harness.storageRemoveCalls(), 1);
   assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 61 })).candidates.length, 2);
+});
+
+test('MIME replacement cannot re-add an old response when navigation occurs during persistence', async () => {
+  const harness = createHarness({
+    deferStorageSet: true,
+    tabUrls: { 71: 'https://example.com/old' },
+  });
+  const request = {
+    tabId: 71,
+    frameId: 0,
+    documentId: 'old-document',
+    requestId: 'media-71',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/stream.mp4',
+  };
+  harness.hooks.before.listeners[0](request);
+  await harness.flush();
+  harness.resolveStorageSet();
+  await harness.flush();
+
+  harness.hooks.headers.listeners[0]({
+    ...request,
+    responseHeaders: [{ name: 'content-type', value: 'application/vnd.apple.mpegurl' }],
+  });
+  await harness.flush();
+  assert.equal(harness.pendingStorageSetCount(), 1);
+  harness.hooks.before.listeners[0]({
+    tabId: 71,
+    frameId: 0,
+    documentId: 'old-document',
+    requestId: 'navigation-71',
+    type: 'main_frame',
+    url: 'https://example.com/new',
+    timeStamp: 20_000,
+  });
+  harness.resolveStorageSet();
+  await harness.flush();
+  while (harness.pendingStorageSetCount()) {
+    harness.resolveStorageSet();
+    await harness.flush();
+  }
+
+  const claim = await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://example.com/new',
+  }, { tab: { id: 71 }, frameId: 0, documentId: 'new-document' });
+  assert.equal(claim.ok, true);
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 71 })).candidates.length, 0);
+});
+
+test('extensionless response started before SPA navigation cannot attach to the new route', async () => {
+  const harness = createHarness({ tabUrls: { 72: 'https://example.com/old-route' } });
+  const request = {
+    tabId: 72,
+    frameId: 0,
+    documentId: 'spa-document',
+    requestId: 'media-72',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/extensionless?id=72',
+  };
+  harness.hooks.before.listeners[0](request);
+  await harness.flush();
+  harness.hooks.updated.listeners[0](
+    72,
+    { url: 'https://example.com/new-route' },
+    { id: 72, url: 'https://example.com/new-route' },
+  );
+  await harness.flush();
+  harness.hooks.headers.listeners[0]({
+    ...request,
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 72 })).candidates.length, 0);
+});
+
+test('hydrate rebuilds authoritative MIME state before accepting content candidates', async () => {
+  const pageUrl = 'https://example.com/restored';
+  const harness = createHarness({
+    initialStorageCandidates: {
+      73: [{
+        url: 'https://cdn.example/stream.mp4',
+        pageUrl,
+        contentType: 'application/vnd.apple.mpegurl',
+        source: 'webRequest',
+      }],
+    },
+  });
+  const result = await harness.dispatch({
+    type: 'ADD_CANDIDATES',
+    pageUrl,
+    candidates: [{
+      url: 'https://cdn.example/stream.mp4',
+      pageUrl,
+      source: 'performance',
+    }],
+  }, { tab: { id: 73 }, frameId: 0, documentId: 'restored-document' });
+
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].kind, 'hls');
 });

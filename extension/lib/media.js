@@ -179,6 +179,23 @@
         else tabs.delete(tabId);
         return cloneCandidates(filtered);
       },
+      replaceUrl(tabId, rawCandidate) {
+        if (!validTabId(tabId)) return [];
+        let replacement = normalizeCandidate(rawCandidate);
+        if (!replacement) return cloneCandidates(tabs.get(tabId) || []);
+        const current = tabs.get(tabId) || [];
+        const index = current.findIndex((candidate) => candidate.url === replacement.url);
+        for (const candidate of current) {
+          if (candidate.url === replacement.url) {
+            replacement = mergeCandidateMetadata(replacement, candidate);
+          }
+        }
+        const filtered = current.filter((candidate) => candidate.url !== replacement.url);
+        filtered.splice(index < 0 ? filtered.length : index, 0, replacement);
+        const limited = filtered.slice(0, perTab);
+        touch(tabId, limited);
+        return cloneCandidates(limited);
+      },
       replace(tabId, candidates) {
         if (!validTabId(tabId)) return [];
         const normalized = mergeCandidates(candidates).slice(0, perTab);

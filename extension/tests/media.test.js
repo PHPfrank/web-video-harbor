@@ -179,3 +179,14 @@ test('candidate store caps candidates and returns defensive copies', () => {
   result[0].title = 'mutated';
   assert.equal(store.get(1)[0].title, '未命名视频');
 });
+
+test('candidate store atomically replaces every kind for the same canonical URL', () => {
+  const store = createCandidateStore();
+  store.add(1, [{ url: 'https://cdn.example/stream.mp4', source: 'performance' }]);
+  store.replaceUrl(1, {
+    url: 'https://cdn.example/stream.mp4',
+    contentType: 'application/vnd.apple.mpegurl',
+    source: 'webRequest',
+  });
+  assert.deepEqual(store.get(1).map((item) => item.kind), ['hls']);
+});
