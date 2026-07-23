@@ -464,7 +464,7 @@ func isURLTerminator(value byte) bool {
 	if value <= ' ' || value == 0x7f {
 		return true
 	}
-	return strings.ContainsRune("'\"`<>{}", rune(value))
+	return strings.ContainsRune("\"`<>{}", rune(value))
 }
 
 func syncAndClosePart(path string) error {

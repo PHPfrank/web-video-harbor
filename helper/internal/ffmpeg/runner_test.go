@@ -431,6 +431,55 @@ func TestRunnerRedactsIPv6AndParenthesizedURLsFromStderr(t *testing.T) {
 	}
 }
 
+func TestRunnerRedactsApostropheURLsFromStderr(t *testing.T) {
+	dir := t.TempDir()
+	ordinaryURL := "https://media.example/video's.ts?token=ordinary-secret"
+	crossWriteURL := "https://media.example/cross'chunk.ts?token=cross-secret"
+	mixedCaseURL := "HtTpS://media.example/Mix'ed.ts?token=mixed-secret"
+	runner, err := newRunner(internalConfig{
+		outputDir:  dir,
+		resolver:   publicResolver{},
+		ffmpegPath: "ffmpeg-test",
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{
+				onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("partial"), 0o600) },
+				onWait: func(writer io.Writer) {
+					_, _ = io.WriteString(writer, "opening '"+ordinaryURL+"' for reading\n")
+					_, _ = io.WriteString(writer, "cross-write: https://media.example/cross'")
+					_, _ = io.WriteString(writer, "chunk.ts?token=cross-secret rejected\n")
+					_, _ = io.WriteString(writer, "mixed-case: "+mixedCaseURL+" rejected\n")
+				},
+				waitErr: errors.New("exit status 1"),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/top.m3u8", Title: "video", Manifest: []byte(validMediaManifest)})
+	assertCode(t, err, CodeProcess)
+	var runErr *Error
+	if !errors.As(err, &runErr) {
+		t.Fatalf("Run() error type = %T", err)
+	}
+	for _, leaked := range []string{
+		ordinaryURL, crossWriteURL, mixedCaseURL,
+		"ordinary-secret", "cross-secret", "mixed-secret",
+	} {
+		if strings.Contains(runErr.Stderr, leaked) {
+			t.Errorf("stderr leaked %q: %q", leaked, runErr.Stderr)
+		}
+	}
+	for _, contextText := range []string{"opening", "for reading", "cross-write", "mixed-case", "rejected"} {
+		if !strings.Contains(runErr.Stderr, contextText) {
+			t.Errorf("stderr lost non-sensitive context %q: %q", contextText, runErr.Stderr)
+		}
+	}
+	if len(runErr.Stderr) > maxStderrBytes {
+		t.Fatalf("stderr bytes = %d, want <= %d", len(runErr.Stderr), maxStderrBytes)
+	}
+}
+
 func TestRunnerPublishesOnlyAfterSuccessfulWait(t *testing.T) {
 	dir := t.TempDir()
 	var args []string
