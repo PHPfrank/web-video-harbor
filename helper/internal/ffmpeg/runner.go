@@ -26,7 +26,7 @@ const (
 	maxStderrBytes       = 8 * 1024
 	maxProgressTokenSize = 256 * 1024
 	maxFilenameBytes     = 255
-	protocolWhitelist    = "http,https,tcp,tls,crypto"
+	protocolWhitelist    = "http,https,tcp,tls"
 )
 
 // Code identifies a stable runner failure category.
@@ -220,7 +220,7 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if err != nil {
 		return "", &Error{Code: CodeProcess, Message: "无法读取 FFmpeg 进度", cause: errors.New("create FFmpeg stdout pipe failed")}
 	}
-	stderr := &tailBuffer{limit: maxStderrBytes}
+	stderr := newRedactingTailBuffer(maxStderrBytes)
 	cmd.SetStderr(stderr)
 	cmd.SetEnv(sanitizedEnvironment(os.Environ()))
 	if err := cmd.Start(); err != nil {
@@ -242,16 +242,19 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if ctx.Err() != nil {
 		return "", canceledError(ctx.Err())
 	}
+	if parseErr != nil {
+		return "", &Error{Code: CodeProgress, Message: "无法读取 FFmpeg 进度", cause: errors.Join(parseErr, closeErr)}
+	}
 	if waitErr != nil {
 		return "", &Error{
 			Code:    CodeProcess,
 			Message: "FFmpeg 合并视频失败",
-			Stderr:  redactStderr(stderr.String(), request.SourceURL),
+			Stderr:  stderr.String(),
 			cause:   errors.New("FFmpeg exited unsuccessfully"),
 		}
 	}
-	if parseErr != nil || closeErr != nil {
-		return "", &Error{Code: CodeProgress, Message: "无法读取 FFmpeg 进度", cause: errors.Join(parseErr, closeErr)}
+	if closeErr != nil {
+		return "", &Error{Code: CodeProgress, Message: "无法读取 FFmpeg 进度", cause: closeErr}
 	}
 	if err := syncAndClosePart(partPath); err != nil {
 		return "", outputError("无法保存合并后的视频", err)
@@ -333,7 +336,15 @@ func parseProgress(reader io.Reader, callback ProgressFunc) error {
 			hasOutTimeUS = false
 		}
 	}
-	return scanner.Err()
+	parseErr := scanner.Err()
+	if parseErr == nil {
+		return nil
+	}
+	closer, ok := reader.(io.Closer)
+	if !ok {
+		return parseErr
+	}
+	return errors.Join(parseErr, normalizeCloseError(closer.Close()))
 }
 
 type tailBuffer struct {
@@ -361,14 +372,91 @@ func (b *tailBuffer) Write(data []byte) (int, error) {
 
 func (b *tailBuffer) String() string { return string(b.data) }
 
-func redactStderr(stderr, sourceURL string) string {
-	if sourceURL != "" {
-		stderr = strings.ReplaceAll(stderr, sourceURL, "[视频地址]")
+// redactingTailBuffer removes every HTTP(S) URL before storing a bounded tail.
+// It is a small streaming state machine so URLs and their prefixes may span
+// arbitrary Write calls without requiring an unbounded pre-redaction buffer.
+type redactingTailBuffer struct {
+	tail    tailBuffer
+	pending []byte
+	inURL   bool
+}
+
+func newRedactingTailBuffer(limit int) *redactingTailBuffer {
+	return &redactingTailBuffer{tail: tailBuffer{limit: limit}}
+}
+
+func (b *redactingTailBuffer) Write(data []byte) (int, error) {
+	for _, value := range data {
+		b.consume(value)
 	}
-	if len(stderr) > maxStderrBytes {
-		stderr = stderr[len(stderr)-maxStderrBytes:]
+	return len(data), nil
+}
+
+func (b *redactingTailBuffer) consume(value byte) {
+	if b.inURL {
+		if isURLTerminator(value) {
+			b.inURL = false
+			b.consume(value)
+		}
+		return
 	}
-	return stderr
+
+	b.pending = append(b.pending, value)
+	for len(b.pending) > 0 {
+		matched, prefix := matchesURLPrefix(b.pending)
+		if matched {
+			_, _ = b.tail.Write([]byte("[视频地址]"))
+			b.pending = b.pending[:0]
+			b.inURL = true
+			return
+		}
+		if prefix {
+			return
+		}
+		_, _ = b.tail.Write(b.pending[:1])
+		b.pending = b.pending[1:]
+	}
+}
+
+func (b *redactingTailBuffer) String() string {
+	copyOfTail := tailBuffer{limit: b.tail.limit, data: append([]byte(nil), b.tail.data...)}
+	if !b.inURL && len(b.pending) > 0 {
+		_, _ = copyOfTail.Write(b.pending)
+	}
+	return copyOfTail.String()
+}
+
+func matchesURLPrefix(candidate []byte) (matched, prefix bool) {
+	for _, scheme := range []string{"http://", "https://"} {
+		if len(candidate) > len(scheme) {
+			continue
+		}
+		matches := true
+		for index, value := range candidate {
+			if asciiLower(value) != scheme[index] {
+				matches = false
+				break
+			}
+		}
+		if matches {
+			return len(candidate) == len(scheme), true
+		}
+	}
+	return false, false
+}
+
+func asciiLower(value byte) byte {
+	if value >= 'A' && value <= 'Z' {
+		return value + ('a' - 'A')
+	}
+	return value
+}
+
+func isURLTerminator(value byte) bool {
+	if value <= ' ' || value == 0x7f {
+		return true
+	}
+	return strings.ContainsRune("'\"`<>[]{}()", rune(value))
 }
 
 func syncAndClosePart(path string) error {

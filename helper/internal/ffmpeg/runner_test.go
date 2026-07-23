@@ -30,6 +30,7 @@ type fakeCommand struct {
 	env      []string
 	startErr error
 	waitErr  error
+	waitFunc func() error
 	onStart  func() error
 	onWait   func(io.Writer)
 }
@@ -67,6 +68,9 @@ func (c *fakeCommand) Start() error {
 func (c *fakeCommand) Wait() error {
 	if c.onWait != nil {
 		c.onWait(c.stderr)
+	}
+	if c.waitFunc != nil {
+		return c.waitFunc()
 	}
 	return c.waitErr
 }
@@ -114,7 +118,7 @@ func TestRunnerBuildsExplicitSafeArguments(t *testing.T) {
 		t.Fatalf("command name = %q", name)
 	}
 	want := []string{
-		"-protocol_whitelist", "http,https,tcp,tls,crypto",
+		"-protocol_whitelist", "http,https,tcp,tls",
 		"-nostdin", "-y", "-i", source,
 		"-map", "0", "-c", "copy", "-movflags", "+faststart",
 		"-progress", "pipe:1", "-nostats", args[len(args)-1],
@@ -124,6 +128,11 @@ func TestRunnerBuildsExplicitSafeArguments(t *testing.T) {
 	}
 	if args[5] != source {
 		t.Fatalf("source URL was split or changed: %q", args[5])
+	}
+	for _, forbiddenProtocol := range []string{"crypto", "file", "data"} {
+		if strings.Contains(args[1], forbiddenProtocol) {
+			t.Fatalf("protocol whitelist contains forbidden protocol %q: %q", forbiddenProtocol, args[1])
+		}
 	}
 	joined := strings.Join(args, " ")
 	for _, forbidden := range []string{"-headers", "-cookies", "Cookie:", "Authorization:"} {
@@ -317,6 +326,59 @@ func TestRunnerBoundsAndRedactsStderrOnProcessFailure(t *testing.T) {
 		t.Fatalf("stderr did not retain the tail: %q", runErr.Stderr)
 	}
 	assertNoStagingFiles(t, dir)
+}
+
+func TestRunnerRedactsSignedChildAndSegmentURLsFromStderr(t *testing.T) {
+	dir := t.TempDir()
+	source := "https://cdn.example/top.m3u8?signature=top-secret"
+	child := "https://child.example/quality.m3u8?token=child-secret&expires=999"
+	segment := "HTTPS://media.example/segment-001.ts?signature=segment-secret"
+	key := "http://keys.example/key.bin?auth=key-secret"
+	runner, err := newRunner(internalConfig{
+		outputDir:  dir,
+		resolver:   publicResolver{},
+		ffmpegPath: "ffmpeg-test",
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{
+				onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("partial"), 0o600) },
+				onWait: func(writer io.Writer) {
+					_, _ = io.WriteString(writer, "opening 'ht")
+					_, _ = io.WriteString(writer, strings.TrimPrefix(child, "ht")+"' for reading\n")
+					_, _ = io.WriteString(writer, "segment failed: "+segment+" retrying\n")
+					_, _ = io.WriteString(writer, "key request: "+key+" denied\n")
+				},
+				waitErr: errors.New("exit status 1"),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Run(context.Background(), Request{SourceURL: source, Title: "video", Manifest: []byte(validMediaManifest)})
+	assertCode(t, err, CodeProcess)
+	var runErr *Error
+	if !errors.As(err, &runErr) {
+		t.Fatalf("Run() error type = %T", err)
+	}
+	for _, leaked := range []string{child, segment, key, "child-secret", "segment-secret", "key-secret"} {
+		if strings.Contains(runErr.Stderr, leaked) {
+			t.Errorf("stderr leaked %q: %q", leaked, runErr.Stderr)
+		}
+	}
+	lowerStderr := strings.ToLower(runErr.Stderr)
+	for _, scheme := range []string{"http://", "https://"} {
+		if strings.Contains(lowerStderr, scheme) {
+			t.Errorf("stderr leaked URL scheme %q: %q", scheme, runErr.Stderr)
+		}
+	}
+	for _, contextText := range []string{"opening", "for reading", "segment failed", "retrying", "key request", "denied"} {
+		if !strings.Contains(runErr.Stderr, contextText) {
+			t.Errorf("stderr lost non-sensitive context %q: %q", contextText, runErr.Stderr)
+		}
+	}
+	if len(runErr.Stderr) > maxStderrBytes {
+		t.Fatalf("stderr bytes = %d, want <= %d", len(runErr.Stderr), maxStderrBytes)
+	}
 }
 
 func TestRunnerPublishesOnlyAfterSuccessfulWait(t *testing.T) {
@@ -591,6 +653,66 @@ func TestRunnerClassifiesPipeStartAndCloseFailures(t *testing.T) {
 			assertCode(t, err, tt.want)
 			assertNoStagingFiles(t, runner.outputDir)
 		})
+	}
+}
+
+func TestRunnerClosesProgressPipeOnOversizedToken(t *testing.T) {
+	reader, writer := io.Pipe()
+	writerStarted := make(chan struct{})
+	writerDone := make(chan struct{})
+	runner := newTestRunner(t, func(_ context.Context, _ string, _ ...string) command {
+		return &fakeCommand{
+			stdout: reader,
+			onStart: func() error {
+				go func() {
+					defer close(writerDone)
+					defer writer.Close()
+					close(writerStarted)
+					_, _ = io.WriteString(writer, strings.Repeat("x", maxProgressTokenSize*2))
+				}()
+				return nil
+			},
+			waitFunc: func() error {
+				<-writerDone
+				return errors.New("child exited after progress pipe closed")
+			},
+		}
+	}, nil)
+
+	type result struct {
+		path string
+		err  error
+	}
+	resultCh := make(chan result, 1)
+	go func() {
+		path, err := runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/video.m3u8", Title: "video", Manifest: []byte(validMediaManifest)})
+		resultCh <- result{path: path, err: err}
+	}()
+	<-writerStarted
+
+	timer := time.NewTimer(2 * time.Second)
+	defer timer.Stop()
+	select {
+	case got := <-resultCh:
+		assertCode(t, got.err, CodeProgress)
+		if got.path != "" {
+			t.Fatalf("Run() path = %q after progress failure", got.path)
+		}
+		select {
+		case <-writerDone:
+		default:
+			t.Fatal("Run() returned before the child writer was released")
+		}
+		assertNoStagingFiles(t, runner.outputDir)
+	case <-timer.C:
+		_ = reader.CloseWithError(errors.New("test timeout cleanup"))
+		_ = writer.Close()
+		select {
+		case <-resultCh:
+		case <-time.After(2 * time.Second):
+			t.Fatal("Run() remained blocked after forced pipe cleanup")
+		}
+		t.Fatal("Run() blocked because an oversized progress token did not close or drain the pipe")
 	}
 }
 
