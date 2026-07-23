@@ -88,6 +88,7 @@ type internalConfig struct {
 	ffmpegPath     string
 	onProgress     ProgressFunc
 	commandFactory commandFactory
+	progressParser progressParserFunc
 }
 
 // Runner starts an FFmpeg process for each Run call and serializes progress
@@ -98,6 +99,7 @@ type Runner struct {
 	ffmpegPath     string
 	onProgress     ProgressFunc
 	commandFactory commandFactory
+	progressParser progressParserFunc
 	progressMu     sync.Mutex
 }
 
@@ -131,12 +133,17 @@ func newRunner(config internalConfig) (*Runner, error) {
 	if factory == nil {
 		factory = productionCommand
 	}
+	parser := config.progressParser
+	if parser == nil {
+		parser = parseProgress
+	}
 	return &Runner{
 		outputDir:      absDir,
 		resolver:       config.resolver,
 		ffmpegPath:     ffmpegPath,
 		onProgress:     config.onProgress,
 		commandFactory: factory,
+		progressParser: parser,
 	}, nil
 }
 
@@ -149,6 +156,7 @@ type command interface {
 }
 
 type commandFactory func(context.Context, string, ...string) command
+type progressParserFunc func(io.Reader, ProgressFunc) error
 
 type execCommand struct{ cmd *exec.Cmd }
 
@@ -233,10 +241,10 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 
 	parseDone := make(chan error, 1)
 	go func() {
-		parseDone <- parseProgress(stdout, r.reportProgress)
+		parseDone <- r.progressParser(stdout, r.reportProgress)
 	}()
-	waitErr := cmd.Wait()
 	parseErr := <-parseDone
+	waitErr := cmd.Wait()
 	closeErr := normalizeCloseError(stdout.Close())
 
 	if ctx.Err() != nil {
@@ -456,7 +464,7 @@ func isURLTerminator(value byte) bool {
 	if value <= ' ' || value == 0x7f {
 		return true
 	}
-	return strings.ContainsRune("'\"`<>[]{}()", rune(value))
+	return strings.ContainsRune("'\"`<>{}", rune(value))
 }
 
 func syncAndClosePart(path string) error {

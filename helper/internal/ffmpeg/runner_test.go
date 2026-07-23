@@ -3,11 +3,13 @@ package ffmpeg
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
 	"path/filepath"
 	"reflect"
+	"runtime"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -16,6 +18,8 @@ import (
 )
 
 const validMediaManifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n"
+
+const helperProgressRecords = 20_000
 
 type publicResolver struct{}
 
@@ -381,6 +385,52 @@ func TestRunnerRedactsSignedChildAndSegmentURLsFromStderr(t *testing.T) {
 	}
 }
 
+func TestRunnerRedactsIPv6AndParenthesizedURLsFromStderr(t *testing.T) {
+	dir := t.TempDir()
+	ipv6URL := "https://[2001:db8::1]/segment.ts?token=ipv6-secret"
+	pathURL := "https://media.example/video_(draft).ts?token=path-secret"
+	queryURL := "https://media.example/segment.ts?token=abc(def)ghi&signature=query-secret"
+	runner, err := newRunner(internalConfig{
+		outputDir:  dir,
+		resolver:   publicResolver{},
+		ffmpegPath: "ffmpeg-test",
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{
+				onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("partial"), 0o600) },
+				onWait: func(writer io.Writer) {
+					_, _ = io.WriteString(writer, "IPv6 child: HT")
+					_, _ = io.WriteString(writer, strings.TrimPrefix(ipv6URL, "ht"))
+					_, _ = io.WriteString(writer, " rejected\npath child: "+pathURL+" rejected\n")
+					_, _ = io.WriteString(writer, "query child: "+queryURL+" rejected\n")
+				},
+				waitErr: errors.New("exit status 1"),
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/top.m3u8", Title: "video", Manifest: []byte(validMediaManifest)})
+	assertCode(t, err, CodeProcess)
+	var runErr *Error
+	if !errors.As(err, &runErr) {
+		t.Fatalf("Run() error type = %T", err)
+	}
+	for _, leaked := range []string{
+		ipv6URL, pathURL, queryURL,
+		"2001:db8::1", "ipv6-secret", "path-secret", "query-secret", "abc(def)ghi",
+	} {
+		if strings.Contains(runErr.Stderr, leaked) {
+			t.Errorf("stderr leaked %q: %q", leaked, runErr.Stderr)
+		}
+	}
+	for _, contextText := range []string{"IPv6 child", "path child", "query child", "rejected"} {
+		if !strings.Contains(runErr.Stderr, contextText) {
+			t.Errorf("stderr lost non-sensitive context %q: %q", contextText, runErr.Stderr)
+		}
+	}
+}
+
 func TestRunnerPublishesOnlyAfterSuccessfulWait(t *testing.T) {
 	dir := t.TempDir()
 	var args []string
@@ -714,6 +764,97 @@ func TestRunnerClosesProgressPipeOnOversizedToken(t *testing.T) {
 		}
 		t.Fatal("Run() blocked because an oversized progress token did not close or drain the pipe")
 	}
+}
+
+func TestRunnerReadsAllProgressBeforeWaitingForRealProcess(t *testing.T) {
+	t.Setenv("GO_WANT_FFMPEG_PROGRESS_HELPER", "1")
+	t.Setenv("FFMPEG_PROGRESS_HELPER_BINARY", os.Args[0])
+	dir := t.TempDir()
+	wrapper := filepath.Join(dir, "ffmpeg-progress-helper")
+	script := "#!/bin/sh\nexec \"$FFMPEG_PROGRESS_HELPER_BINARY\" -test.run '^TestFFmpegProgressHelperProcess$' -- \"$@\"\n"
+	if err := os.WriteFile(wrapper, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	var records atomic.Int64
+	var done atomic.Bool
+	runner, err := newRunner(internalConfig{
+		outputDir:  dir,
+		resolver:   publicResolver{},
+		ffmpegPath: wrapper,
+		onProgress: func(progress Progress) {
+			records.Add(1)
+			if progress.Done {
+				done.Store(true)
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/video.m3u8", Title: "video", Manifest: []byte(validMediaManifest)})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	if got, want := records.Load(), int64(helperProgressRecords+1); got != want {
+		t.Fatalf("progress records = %d, want %d", got, want)
+	}
+	if !done.Load() {
+		t.Fatal("final progress=end record was not read")
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil || string(contents) != "video" {
+		t.Fatalf("published contents = %q, error = %v", contents, err)
+	}
+}
+
+func TestRunnerFinishesProgressParserBeforeWait(t *testing.T) {
+	previousProcs := runtime.GOMAXPROCS(1)
+	defer runtime.GOMAXPROCS(previousProcs)
+	events := make(chan string, 2)
+	runner, err := newRunner(internalConfig{
+		outputDir:  t.TempDir(),
+		resolver:   publicResolver{},
+		ffmpegPath: "ffmpeg-test",
+		progressParser: func(io.Reader, ProgressFunc) error {
+			events <- "parse"
+			return nil
+		},
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{
+				onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("video"), 0o600) },
+				waitFunc: func() error {
+					events <- "wait"
+					return nil
+				},
+			}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/video.m3u8", Title: "video", Manifest: []byte(validMediaManifest)}); err != nil {
+		t.Fatal(err)
+	}
+	first, second := <-events, <-events
+	if first != "parse" || second != "wait" {
+		t.Fatalf("runner events = [%s %s], want [parse wait]", first, second)
+	}
+}
+
+func TestFFmpegProgressHelperProcess(t *testing.T) {
+	if os.Getenv("GO_WANT_FFMPEG_PROGRESS_HELPER") != "1" {
+		return
+	}
+	partPath := os.Args[len(os.Args)-1]
+	if err := os.WriteFile(partPath, []byte("video"), 0o600); err != nil {
+		os.Exit(2)
+	}
+	for index := range helperProgressRecords {
+		_, _ = fmt.Fprintf(os.Stdout, "out_time_us=%d\ntotal_size=%d\nprogress=continue\n", index, index)
+	}
+	_, _ = fmt.Fprintln(os.Stdout, "progress=end")
+	os.Exit(0)
 }
 
 func assertCode(t *testing.T, err error, want Code) {
