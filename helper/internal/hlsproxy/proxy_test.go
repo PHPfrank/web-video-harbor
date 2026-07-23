@@ -12,12 +12,21 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"web-video-downloader/helper/internal/hls"
+	"web-video-downloader/helper/internal/safety"
 )
 
 type publicResolver struct{}
 
 func (publicResolver) LookupIPAddr(context.Context, string) ([]net.IPAddr, error) {
 	return []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}, nil
+}
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (f roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return f(request)
 }
 
 func TestProxyBindsLoopbackUsesOpaqueTokenAndLimitsMethods(t *testing.T) {
@@ -135,6 +144,45 @@ func TestProxyRewritesRelativeQueryAndURIAttributes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestProxyNormalizesParserAcceptedBOMInRootPlaylist(t *testing.T) {
+	tests := []struct {
+		name     string
+		manifest string
+	}{
+		{name: "attached to header", manifest: "\ufeff" + mediaPlaylist("segment.ts")},
+		{name: "standalone before blank lines", manifest: "\ufeff\n\n" + mediaPlaylist("segment.ts")},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy := startTestProxy(t, "https://cdn.example/root.m3u8", tt.manifest, nil)
+			body := getBody(t, proxy.URL())
+			if strings.Contains(body, "\ufeff") {
+				t.Fatalf("rewritten root retained BOM: %q", body)
+			}
+			if _, err := hls.ParseBytes(proxy.URL(), []byte(body)); err != nil {
+				t.Fatalf("rewritten root is not parser-valid: %v; body %q", err, body)
+			}
+		})
+	}
+}
+
+func TestProxyNormalizesParserAcceptedBOMInChildPlaylist(t *testing.T) {
+	upstream := httptest.NewServer(http.HandlerFunc(func(writer http.ResponseWriter, request *http.Request) {
+		_, _ = io.WriteString(writer, "\ufeff"+mediaPlaylist("segment.ts"))
+	}))
+	defer upstream.Close()
+	root := "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nchild.m3u8\n"
+	proxy := startTestProxy(t, upstream.URL+"/root.m3u8", root, upstream.Client())
+	childURL := firstProxyResource(t, getBody(t, proxy.URL()), proxy.URL())
+	body := getBody(t, childURL)
+	if strings.Contains(body, "\ufeff") {
+		t.Fatalf("rewritten child retained BOM: %q", body)
+	}
+	if _, err := hls.ParseBytes(childURL, []byte(body)); err != nil {
+		t.Fatalf("rewritten child is not parser-valid: %v; body %q", err, body)
 	}
 }
 
@@ -316,6 +364,50 @@ func TestProxyStripsRefererAcrossUpstreamRedirects(t *testing.T) {
 	headers := <-targetHeaders
 	if headers.Get("Referer") != "" || headers.Get("Cookie") != "" || headers.Get("Authorization") != "" {
 		t.Fatalf("redirect target received sensitive headers: %#v", headers)
+	}
+}
+
+func TestProxyClassifiesUpstreamRequestErrors(t *testing.T) {
+	tests := []struct {
+		name       string
+		requestErr error
+		want       Code
+		canceled   bool
+	}{
+		{
+			name:       "safety validation",
+			requestErr: &safety.ValidationError{Code: safety.CodeAddressNotPublic, Message: "地址不安全", Detail: "private-secret"},
+			want:       CodeUnsafeSource,
+		},
+		{name: "context canceled", requestErr: context.Canceled, want: Code("canceled"), canceled: true},
+		{name: "TLS failure", requestErr: errors.New("TLS handshake failed for signed-secret"), want: CodeUpstream},
+		{name: "timeout", requestErr: errors.New("upstream timeout for signed-secret"), want: CodeUpstream},
+		{name: "connect failure", requestErr: errors.New("connect failed for signed-secret"), want: CodeUpstream},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				return nil, tt.requestErr
+			})}
+			proxy := startTestProxy(t, "https://cdn.example/root.m3u8", mediaPlaylist("segment.ts?source-secret"), client)
+			segmentURL := firstProxyResource(t, getBody(t, proxy.URL()), proxy.URL())
+			response, err := http.Get(segmentURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			_ = response.Body.Close()
+			if response.StatusCode != http.StatusBadGateway {
+				t.Fatalf("resource status = %d, want 502", response.StatusCode)
+			}
+			proxyErr := proxy.Err()
+			assertProxyCode(t, proxyErr, tt.want)
+			if errors.Is(proxyErr, context.Canceled) != tt.canceled {
+				t.Fatalf("errors.Is(context.Canceled) = %v, want %v", errors.Is(proxyErr, context.Canceled), tt.canceled)
+			}
+			if strings.Contains(proxyErr.Error(), "secret") {
+				t.Fatalf("proxy error leaked upstream detail: %v", proxyErr)
+			}
+		})
 	}
 }
 

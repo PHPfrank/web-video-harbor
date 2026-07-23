@@ -348,6 +348,8 @@ func mapProxyError(err error) error {
 		return &Error{Code: CodeEncrypted, Message: "不支持加密或 DRM 视频", cause: errors.New("HLS proxy rejected encrypted stream")}
 	case hlsproxy.CodeManifest, hlsproxy.CodeTooLarge:
 		return manifestError(errors.New("HLS proxy rejected invalid manifest"))
+	case hlsproxy.CodeCanceled:
+		return canceledError(context.Canceled)
 	default:
 		return &Error{Code: CodeProcess, Message: "安全视频代理失败", cause: errors.New("HLS proxy failed")}
 	}

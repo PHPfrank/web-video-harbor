@@ -287,6 +287,7 @@ func TestRunnerMapsProxyFailuresBeforeGenericFFmpegFailure(t *testing.T) {
 		{name: "encrypted", proxyCode: hlsproxy.CodeEncrypted, want: CodeEncrypted},
 		{name: "malformed", proxyCode: hlsproxy.CodeManifest, want: CodeManifest},
 		{name: "oversized", proxyCode: hlsproxy.CodeTooLarge, want: CodeManifest},
+		{name: "canceled", proxyCode: hlsproxy.Code("canceled"), want: CodeCanceled},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

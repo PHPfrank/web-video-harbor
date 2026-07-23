@@ -35,6 +35,7 @@ const (
 	CodeUpstream     Code = "upstream"
 	CodeTooLarge     Code = "playlist_too_large"
 	CodeLifecycle    Code = "lifecycle"
+	CodeCanceled     Code = "canceled"
 )
 
 type Error struct {
@@ -282,7 +283,15 @@ func (p *Proxy) serveResource(writer http.ResponseWriter, inbound *http.Request,
 	}
 	response, err := p.client.Do(request)
 	if err != nil {
-		p.fail(CodeUnsafeSource, "无法安全读取视频子资源", errors.New("safe upstream request failed"))
+		var validationErr *safety.ValidationError
+		switch {
+		case errors.Is(err, context.Canceled):
+			p.fail(CodeCanceled, "视频下载已取消", context.Canceled)
+		case errors.As(err, &validationErr):
+			p.fail(CodeUnsafeSource, "视频子资源地址不安全", errors.New("safe upstream request rejected target"))
+		default:
+			p.fail(CodeUpstream, "无法读取视频子资源", errors.New("upstream request failed"))
+		}
 		http.Error(writer, "bad gateway", http.StatusBadGateway)
 		return
 	}
@@ -370,6 +379,8 @@ func (p *Proxy) rewritePlaylist(manifestURL string, manifest []byte) ([]byte, er
 	lines := strings.Split(strings.ReplaceAll(string(manifest), "\r\n", "\n"), "\n")
 	pendingPlaylist := false
 	for index, line := range lines {
+		line = strings.TrimPrefix(line, "\ufeff")
+		lines[index] = line
 		trimmed := strings.TrimSpace(line)
 		if trimmed == "" {
 			continue
