@@ -114,6 +114,12 @@ function createHarness(options = {}) {
       const [pending] = pendingTabGets.splice(index, 1);
       pending.callback(url ? { id: tabId, url } : undefined);
     },
+    resolveTabGetAt(index, url) {
+      assert.ok(index >= 0 && index < pendingTabGets.length, `missing pending tabs.get at ${index}`);
+      const [pending] = pendingTabGets.splice(index, 1);
+      pending.callback(url ? { id: pending.tabId, url } : undefined);
+    },
+    pendingTabGetCount() { return pendingTabGets.length; },
     storageSetCalls() { return storageSetCalls; },
     storageRemoveCalls() { return storageRemoveCalls; },
     pendingStorageSetCount() { return pendingStorageSets.length; },
@@ -580,4 +586,60 @@ test('hydrate rebuilds authoritative MIME state before accepting content candida
 
   assert.equal(result.candidates.length, 1);
   assert.equal(result.candidates[0].kind, 'hls');
+});
+
+test('headers HLS result invalidates a slower before suffix inference for the same request', async () => {
+  const harness = createHarness({ deferTabGet: true });
+  const request = {
+    tabId: 81,
+    frameId: 0,
+    documentId: 'document-81',
+    requestId: 'request-81',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/stream.mp4',
+  };
+  harness.hooks.before.listeners[0](request);
+  await harness.flush();
+  harness.hooks.headers.listeners[0]({
+    ...request,
+    responseHeaders: [{ name: 'content-type', value: 'application/vnd.apple.mpegurl' }],
+  });
+  await harness.flush();
+  assert.equal(harness.pendingTabGetCount(), 2);
+
+  harness.resolveTabGetAt(1, 'https://example.com/watch');
+  await harness.flush();
+  harness.resolveTabGetAt(0, 'https://example.com/watch');
+  await harness.flush();
+
+  const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 81 });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].kind, 'hls');
+});
+
+test('headers non-media result invalidates a slower before suffix inference for the same request', async () => {
+  const harness = createHarness({ deferTabGet: true });
+  const request = {
+    tabId: 82,
+    frameId: 0,
+    documentId: 'document-82',
+    requestId: 'request-82',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/error.mp4',
+  };
+  harness.hooks.before.listeners[0](request);
+  await harness.flush();
+  harness.hooks.headers.listeners[0]({
+    ...request,
+    responseHeaders: [{ name: 'content-type', value: 'text/html' }],
+  });
+  await harness.flush();
+  assert.equal(harness.pendingTabGetCount(), 2);
+
+  harness.resolveTabGetAt(1, 'https://example.com/watch');
+  await harness.flush();
+  harness.resolveTabGetAt(0, 'https://example.com/watch');
+  await harness.flush();
+
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 82 })).candidates.length, 0);
 });

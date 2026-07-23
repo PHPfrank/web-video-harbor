@@ -13,6 +13,7 @@ const authoritativeKinds = new Map();
 const requestContexts = new Map();
 let persistenceQueue = Promise.resolve();
 let sessionPersistenceEnabled = true;
+let requestEpoch = 0;
 
 function validTabId(tabId) {
   return Number.isInteger(tabId) && tabId >= 0;
@@ -48,30 +49,62 @@ function explicitMediaMime(contentType) {
 
 function rememberRequestContext(details) {
   if (!details || !validTabId(details.tabId) || !validDocumentId(details.documentId)
-    || typeof details.requestId !== 'string' || !details.requestId) return;
+    || typeof details.requestId !== 'string' || !details.requestId) return null;
   const state = documentState(details.tabId);
   if (state.blocked.has(details.documentId)
-    || (details.frameId === 0 && state.top && state.top !== details.documentId)) return;
+    || (details.frameId === 0 && state.top && state.top !== details.documentId)) return null;
+  const epoch = ++requestEpoch;
   requestContexts.delete(details.requestId);
   requestContexts.set(details.requestId, {
     tabId: details.tabId,
     generation: state.generation,
     documentId: details.documentId,
+    phase: 'before',
+    epoch,
   });
   while (requestContexts.size > 1000) {
     requestContexts.delete(requestContexts.keys().next().value);
   }
+  return { requestId: details.requestId, epoch, phase: 'before' };
 }
 
-function consumeCurrentRequestContext(details) {
-  if (!details || typeof details.requestId !== 'string' || !details.requestId) return true;
-  const context = requestContexts.get(details.requestId);
-  if (!context) return true;
-  requestContexts.delete(details.requestId);
+function beginHeadersContext(details) {
+  if (!details || typeof details.requestId !== 'string' || !details.requestId) {
+    return { accepted: true, token: null };
+  }
   const state = documentState(details.tabId);
-  return context.tabId === details.tabId
+  let context = requestContexts.get(details.requestId);
+  const matches = !context || (context.tabId === details.tabId
     && context.generation === state.generation
-    && context.documentId === details.documentId;
+    && context.documentId === details.documentId);
+  const epoch = ++requestEpoch;
+  if (!context) {
+    context = {
+      tabId: details.tabId,
+      generation: state.generation,
+      documentId: details.documentId,
+    };
+    requestContexts.set(details.requestId, context);
+  }
+  context.phase = 'headers';
+  context.epoch = epoch;
+  return {
+    accepted: matches,
+    token: { requestId: details.requestId, epoch, phase: 'headers' },
+  };
+}
+
+function requestTokenMatches(token) {
+  if (!token) return true;
+  const context = requestContexts.get(token.requestId);
+  if (!context) return false;
+  return context.epoch === token.epoch
+    && context.phase === token.phase
+    && documentState(context.tabId).generation === context.generation;
+}
+
+function forgetRequestToken(token) {
+  if (token && requestTokenMatches(token)) requestContexts.delete(token.requestId);
 }
 
 function forgetRequestContext(details) {
@@ -251,17 +284,11 @@ async function clearTab(tabId) {
   await persistStore();
 }
 
-async function removeCandidateUrl(tabId, url) {
-  if (!validTabId(tabId)) return;
+async function commitNetworkMutation(tabId, generation, details, token, mutation) {
   await ready;
-  candidateStore.removeUrl(tabId, url);
-  await persistStore();
-}
-
-async function replaceCandidateUrl(tabId, candidate, generation, details) {
-  await ready;
-  if (documentState(tabId).generation !== generation || !belongsToCurrentRequest(details)) return false;
-  candidateStore.replaceUrl(tabId, candidate);
+  if (documentState(tabId).generation !== generation || !belongsToCurrentRequest(details)
+    || !requestTokenMatches(token)) return false;
+  mutation();
   await persistStore();
   return true;
 }
@@ -282,13 +309,12 @@ async function trustedPageUrl(tabId) {
   return pageUrl || null;
 }
 
-async function recordRequest(details, contentType, phase) {
-  if (phase === 'headers' && !consumeCurrentRequestContext(details)) return;
-  if (!belongsToCurrentRequest(details)) return;
+async function recordRequest(details, contentType, token) {
+  if (!belongsToCurrentRequest(details) || !requestTokenMatches(token)) return;
   const generation = documentState(details.tabId).generation;
   const pageUrl = await trustedPageUrl(details.tabId);
   if (!pageUrl || documentState(details.tabId).generation !== generation
-    || !belongsToCurrentRequest(details)) return;
+    || !belongsToCurrentRequest(details) || !requestTokenMatches(token)) return;
   tabPageUrls.set(details.tabId, pageUrl);
   const candidate = media.normalizeCandidate({
     url: details.url,
@@ -297,21 +323,22 @@ async function recordRequest(details, contentType, phase) {
     source: 'webRequest',
   });
   if (candidate) {
-    if (explicitMediaMime(contentType)) {
-      rememberAuthoritativeKind(details.tabId, candidate.url, candidate.kind);
-    }
+    const authoritative = explicitMediaMime(contentType);
     const suffixKind = media.inferMediaKind(details.url, '');
-    if (contentType && suffixKind !== 'unknown' && suffixKind !== candidate.kind) {
-      await replaceCandidateUrl(details.tabId, candidate, generation, details);
-      return;
-    }
-    await addCandidates(details.tabId, [candidate]);
+    const replace = contentType && suffixKind !== 'unknown' && suffixKind !== candidate.kind;
+    await commitNetworkMutation(details.tabId, generation, details, token, function commitCandidate() {
+      if (authoritative) rememberAuthoritativeKind(details.tabId, candidate.url, candidate.kind);
+      if (replace) candidateStore.replaceUrl(details.tabId, candidate);
+      else candidateStore.add(details.tabId, [candidate]);
+    });
     return;
   }
   const mime = typeof contentType === 'string' ? contentType.split(';', 1)[0].trim().toLowerCase() : '';
   const hadSuffixCandidate = media.inferMediaKind(details.url, '') !== 'unknown';
   if (mime && mime !== 'application/octet-stream' && hadSuffixCandidate) {
-    await removeCandidateUrl(details.tabId, details.url);
+    await commitNetworkMutation(details.tabId, generation, details, token, function rejectCandidate() {
+      candidateStore.removeUrl(details.tabId, details.url);
+    });
   }
 }
 
@@ -346,15 +373,21 @@ chrome.webRequest.onBeforeRequest.addListener(
       beginNavigation(details);
       return;
     }
-    rememberRequestContext(details);
-    void recordRequest(details, '', 'before');
+    const token = rememberRequestContext(details);
+    void recordRequest(details, '', token);
   },
   { urls: ['<all_urls>'], types: ['main_frame', 'media', 'xmlhttprequest'] },
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
   function onHeadersReceived(details) {
-    void recordRequest(details, responseContentType(details.responseHeaders), 'headers');
+    const headers = beginHeadersContext(details);
+    if (!headers.accepted) {
+      forgetRequestToken(headers.token);
+      return;
+    }
+    void recordRequest(details, responseContentType(details.responseHeaders), headers.token)
+      .finally(function headersFinished() { forgetRequestToken(headers.token); });
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest'] },
   ['responseHeaders'],
