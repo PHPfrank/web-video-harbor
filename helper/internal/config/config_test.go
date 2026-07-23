@@ -10,7 +10,7 @@ import (
 )
 
 func TestDefaultPathUsesHome(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 
 	got, err := DefaultPath()
@@ -24,7 +24,7 @@ func TestDefaultPathUsesHome(t *testing.T) {
 }
 
 func TestLoadFirstRunCreatesSecureDefaults(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "Library", "Application Support", "网页视频下载器", "config.json")
 
@@ -59,7 +59,7 @@ func TestLoadFirstRunCreatesSecureDefaults(t *testing.T) {
 }
 
 func TestLoadPreservesExistingToken(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "app", "config.json")
 
@@ -76,8 +76,77 @@ func TestLoadPreservesExistingToken(t *testing.T) {
 	}
 }
 
+func TestLoadFirstRunRejectsInsecureExistingConfigParent(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	parent := filepath.Join(home, "shared")
+	if err := os.Mkdir(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "config.json")
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "config parent permissions") {
+		t.Fatalf("Load() error = %v, want config parent permissions error", err)
+	}
+	if _, statErr := os.Lstat(path); !os.IsNotExist(statErr) {
+		t.Fatalf("config was created in insecure parent: %v", statErr)
+	}
+}
+
+func TestLoadFirstRunAcceptsExisting0700ConfigParent(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	parent := filepath.Join(home, "private")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(filepath.Join(parent, "config.json")); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadExistingRejectsInsecureOrSymlinkConfigParent(t *testing.T) {
+	t.Run("permissions", func(t *testing.T) {
+		home := privateTempDir(t)
+		t.Setenv("HOME", home)
+		parent := filepath.Join(home, "app")
+		path := filepath.Join(parent, "config.json")
+		writeConfig(t, path, Config{Address: DefaultAddress, Token: testToken(8), DownloadDir: filepath.Join(home, "downloads")}, 0o600)
+		if err := os.Chmod(parent, 0o755); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(path)
+		if err == nil || !strings.Contains(err.Error(), "config parent permissions") {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+
+	t.Run("symlink", func(t *testing.T) {
+		home := privateTempDir(t)
+		t.Setenv("HOME", home)
+		realParent := filepath.Join(home, "real")
+		realPath := filepath.Join(realParent, "config.json")
+		writeConfig(t, realPath, Config{Address: DefaultAddress, Token: testToken(9), DownloadDir: filepath.Join(home, "downloads")}, 0o600)
+		linkParent := filepath.Join(home, "linked")
+		if err := os.Symlink(realParent, linkParent); err != nil {
+			t.Fatal(err)
+		}
+		_, err := Load(filepath.Join(linkParent, "config.json"))
+		if err == nil || !strings.Contains(err.Error(), "config parent") || !strings.Contains(err.Error(), "symbolic link") {
+			t.Fatalf("Load() error = %v", err)
+		}
+	})
+}
+
 func TestLoadUsesConfiguredAddressAndDownloadDirectory(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "app", "config.json")
 	downloadDir := filepath.Join(home, "chosen", "videos")
@@ -116,7 +185,7 @@ func TestLoadRejectsUnsafeAddresses(t *testing.T) {
 	}
 	for _, address := range tests {
 		t.Run(address, func(t *testing.T) {
-			home := t.TempDir()
+			home := privateTempDir(t)
 			t.Setenv("HOME", home)
 			path := filepath.Join(home, "config.json")
 			writeConfig(t, path, Config{
@@ -134,7 +203,7 @@ func TestLoadRejectsUnsafeAddresses(t *testing.T) {
 }
 
 func TestLoadAcceptsIPv6Loopback(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "config.json")
 	writeConfig(t, path, Config{
@@ -149,7 +218,7 @@ func TestLoadAcceptsIPv6Loopback(t *testing.T) {
 }
 
 func TestLoadRefusesConfigSymlink(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	target := filepath.Join(home, "target.json")
 	writeConfig(t, target, Config{
@@ -169,7 +238,7 @@ func TestLoadRefusesConfigSymlink(t *testing.T) {
 }
 
 func TestLoadRejectsMalformedConfig(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "config.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
@@ -183,7 +252,7 @@ func TestLoadRejectsMalformedConfig(t *testing.T) {
 }
 
 func TestLoadRejectsOversizedConfig(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "config.json")
 	if err := os.WriteFile(path, []byte(strings.Repeat("x", maxConfigSize+1)), 0o600); err != nil {
@@ -197,7 +266,7 @@ func TestLoadRejectsOversizedConfig(t *testing.T) {
 }
 
 func TestLoadRejectsInsecureConfigPermissions(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "config.json")
 	writeConfig(t, path, Config{
@@ -213,7 +282,7 @@ func TestLoadRejectsInsecureConfigPermissions(t *testing.T) {
 }
 
 func TestLoadRejectsSymlinkDownloadDirectory(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	realDir := filepath.Join(home, "real-downloads")
 	if err := os.Mkdir(realDir, 0o700); err != nil {
@@ -237,7 +306,7 @@ func TestLoadRejectsSymlinkDownloadDirectory(t *testing.T) {
 }
 
 func TestLoadRejectsRelativeDownloadDirectory(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "config.json")
 	writeConfig(t, path, Config{
@@ -256,6 +325,9 @@ func writeConfig(t *testing.T, path string, cfg Config, mode os.FileMode) {
 	t.Helper()
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		t.Fatalf("create config parent: %v", err)
+	}
+	if err := os.Chmod(filepath.Dir(path), 0o700); err != nil {
+		t.Fatalf("chmod config parent: %v", err)
 	}
 	data, err := json.Marshal(cfg)
 	if err != nil {
@@ -282,4 +354,13 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("mode for %s = %04o, want %04o", path, got, want)
 	}
+}
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod private temp dir: %v", err)
+	}
+	return dir
 }

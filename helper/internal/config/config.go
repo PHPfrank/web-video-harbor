@@ -43,6 +43,9 @@ func Load(path string) (Config, error) {
 		return Config{}, errors.New("config path is empty")
 	}
 	path = filepath.Clean(path)
+	if err := validateExistingConfigParent(filepath.Dir(path)); err != nil {
+		return Config{}, err
+	}
 
 	info, err := os.Lstat(path)
 	switch {
@@ -194,13 +197,7 @@ func createConfigParent(path string) error {
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("config parent must not be a symbolic link")
-		}
-		if !info.IsDir() {
-			return errors.New("config parent is not a directory")
-		}
-		return nil
+		return validateConfigParentInfo(info)
 	case !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("inspect config parent: %w", err)
 	}
@@ -210,6 +207,30 @@ func createConfigParent(path string) error {
 	}
 	if err := os.Chmod(path, 0o700); err != nil {
 		return fmt.Errorf("secure config parent permissions: %w", err)
+	}
+	return nil
+}
+
+func validateExistingConfigParent(path string) error {
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect config parent: %w", err)
+	}
+	return validateConfigParentInfo(info)
+}
+
+func validateConfigParentInfo(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("config parent must not be a symbolic link")
+	}
+	if !info.IsDir() {
+		return errors.New("config parent is not a directory")
+	}
+	if info.Mode().Perm() != 0o700 {
+		return fmt.Errorf("config parent permissions %04o are insecure; expected 0700", info.Mode().Perm())
 	}
 	return nil
 }

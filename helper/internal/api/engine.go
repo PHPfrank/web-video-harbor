@@ -38,7 +38,15 @@ type hlsRunner interface {
 }
 
 type manifestInspector interface {
-	Inspect(context.Context, string) (*hls.Playlist, []byte, error)
+	Inspect(context.Context, string) (ManifestInspection, error)
+}
+
+// ManifestInspection binds the exact fetched bytes to the final URL after
+// redirects. Relative playlist references must be resolved from SourceURL.
+type ManifestInspection struct {
+	Playlist  *hls.Playlist
+	Manifest  []byte
+	SourceURL string
 }
 
 type engineDeps struct {
@@ -95,55 +103,55 @@ func newManifestInspector(resolver safety.Resolver, client *http.Client) *Manife
 
 // Inspect returns the parsed playlist and the exact bytes supplied to the
 // FFmpeg runner's independently enforced preflight.
-func (i *ManifestInspector) Inspect(ctx context.Context, rawURL string) (*hls.Playlist, []byte, error) {
+func (i *ManifestInspector) Inspect(ctx context.Context, rawURL string) (ManifestInspection, error) {
 	if ctx == nil {
-		return nil, nil, newManifestError("操作已取消", context.Canceled)
+		return ManifestInspection{}, newManifestError("操作已取消", context.Canceled)
 	}
 	if _, err := safety.ValidateRemoteURL(ctx, rawURL, i.resolver); err != nil {
 		if ctx.Err() != nil {
-			return nil, nil, newManifestError("操作已取消", ctx.Err())
+			return ManifestInspection{}, newManifestError("操作已取消", ctx.Err())
 		}
-		return nil, nil, newManifestError("视频地址不安全或无效", err)
+		return ManifestInspection{}, newManifestError("视频地址不安全或无效", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return nil, nil, newManifestError("视频地址格式无效", err)
+		return ManifestInspection{}, newManifestError("视频地址格式无效", err)
 	}
 	response, err := i.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
-			return nil, nil, newManifestError("操作已取消", ctx.Err())
+			return ManifestInspection{}, newManifestError("操作已取消", ctx.Err())
 		}
-		return nil, nil, newManifestError("无法读取视频播放列表", err)
+		return ManifestInspection{}, newManifestError("无法读取视频播放列表", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return nil, nil, newManifestError("视频播放列表暂时不可用", fmt.Errorf("unexpected HTTP status %d", response.StatusCode))
+		return ManifestInspection{}, newManifestError("视频播放列表暂时不可用", fmt.Errorf("unexpected HTTP status %d", response.StatusCode))
 	}
 	finalURL := rawURL
 	if response.Request != nil && response.Request.URL != nil {
 		finalURL = response.Request.URL.String()
 	}
 	if media.Classify(finalURL, response.Header.Get("Content-Type")) != media.HLS {
-		return nil, nil, newManifestError("视频地址不是 M3U8 播放列表", errors.New("response content type is not HLS"))
+		return ManifestInspection{}, newManifestError("视频地址不是 M3U8 播放列表", errors.New("response content type is not HLS"))
 	}
 	manifest, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
 	if err != nil {
-		return nil, nil, newManifestError("无法读取视频播放列表", err)
+		return ManifestInspection{}, newManifestError("无法读取视频播放列表", err)
 	}
 	if len(manifest) > maxManifestBytes {
-		return nil, nil, newManifestError("视频播放列表过大", errors.New("root manifest exceeds 2 MiB"))
+		return ManifestInspection{}, newManifestError("视频播放列表过大", errors.New("root manifest exceeds 2 MiB"))
 	}
 	playlist, err := hls.ParseBytes(finalURL, manifest)
 	if err != nil {
 		var playlistError *hls.Error
 		if errors.As(err, &playlistError) && playlistError.Code == hls.CodeUnsupportedEncryption {
-			return nil, nil, newManifestError("不支持加密或 DRM 视频", err)
+			return ManifestInspection{}, newManifestError("不支持加密或 DRM 视频", err)
 		}
-		return nil, nil, newManifestError("视频播放列表格式无效", err)
+		return ManifestInspection{}, newManifestError("视频播放列表格式无效", err)
 	}
-	return playlist, manifest, nil
+	return ManifestInspection{Playlist: playlist, Manifest: manifest, SourceURL: finalURL}, nil
 }
 
 type manifestError struct {
@@ -241,7 +249,7 @@ func (e *Engine) runHLS(ctx context.Context, id string, spec JobSpec) {
 		e.fail(id, errors.New("manifest inspector is unavailable"))
 		return
 	}
-	_, manifest, err := e.inspector.Inspect(ctx, spec.URL)
+	inspection, err := e.inspector.Inspect(ctx, spec.URL)
 	if err != nil {
 		if ctx.Err() == nil {
 			e.fail(id, err)
@@ -265,9 +273,9 @@ func (e *Engine) runHLS(ctx context.Context, id string, spec JobSpec) {
 		return
 	}
 	path, err := runner.Run(ctx, ffmpeg.Request{
-		SourceURL: spec.URL,
+		SourceURL: inspection.SourceURL,
 		Title:     spec.Title,
-		Manifest:  append([]byte(nil), manifest...),
+		Manifest:  append([]byte(nil), inspection.Manifest...),
 	})
 	if err != nil {
 		if ctx.Err() == nil {

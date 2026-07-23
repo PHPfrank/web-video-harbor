@@ -30,9 +30,9 @@ func (f hlsRunnerFunc) Run(ctx context.Context, request ffmpeg.Request) (string,
 	return f(ctx, request)
 }
 
-type manifestInspectorFunc func(context.Context, string) (*hls.Playlist, []byte, error)
+type manifestInspectorFunc func(context.Context, string) (ManifestInspection, error)
 
-func (f manifestInspectorFunc) Inspect(ctx context.Context, rawURL string) (*hls.Playlist, []byte, error) {
+func (f manifestInspectorFunc) Inspect(ctx context.Context, rawURL string) (ManifestInspection, error) {
 	return f(ctx, rawURL)
 }
 
@@ -88,16 +88,18 @@ func TestEngineStartsMP4AsynchronouslyAndReportsProgress(t *testing.T) {
 func TestEngineHLSUsesExactInspectedManifestAndMergingState(t *testing.T) {
 	manager := tasks.NewManager()
 	manifest := []byte("#EXTM3U\n#EXTINF:4,\nsegment.ts\n")
+	originalURL := "https://media.example/old/master.m3u8"
+	finalURL := "https://cdn.example/new/master.m3u8"
 	runnerStarted := make(chan ffmpeg.Request, 1)
 	release := make(chan struct{})
 
 	engine, err := newEngine(engineDeps{
 		manager: manager,
-		inspector: manifestInspectorFunc(func(_ context.Context, rawURL string) (*hls.Playlist, []byte, error) {
-			if rawURL != "https://media.example/video.m3u8" {
+		inspector: manifestInspectorFunc(func(_ context.Context, rawURL string) (ManifestInspection, error) {
+			if rawURL != originalURL {
 				t.Fatalf("inspect URL = %q", rawURL)
 			}
-			return &hls.Playlist{}, append([]byte(nil), manifest...), nil
+			return ManifestInspection{Playlist: &hls.Playlist{}, Manifest: append([]byte(nil), manifest...), SourceURL: finalURL}, nil
 		}),
 		newHLSRunner: func(_ ffmpeg.ProgressFunc) (hlsRunner, error) {
 			return hlsRunnerFunc(func(ctx context.Context, request ffmpeg.Request) (string, error) {
@@ -115,7 +117,7 @@ func TestEngineHLSUsesExactInspectedManifestAndMergingState(t *testing.T) {
 		t.Fatalf("new engine: %v", err)
 	}
 	task, err := engine.Start(context.Background(), JobSpec{
-		URL: "https://media.example/video.m3u8", Title: "HLS title", MediaType: "hls",
+		URL: originalURL, Title: "HLS title", MediaType: "hls",
 	})
 	if err != nil {
 		t.Fatalf("start: %v", err)
@@ -128,7 +130,7 @@ func TestEngineHLSUsesExactInspectedManifestAndMergingState(t *testing.T) {
 		t.Fatal("HLS runner did not start")
 	}
 	wantStatus(t, manager, task.ID, tasks.Merging)
-	if request.SourceURL != "https://media.example/video.m3u8" || request.Title != "HLS title" {
+	if request.SourceURL != finalURL || request.Title != "HLS title" {
 		t.Fatalf("request = %#v", request)
 	}
 	if !bytes.Equal(request.Manifest, manifest) {
@@ -139,6 +141,61 @@ func TestEngineHLSUsesExactInspectedManifestAndMergingState(t *testing.T) {
 	completed := waitStatus(t, manager, task.ID, tasks.Completed)
 	if completed.OutputPath != "/downloads/hls.mp4" {
 		t.Fatalf("output path = %q", completed.OutputPath)
+	}
+}
+
+func TestEngineHLSRetryUsesFreshFinalManifestURL(t *testing.T) {
+	manager := tasks.NewManager()
+	manifest := []byte("#EXTM3U\n#EXTINF:4,\nrelative.ts\n")
+	finalURLs := []string{"https://cdn-one.example/new/master.m3u8", "https://cdn-two.example/new/master.m3u8"}
+	var mu sync.Mutex
+	inspectCalls := 0
+	runCalls := 0
+	requests := make(chan ffmpeg.Request, 2)
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		inspector: manifestInspectorFunc(func(_ context.Context, rawURL string) (ManifestInspection, error) {
+			if rawURL != "https://origin.example/old/master.m3u8" {
+				return ManifestInspection{}, errors.New("unexpected source URL")
+			}
+			mu.Lock()
+			defer mu.Unlock()
+			result := ManifestInspection{Playlist: &hls.Playlist{}, Manifest: append([]byte(nil), manifest...), SourceURL: finalURLs[inspectCalls]}
+			inspectCalls++
+			return result, nil
+		}),
+		newHLSRunner: func(_ ffmpeg.ProgressFunc) (hlsRunner, error) {
+			mu.Lock()
+			attempt := runCalls
+			runCalls++
+			mu.Unlock()
+			return hlsRunnerFunc(func(_ context.Context, request ffmpeg.Request) (string, error) {
+				requests <- request
+				if attempt == 0 {
+					return "", errors.New("first run failed")
+				}
+				return "/downloads/retried.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	original, err := engine.Start(context.Background(), JobSpec{URL: "https://origin.example/old/master.m3u8", Title: "视频", MediaType: "hls"})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	waitStatus(t, manager, original.ID, tasks.Failed)
+	if got := (<-requests).SourceURL; got != finalURLs[0] {
+		t.Fatalf("first SourceURL = %q, want %q", got, finalURLs[0])
+	}
+	retry, err := engine.Retry(context.Background(), original.ID)
+	if err != nil {
+		t.Fatalf("retry: %v", err)
+	}
+	waitStatus(t, manager, retry.ID, tasks.Completed)
+	if got := (<-requests).SourceURL; got != finalURLs[1] {
+		t.Fatalf("retry SourceURL = %q, want %q", got, finalURLs[1])
 	}
 }
 
@@ -314,15 +371,18 @@ func TestManifestInspectorReturnsExactValidatedHLSBody(t *testing.T) {
 	})}
 	inspector := newManifestInspector(staticResolver{addresses: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, client)
 
-	playlist, got, err := inspector.Inspect(context.Background(), "https://media.example/video.m3u8")
+	result, err := inspector.Inspect(context.Background(), "https://media.example/video.m3u8")
 	if err != nil {
 		t.Fatalf("inspect: %v", err)
 	}
-	if playlist == nil || len(playlist.Variants) != 1 {
-		t.Fatalf("playlist = %#v", playlist)
+	if result.Playlist == nil || len(result.Playlist.Variants) != 1 {
+		t.Fatalf("playlist = %#v", result.Playlist)
 	}
-	if !bytes.Equal(got, manifest) {
-		t.Fatalf("manifest = %q, want exact %q", got, manifest)
+	if !bytes.Equal(result.Manifest, manifest) {
+		t.Fatalf("manifest = %q, want exact %q", result.Manifest, manifest)
+	}
+	if result.SourceURL != "https://media.example/video.m3u8" {
+		t.Fatalf("SourceURL = %q", result.SourceURL)
 	}
 }
 
@@ -344,7 +404,7 @@ func TestManifestInspectorRejectsBadStatusContentTypeAndOversize(t *testing.T) {
 				return &http.Response{StatusCode: test.status, Header: http.Header{"Content-Type": []string{test.contentType}}, Body: io.NopCloser(bytes.NewReader(test.body)), Request: request}, nil
 			})}
 			inspector := newManifestInspector(staticResolver{addresses: []net.IPAddr{{IP: net.ParseIP("93.184.216.34")}}}, client)
-			_, _, err := inspector.Inspect(context.Background(), "https://media.example/video.m3u8?token=secret")
+			_, err := inspector.Inspect(context.Background(), "https://media.example/video.m3u8?token=secret")
 			if err == nil {
 				t.Fatal("Inspect succeeded")
 			}

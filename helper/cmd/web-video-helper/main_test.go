@@ -27,7 +27,7 @@ func TestRunPrintsVersion(t *testing.T) {
 }
 
 func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	configPath := filepath.Join(home, "portable", "settings.json")
 	var stdout, stderr bytes.Buffer
@@ -58,7 +58,7 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 }
 
 func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	configPath := filepath.Join(home, "config.json")
 	cfg, err := appconfig.Load(configPath)
@@ -96,7 +96,7 @@ func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
 }
 
 func TestNormalStartContinuesWhenFFmpegMissing(t *testing.T) {
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	configPath := filepath.Join(home, "config.json")
 	var stdout, stderr bytes.Buffer
@@ -136,7 +136,7 @@ func TestRunRejectsBadArgumentsAndBadConfig(t *testing.T) {
 		})
 	}
 
-	home := t.TempDir()
+	home := privateTempDir(t)
 	t.Setenv("HOME", home)
 	path := filepath.Join(home, "bad.json")
 	if err := os.WriteFile(path, []byte("bad"), 0o600); err != nil {
@@ -220,3 +220,12 @@ type testAddr string
 
 func (a testAddr) Network() string { return "tcp" }
 func (a testAddr) String() string  { return string(a) }
+
+func privateTempDir(t *testing.T) string {
+	t.Helper()
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatalf("chmod private temp dir: %v", err)
+	}
+	return dir
+}
