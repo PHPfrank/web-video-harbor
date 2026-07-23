@@ -98,10 +98,21 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 			headerSeen = true
 			continue
 		}
-		if (pendingMedia || pendingVariant != nil) && strings.HasPrefix(line, "#") {
+		if pendingVariant != nil && strings.HasPrefix(line, "#") {
 			return nil, invalidError("media URI is missing after its tag", nil)
 		}
+		if pendingMedia && strings.HasPrefix(line, "#") {
+			if isOrdinaryComment(line) {
+				continue
+			}
+			if !isMediaSegmentTag(line) {
+				return nil, invalidError("media URI is missing after its tag", nil)
+			}
+		}
 
+		if line == "#EXT-X-SESSION-KEY" {
+			return nil, invalidError("EXT-X-SESSION-KEY attributes are required", nil)
+		}
 		if strings.HasPrefix(line, "#EXT-X-SESSION-KEY:") {
 			if kindErr := setPlaylistKind(&kind, playlistMaster); kindErr != nil {
 				return nil, kindErr
@@ -110,6 +121,9 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 				return nil, keyErr
 			}
 			continue
+		}
+		if line == "#EXT-X-KEY" {
+			return nil, invalidError("EXT-X-KEY attributes are required", nil)
 		}
 		if strings.HasPrefix(line, "#EXT-X-KEY:") {
 			if kindErr := setPlaylistKind(&kind, playlistMedia); kindErr != nil {
@@ -259,6 +273,27 @@ func kindForTag(line string) playlistKind {
 
 func hasTag(line, tag string) bool {
 	return line == tag || strings.HasPrefix(line, tag+":")
+}
+
+func isOrdinaryComment(line string) bool {
+	return strings.HasPrefix(line, "#") && !strings.HasPrefix(line, "#EXT")
+}
+
+func isMediaSegmentTag(line string) bool {
+	attributeTags := []string{
+		"#EXT-X-BYTERANGE",
+		"#EXT-X-KEY",
+		"#EXT-X-MAP",
+		"#EXT-X-PROGRAM-DATE-TIME",
+		"#EXT-X-DATERANGE",
+		"#EXT-X-BITRATE",
+	}
+	for _, tag := range attributeTags {
+		if strings.HasPrefix(line, tag+":") && len(line) > len(tag)+1 {
+			return true
+		}
+	}
+	return line == "#EXT-X-DISCONTINUITY" || line == "#EXT-X-GAP"
 }
 
 type countingReader struct {
