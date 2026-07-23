@@ -12,6 +12,35 @@ if [[ ! -x "$helper_binary" ]]; then
 fi
 
 helper_prepare_state_dir
+helper_validate_existing_state_dir
+
+started_pid=""
+pid_temp=""
+rollback_started=""
+
+start_cleanup() {
+  local original_status=$?
+  trap - EXIT INT TERM
+  if [[ "$rollback_started" == "1" && "$started_pid" == <-> ]]; then
+    helper_rollback_started_process "$started_pid" "$$" "$pid_temp" || original_status=1
+  fi
+  if [[ -n "$pid_temp" && "${pid_temp:A:h}" == "${helper_state_dir:A}" && \
+    "$pid_temp" == "$helper_state_dir"/.helper.pid.* ]]; then
+    rm -f -- "$pid_temp"
+  fi
+  helper_release_lifecycle_lock || original_status=1
+  return "$original_status"
+}
+trap start_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+if ! helper_acquire_lifecycle_lock; then
+  exit 1
+fi
+if ! helper_test_barrier after-lock; then
+  exit 1
+fi
 
 if [[ -e "$helper_pid_path" || -L "$helper_pid_path" ]]; then
   if ! helper_read_pid; then
@@ -27,7 +56,7 @@ if [[ -e "$helper_pid_path" || -L "$helper_pid_path" ]]; then
     fi
     exit 1
   fi
-  helper_remove_pid_file
+  helper_remove_pid_file "$recorded_pid"
 fi
 
 if helper_health_response; then
@@ -42,20 +71,36 @@ fi
 : >"$helper_log_path"
 chmod 0600 "$helper_log_path"
 
-pid_temp="$helper_state_dir/.helper.pid.$$"
-if [[ "${pid_temp:A:h}" != "${helper_state_dir:A}" ]]; then
-  print -u2 -- "PID 临时路径无效"
+if ! helper_create_pid_temp; then
   exit 1
 fi
-trap 'rm -f -- "$pid_temp"' EXIT
+pid_temp="$REPLY"
 
+pending_start_signal=""
+trap 'pending_start_signal=130' INT
+trap 'pending_start_signal=143' TERM
 nohup "$helper_binary" --config "$helper_config_path" \
   > >(/bin/zsh "$script_dir/bounded-log.zsh" "$helper_log_path") 2>&1 </dev/null &
+if helper_test_stage_fails launch-signal; then
+  kill -TERM "$$"
+fi
 started_pid=$!
-print -r -- "$started_pid" >"$pid_temp"
-chmod 0600 "$pid_temp"
-mv -f -- "$pid_temp" "$helper_pid_path"
-chmod 0600 "$helper_pid_path"
+rollback_started="1"
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if [[ -n "$pending_start_signal" ]]; then
+  exit "$pending_start_signal"
+fi
+if ! helper_test_barrier after-launch; then
+  exit 1
+fi
+if ! helper_write_pid_temp "$pid_temp" "$started_pid"; then
+  exit 1
+fi
+if ! helper_publish_pid_temp "$pid_temp" "$started_pid"; then
+  exit 1
+fi
+pid_temp=""
 
 for attempt in {1..50}; do
   /bin/sleep 0.1
@@ -63,38 +108,12 @@ for attempt in {1..50}; do
     break
   fi
   if helper_health_response && [[ "$helper_health_pid" == "$started_pid" ]] && helper_process_matches "$started_pid"; then
+    rollback_started=""
     print -- "本地助手启动成功（PID $started_pid）。"
     print -- "状态目录：$helper_state_dir"
     exit 0
   fi
 done
 
-if kill -0 "$started_pid" 2>/dev/null; then
-  if ! helper_process_matches "$started_pid"; then
-    print -u2 -- "本地助手未通过健康检查，且无法确认新进程身份，无法安全清理；PID 文件已保留：$helper_pid_path"
-    exit 1
-  fi
-  kill -TERM "$started_pid" 2>/dev/null || true
-fi
-for attempt in {1..20}; do
-  kill -0 "$started_pid" 2>/dev/null || break
-  /bin/sleep 0.1
-done
-if kill -0 "$started_pid" 2>/dev/null; then
-  if ! helper_process_matches "$started_pid"; then
-    print -u2 -- "等待清理期间进程身份发生变化，无法安全清理；PID 文件已保留：$helper_pid_path"
-    exit 1
-  fi
-  kill -KILL "$started_pid" 2>/dev/null || true
-fi
-for attempt in {1..20}; do
-  kill -0 "$started_pid" 2>/dev/null || break
-  /bin/sleep 0.1
-done
-if kill -0 "$started_pid" 2>/dev/null; then
-  print -u2 -- "无法确认本地助手已经停止；PID 文件已保留：$helper_pid_path"
-  exit 1
-fi
-helper_remove_pid_file
 print -u2 -- "本地助手未能在 5 秒内通过健康检查，请查看：$helper_log_path"
 exit 1

@@ -5,13 +5,24 @@ script_dir="${0:A:h}"
 source "$script_dir/helper-common.zsh"
 helper_initialize_paths "$0"
 
-if [[ ! -e "$helper_state_dir" && ! -L "$helper_state_dir" ]]; then
-  print -- "助手状态：未运行"
-  print -- "状态目录：$helper_state_dir"
-  print -- "下载目录：$helper_download_dir"
+helper_prepare_state_dir
+helper_validate_existing_state_dir
+
+status_cleanup() {
+  local original_status=$?
+  trap - EXIT INT TERM
+  helper_release_lifecycle_lock || original_status=1
+  return "$original_status"
+}
+trap status_cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+if ! helper_acquire_lifecycle_lock; then
   exit 1
 fi
-helper_validate_existing_state_dir
+if ! helper_test_barrier after-lock; then
+  exit 1
+fi
 
 if [[ ! -e "$helper_pid_path" && ! -L "$helper_pid_path" ]]; then
   print -- "助手状态：未运行"

@@ -4,6 +4,19 @@ unsetopt BG_NICE
 
 script_dir="${0:A:h}"
 repo_root="${script_dir:h:h}"
+focused_case="${WEB_VIDEO_HELPER_FOCUSED_CASE:-all}"
+
+case_enabled() {
+  [[ "$focused_case" == "all" || "$focused_case" == "$1" ]]
+}
+
+finish_focused_case() {
+  local completed_case="$1"
+  if [[ "$focused_case" == "$completed_case" ]]; then
+    print -- "聚焦用例通过：$completed_case"
+    exit 0
+  fi
+}
 
 fail() {
   print -u2 -- "FAIL: $1"
@@ -19,6 +32,30 @@ done
 common_path="$repo_root/scripts/helper-common.zsh"
 [[ -f "$common_path" ]] || fail "缺少脚本共享路径实现"
 /bin/zsh -n "$common_path" || fail "共享脚本语法错误"
+
+if case_enabled bounded_random_temp; then
+  rg -q 'mktemp.*helper\.log\.rotate\.XXXXXX' "$repo_root/scripts/bounded-log.zsh" || \
+    fail "bounded logger 轮转临时文件没有使用同目录随机 O_EXCL 创建"
+  finish_focused_case bounded_random_temp
+fi
+if case_enabled verify_bound_port; then
+  rg -Fq 'testtools/loopback-port' "$repo_root/scripts/verify-doc-commands.zsh" || \
+    fail "真实文档验证没有通过实际临时 bind 获取端口"
+  finish_focused_case verify_bound_port
+fi
+if case_enabled verify_restore_order; then
+  verify_text="$(<"$repo_root/scripts/verify-doc-commands.zsh")"
+  if [[ "$verify_text" != *'pid_was_moved="1"'*'mv "$state_dir/helper.pid" "$saved_pid_path"'* ]]; then
+    fail "PID 恢复标志没有在移动 PID 文件前设置"
+  fi
+  finish_focused_case verify_restore_order
+fi
+if case_enabled launch_signal_window; then
+  start_text="$(<"$repo_root/scripts/start-helper.zsh")"
+  if [[ "$start_text" != *'pending_start_signal=""'*"trap 'pending_start_signal=130' INT"*"trap 'pending_start_signal=143' TERM"*'nohup '*'started_pid=$!'*'rollback_started="1"'*"trap 'exit 130' INT"*"trap 'exit 143' TERM"*'[[ -n "$pending_start_signal" ]]'* ]]; then
+    fail "start 没有在 helper launch/PID 捕获临界区延迟处理 INT/TERM"
+  fi
+fi
 
 expected_state_dir="${HOME:?}/Library/Application Support/网页视频下载器"
 expected_download_dir="${HOME:?}/Downloads/网页视频下载器"
@@ -83,11 +120,8 @@ fi
 
 for readonly_script in stop-helper.zsh helper-status.zsh; do
   readonly_text="$(<"$repo_root/scripts/$readonly_script")"
-  if [[ "$readonly_text" != *helper_validate_existing_state_dir*helper_read_pid* ]]; then
-    fail "$readonly_script 未在读取 PID 前只读验证状态目录与文件"
-  fi
-  if [[ "$readonly_text" == *helper_prepare_state_dir* ]]; then
-    fail "$readonly_script 不得在检查状态时创建或修改状态目录"
+  if [[ "$readonly_text" != *helper_prepare_state_dir*helper_validate_existing_state_dir*helper_acquire_lifecycle_lock*helper_read_pid* ]]; then
+    fail "$readonly_script 未在读取 PID 前安全准备状态目录并获取生命周期锁"
   fi
 done
 
@@ -186,6 +220,36 @@ print -rn -- "$exact_log_payload" | env WEB_VIDEO_HELPER_TESTING=1 \
 [[ "$(stat -f '%z' "$fixture_state/helper.log")" == "1048576" ]] || fail "恰好 1MiB 的日志在 EOF 时被错误截断"
 rg -Fq "$exact_log_marker" "$fixture_state/helper.log" || fail "恰好达到上限时丢失尾部标记"
 
+if case_enabled bounded_signal_exit; then
+  signal_logger_marker="$fixture_root/work/signal-logger.pid"
+  (
+    /bin/sleep 3
+    print -r -- delayed
+  ) | env WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH="$signal_logger_marker" \
+    /bin/zsh "$fixture_scripts/bounded-log.zsh" "$fixture_state/helper.log" &
+  signal_pipeline_pid=$!
+  for attempt in {1..100}; do
+    [[ -f "$signal_logger_marker" ]] && break
+    /bin/sleep 0.02
+  done
+  [[ -f "$signal_logger_marker" ]] || fail "未观察到 signal bounded logger"
+  signal_logger_pid="$(<"$signal_logger_marker")"
+  kill -TERM "$signal_logger_pid"
+  for attempt in {1..50}; do
+    ! kill -0 "$signal_logger_pid" 2>/dev/null && break
+    /bin/sleep 0.02
+  done
+  if kill -0 "$signal_logger_pid" 2>/dev/null; then
+    kill -KILL "$signal_logger_pid" 2>/dev/null || true
+    fail "bounded logger 收到 TERM 后 cleanup 但未退出"
+  fi
+  [[ ! -e "$signal_logger_marker" ]] || fail "bounded logger TERM 后 marker 残留"
+  wait "$signal_pipeline_pid" 2>/dev/null || true
+  finish_focused_case bounded_signal_exit
+fi
+
 write_failure_state="$fixture_root/work/write-failure-state"
 write_failure_ready="$fixture_root/work/write-failure-ready"
 write_failure_result="$fixture_root/work/write-failure-result"
@@ -229,7 +293,12 @@ if env WEB_VIDEO_HELPER_TESTING=1 WEB_VIDEO_HELPER_TEST_STATE_DIR="$missing_stat
 fi
 env WEB_VIDEO_HELPER_TESTING=1 WEB_VIDEO_HELPER_TEST_STATE_DIR="$missing_state" \
   /bin/zsh "$fixture_scripts/stop-helper.zsh" >/dev/null 2>&1
-[[ ! -e "$missing_state" ]] || fail "status/stop 检查时隐式创建了状态目录"
+[[ -d "$missing_state" && ! -L "$missing_state" ]] || \
+  fail "status/stop 没有为首次生命周期互斥创建安全状态目录"
+[[ "$(stat -f '%Lp' "$missing_state")" == "700" ]] || \
+  fail "status/stop 创建的首次状态目录权限不是 0700"
+[[ ! -e "$missing_state/helper.lifecycle.lock" ]] || \
+  fail "status/stop 首次状态检查后生命周期锁残留"
 
 symlink_script_target="$fixture_root/work/state-link-target"
 symlink_script_state="$fixture_root/work/state-link"
@@ -303,6 +372,8 @@ fi
 [[ ! -e "$fixture_state/helper.pid" ]] || fail "提前退出后仍保留 PID 文件"
 
 print -r -- '#!/bin/zsh
+print -r -- "$$" >>"'"$fixture_root/work/helper-launches"'"
+print -r -- "$PPID" >"'"$fixture_root/work/helper-parent-"'$$"
 trap "exit 0" TERM INT
 /bin/sleep 0.3
 bulk_output="${(l:1600000::L:)${:-}}"
@@ -315,16 +386,22 @@ chmod 0755 "$fixture_binary"
 
 print -r -- "#!/bin/zsh
 candidate_pid=\"\"
+requested_field=\"\"
 while (( \$# > 0 )); do
   if [[ \"\$1\" == \"-p\" ]]; then
     shift
     candidate_pid=\"\$1\"
   fi
+  if [[ \"\$1\" == \"-o\" ]]; then
+    shift
+    requested_field=\"\$1\"
+  fi
   shift
 done
-expected_pid=\"\"
-[[ -f \"$fixture_state/helper.pid\" ]] && expected_pid=\"\$(<\"$fixture_state/helper.pid\")\"
-if [[ ( -f \"$fixture_root/work/allow-helper-identity\" || -f \"$fixture_root/work/ps-claims-helper\" ) && -n \"\$expected_pid\" && \"\$candidate_pid\" == \"\$expected_pid\" ]]; then
+if [[ \"\$requested_field\" == \"ppid=\" ]]; then
+  [[ -f \"$fixture_root/work/helper-parent-\$candidate_pid\" ]] || exit 1
+  print -r -- \"\$(<\"$fixture_root/work/helper-parent-\$candidate_pid\")\"
+elif [[ -f \"$fixture_root/work/allow-helper-identity\" || -f \"$fixture_root/work/ps-claims-helper\" ]]; then
   if [[ -f \"$fixture_root/work/wrong-config\" ]]; then
     print -r -- \"$fixture_binary --config $fixture_state/other.json\"
   else
@@ -342,11 +419,9 @@ while (( \$# > 0 )); do
   if [[ \"\$1\" == \"-p\" ]]; then shift; candidate_pid=\"\$1\"; fi
   shift
 done
-expected_pid=\"\"
-[[ -f \"$fixture_state/helper.pid\" ]] && expected_pid=\"\$(<\"$fixture_state/helper.pid\")\"
 print -r -- \"p\$candidate_pid\"
 print -r -- ftxt
-if [[ -f \"$fixture_root/work/allow-helper-identity\" && -n \"\$expected_pid\" && \"\$candidate_pid\" == \"\$expected_pid\" ]]; then
+if [[ -f \"$fixture_root/work/allow-helper-identity\" ]]; then
   print -r -- \"n$fixture_binary\"
 else
   print -r -- n/bin/sleep
@@ -364,6 +439,289 @@ chmod 0600 "$fixture_state/config.json"
 dd if=/dev/zero of="$fixture_state/helper.log" bs=1024 count=1100 2>/dev/null
 print -r -- 'allowed' >"$fixture_root/work/allow-helper-identity"
 export WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH="$fixture_root/work/logger.pid"
+
+lifecycle_lock_path="$fixture_state/helper.lifecycle.lock"
+if case_enabled first_lifecycle_interleave; then
+for first_command in stop-helper.zsh helper-status.zsh; do
+  first_barrier="$fixture_root/work/first-${first_command:r}-barrier"
+  first_output="$fixture_root/work/first-${first_command:r}.txt"
+  first_start_output="$fixture_root/work/first-${first_command:r}-start.txt"
+  rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+    "$first_barrier.ready" "$first_barrier.release"
+  rm -f -- "$fixture_state/config.json" "$fixture_state/helper.pid" "$fixture_state/helper.log" \
+    "$fixture_state/helper.lifecycle.lock"
+  rmdir "$fixture_state"
+
+  env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    WEB_VIDEO_HELPER_TEST_BARRIER_STAGE=after-lock \
+    WEB_VIDEO_HELPER_TEST_BARRIER_PATH="$first_barrier" \
+    /bin/zsh "$fixture_scripts/$first_command" >"$first_output" 2>&1 &
+  first_command_pid=$!
+  for attempt in {1..100}; do
+    [[ -f "$first_barrier.ready" ]] && break
+    /bin/sleep 0.02
+  done
+  [[ -f "$first_barrier.ready" ]] || \
+    fail "$first_command 在首次状态目录不存在时没有进入生命周期锁"
+
+  env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    /bin/zsh "$fixture_scripts/start-helper.zsh" >"$first_start_output" 2>&1 &
+  first_start_pid=$!
+  /bin/sleep 0.2
+  kill -0 "$first_start_pid" 2>/dev/null || \
+    fail "首次 start 没有等待 $first_command 持有的生命周期锁"
+
+  print -r -- release >"$first_barrier.release"
+  set +e
+  wait "$first_command_pid"
+  first_command_status=$?
+  wait "$first_start_pid"
+  first_start_status=$?
+  set -e
+  if [[ "$first_command" == "stop-helper.zsh" ]]; then
+    [[ "$first_command_status" == "0" ]] || fail "首次 stop 在锁内检查时错误失败"
+  else
+    [[ "$first_command_status" != "0" ]] || fail "首次 status 在锁内检查时错误报告运行中"
+  fi
+  [[ "$first_start_status" == "0" ]] || fail "首次 start 未在 $first_command 后成功完成"
+  [[ -f "$fixture_state/helper.pid" ]] || fail "首次交错后 helper PID 不可管理"
+  env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    /bin/zsh "$fixture_scripts/stop-helper.zsh" >/dev/null
+done
+print -r -- "{\"address\":\"127.0.0.1:17432\",\"token\":\"$sentinel_token\",\"download_dir\":\"$fixture_download\"}" \
+  >"$fixture_state/config.json"
+chmod 0600 "$fixture_state/config.json"
+finish_focused_case first_lifecycle_interleave
+fi
+
+if case_enabled launch_signal_window; then
+launch_signal_output="$fixture_root/work/launch-signal.txt"
+rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+  "$fixture_state/helper.pid" "$fixture_state/helper.lifecycle.lock"
+if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  WEB_VIDEO_HELPER_TEST_FAIL_STAGE=launch-signal \
+  /bin/zsh "$fixture_scripts/start-helper.zsh" >"$launch_signal_output" 2>&1; then
+  fail "launch/PID 捕获临界区收到 TERM 后 start 仍报告成功"
+fi
+[[ -f "$fixture_root/work/helper-launches" ]] || fail "launch 信号用例没有真正创建 helper"
+while IFS= read -r launch_signal_helper_pid; do
+  for attempt in {1..100}; do
+    ! kill -0 "$launch_signal_helper_pid" 2>/dev/null && break
+    /bin/sleep 0.02
+  done
+  kill -0 "$launch_signal_helper_pid" 2>/dev/null && \
+    fail "launch/PID 捕获临界区收到 TERM 后遗留无 PID helper"
+done <"$fixture_root/work/helper-launches"
+for attempt in {1..100}; do
+  [[ ! -e "$fixture_root/work/logger.pid" ]] && break
+  /bin/sleep 0.02
+done
+[[ ! -e "$fixture_state/helper.pid" ]] || fail "launch 信号回滚后 PID 文件残留"
+[[ ! -e "$fixture_state/helper.lifecycle.lock" ]] || fail "launch 信号回滚后生命周期锁残留"
+[[ ! -e "$fixture_root/work/logger.pid" ]] || fail "launch 信号回滚后 logger 残留"
+finish_focused_case launch_signal_window
+fi
+
+if case_enabled stale_lock; then
+dead_lock_pid=""
+/bin/sleep 0.01 &
+dead_lock_pid=$!
+wait "$dead_lock_pid"
+print -r -- "$dead_lock_pid" >"$lifecycle_lock_path"
+chmod 0600 "$lifecycle_lock_path"
+/bin/sleep 2
+stale_lock_output="$fixture_root/work/stale-lock.txt"
+if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/helper-status.zsh" >"$stale_lock_output" 2>&1; then
+  fail "没有 PID 时 status 应报告未运行"
+fi
+[[ ! -e "$lifecycle_lock_path" ]] || fail "status 未回收并释放 dead stale 生命周期锁"
+finish_focused_case stale_lock
+fi
+
+if case_enabled unsafe_lock; then
+lock_symlink_target="$fixture_root/work/lock-symlink-target"
+print -r -- untouched >"$lock_symlink_target"
+ln -s "$lock_symlink_target" "$lifecycle_lock_path"
+unsafe_lock_output="$fixture_root/work/unsafe-lock.txt"
+if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/helper-status.zsh" >"$unsafe_lock_output" 2>&1; then
+  fail "status 接受了符号链接生命周期锁"
+fi
+rg -q '生命周期锁.*不安全' "$unsafe_lock_output" || fail "生命周期锁符号链接提示不清楚"
+[[ -L "$lifecycle_lock_path" ]] || fail "status 改动了符号链接生命周期锁"
+[[ "$(<"$lock_symlink_target")" == untouched ]] || fail "status 改动了生命周期锁链接目标"
+rm -f -- "$lifecycle_lock_path"
+print -r -- "$$" >"$lifecycle_lock_path"
+chmod 0644 "$lifecycle_lock_path"
+if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/helper-status.zsh" >"$unsafe_lock_output" 2>&1; then
+  fail "status 接受了权限不安全的生命周期锁"
+fi
+[[ "$(stat -f '%Lp' "$lifecycle_lock_path")" == "644" ]] || fail "status 改动了不安全锁权限"
+rm -f -- "$lifecycle_lock_path"
+finish_focused_case unsafe_lock
+fi
+
+if case_enabled concurrent_start; then
+concurrent_barrier="$fixture_root/work/concurrent-start-barrier"
+concurrent_start_one="$fixture_root/work/concurrent-start-one.txt"
+concurrent_start_two="$fixture_root/work/concurrent-start-two.txt"
+rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+  "$concurrent_barrier.ready" "$concurrent_barrier.release"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  WEB_VIDEO_HELPER_TEST_BARRIER_STAGE=after-lock \
+  WEB_VIDEO_HELPER_TEST_BARRIER_PATH="$concurrent_barrier" \
+  /bin/zsh "$fixture_scripts/start-helper.zsh" >"$concurrent_start_one" 2>&1 &
+concurrent_start_one_pid=$!
+for attempt in {1..100}; do
+  [[ -f "$concurrent_barrier.ready" ]] && break
+  /bin/sleep 0.02
+done
+[[ -f "$concurrent_barrier.ready" ]] || fail "第一个 start 未到达持锁屏障"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/start-helper.zsh" >"$concurrent_start_two" 2>&1 &
+concurrent_start_two_pid=$!
+/bin/sleep 0.2
+kill -0 "$concurrent_start_two_pid" 2>/dev/null || fail "第二个 start 未等待生命周期锁"
+print -r -- release >"$concurrent_barrier.release"
+set +e
+wait "$concurrent_start_one_pid"
+concurrent_start_one_status=$?
+wait "$concurrent_start_two_pid"
+concurrent_start_two_status=$?
+set -e
+[[ "$concurrent_start_one_status" == "0" && "$concurrent_start_two_status" != "0" ]] || \
+  fail "两个并发 start 没有串行化为一成一败"
+[[ "$(wc -l <"$fixture_root/work/helper-launches" | tr -d ' ')" == "1" ]] || \
+  fail "两个并发 start 启动了多个 helper"
+concurrent_helper_pid="$(<"$fixture_state/helper.pid")"
+kill -0 "$concurrent_helper_pid" 2>/dev/null || fail "并发 start 后 PID 不可管理"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/stop-helper.zsh" >/dev/null
+finish_focused_case concurrent_start
+fi
+
+if case_enabled lifecycle_signal_release; then
+signal_barrier="$fixture_root/work/signal-start-barrier"
+signal_start_output="$fixture_root/work/signal-start.txt"
+rm -f -- "$fixture_root/work/helper-launches" "$signal_barrier.ready" "$signal_barrier.release"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  WEB_VIDEO_HELPER_TEST_BARRIER_STAGE=after-lock \
+  WEB_VIDEO_HELPER_TEST_BARRIER_PATH="$signal_barrier" \
+  /bin/zsh "$fixture_scripts/start-helper.zsh" >"$signal_start_output" 2>&1 &
+signal_start_pid=$!
+for attempt in {1..100}; do
+  [[ -f "$signal_barrier.ready" ]] && break
+  /bin/sleep 0.02
+done
+[[ -f "$signal_barrier.ready" ]] || fail "signal start 未持有生命周期锁"
+[[ "$(<"$signal_barrier.ready")" == "$signal_start_pid" ]] || fail "signal start 锁 owner PID 不匹配"
+kill -TERM "$signal_start_pid"
+set +e
+wait "$signal_start_pid"
+signal_start_status=$?
+set -e
+[[ "$signal_start_status" != "0" ]] || fail "start 收到 TERM 后错误报告成功"
+[[ ! -e "$lifecycle_lock_path" ]] || fail "start 收到 TERM 后生命周期锁残留"
+[[ ! -e "$fixture_state/helper.pid" ]] || fail "start 收到 TERM 后 PID 文件残留"
+[[ ! -e "$fixture_root/work/helper-launches" ]] || fail "after-lock TERM 前不应启动 helper"
+finish_focused_case lifecycle_signal_release
+fi
+
+if case_enabled start_stop_interleave; then
+interleave_barrier="$fixture_root/work/start-stop-barrier"
+interleave_start_output="$fixture_root/work/interleave-start.txt"
+interleave_stop_output="$fixture_root/work/interleave-stop.txt"
+rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+  "$interleave_barrier.ready" "$interleave_barrier.release"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  WEB_VIDEO_HELPER_TEST_BARRIER_STAGE=after-launch \
+  WEB_VIDEO_HELPER_TEST_BARRIER_PATH="$interleave_barrier" \
+  /bin/zsh "$fixture_scripts/start-helper.zsh" >"$interleave_start_output" 2>&1 &
+interleave_start_pid=$!
+for attempt in {1..100}; do
+  [[ -f "$interleave_barrier.ready" ]] && break
+  /bin/sleep 0.02
+done
+[[ -f "$interleave_barrier.ready" ]] || fail "start 未到达 launch 后持锁屏障"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/stop-helper.zsh" >"$interleave_stop_output" 2>&1 &
+interleave_stop_pid=$!
+/bin/sleep 0.2
+kill -0 "$interleave_stop_pid" 2>/dev/null || fail "stop 未等待 start 持有的生命周期锁"
+print -r -- release >"$interleave_barrier.release"
+wait "$interleave_start_pid" || fail "start/stop 交错时 start 未先完成"
+wait "$interleave_stop_pid" || fail "start/stop 交错时 stop 未随后完成"
+interleaved_helper_pid="$(tail -n 1 "$fixture_root/work/helper-launches")"
+kill -0 "$interleaved_helper_pid" 2>/dev/null && fail "start/stop 交错后 helper 残留"
+[[ ! -e "$fixture_state/helper.pid" ]] || fail "start/stop 交错后 PID 文件残留"
+[[ ! -e "$lifecycle_lock_path" ]] || fail "start/stop 交错后生命周期锁残留"
+finish_focused_case start_stop_interleave
+fi
+
+for failure_stage in temp-create pid-write pid-chmod pid-publish; do
+  case "$failure_stage" in
+    temp-create) failure_case="pid_temp_create_failure" ;;
+    pid-write) failure_case="pid_write_failure" ;;
+    pid-chmod) failure_case="pid_chmod_failure" ;;
+    pid-publish) failure_case="pid_publish_failure" ;;
+  esac
+  case_enabled "$failure_case" || continue
+  rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+    "$fixture_state/helper.pid"
+  failure_output="$fixture_root/work/failure-$failure_stage.txt"
+  if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    WEB_VIDEO_HELPER_TEST_FAIL_STAGE="$failure_stage" \
+    /bin/zsh "$fixture_scripts/start-helper.zsh" >"$failure_output" 2>&1; then
+    fail "$failure_stage 故障注入时 start 仍报告成功"
+  fi
+  [[ ! -e "$fixture_state/helper.pid" ]] || fail "$failure_stage 故障后 PID 文件残留"
+  if [[ -f "$fixture_root/work/helper-launches" ]]; then
+    while IFS= read -r failed_helper_pid; do
+      kill -0 "$failed_helper_pid" 2>/dev/null && fail "$failure_stage 故障后 helper 残留"
+    done <"$fixture_root/work/helper-launches"
+  fi
+  for attempt in {1..100}; do
+    [[ ! -e "$fixture_root/work/logger.pid" ]] && break
+    /bin/sleep 0.02
+  done
+  [[ ! -e "$fixture_root/work/logger.pid" ]] || fail "$failure_stage 故障后 logger 残留"
+  [[ ! -e "$lifecycle_lock_path" ]] || fail "$failure_stage 故障后生命周期锁残留"
+  finish_focused_case "$failure_case"
+done
+
+if [[ "$focused_case" != "all" ]]; then
+  fail "未知或未执行的聚焦用例：$focused_case"
+fi
 
 start_output="$fixture_root/work/start.txt"
 env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \

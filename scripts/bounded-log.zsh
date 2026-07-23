@@ -29,17 +29,34 @@ integer recent_bytes=0
 integer logging_enabled=1
 local chunk=""
 local recent_data=""
-rotate_temp="$helper_state_dir/.helper.log.rotate.$$"
+rotate_temp=""
 logger_pid_path=""
+
+remove_rotate_temp() {
+  if [[ -n "$rotate_temp" && "${rotate_temp:A:h}" == "${helper_state_dir:A}" && \
+    "$rotate_temp" == "$helper_state_dir"/.helper.log.rotate.?????? && \
+    -f "$rotate_temp" && ! -L "$rotate_temp" && -O "$rotate_temp" ]]; then
+    rm -f -- "$rotate_temp" 2>/dev/null || true
+  fi
+  rotate_temp=""
+}
+
+create_rotate_temp() {
+  rotate_temp="$(umask 077; /usr/bin/mktemp "$helper_state_dir/.helper.log.rotate.XXXXXX")" || return 1
+  if [[ "${rotate_temp:A:h}" != "${helper_state_dir:A}" || ! -f "$rotate_temp" || \
+    -L "$rotate_temp" || ! -O "$rotate_temp" ]]; then
+    rotate_temp=""
+    return 1
+  fi
+  chmod 0600 "$rotate_temp" || return 1
+}
 
 disable_log_storage() {
   if (( log_fd >= 0 )); then
     exec {log_fd}>&-
     log_fd=-1
   fi
-  if [[ "$rotate_temp" == "$helper_state_dir"/.helper.log.rotate.<-> ]]; then
-    rm -f -- "$rotate_temp" 2>/dev/null || true
-  fi
+  remove_rotate_temp
   logging_enabled=0
   recent_data=""
   recent_bytes=0
@@ -53,11 +70,11 @@ cleanup_logger() {
   if [[ -n "$logger_pid_path" && "$logger_pid_path" == "${helper_work_dir:A}"/* ]]; then
     rm -f -- "$logger_pid_path"
   fi
-  if [[ "$rotate_temp" == "$helper_state_dir"/.helper.log.rotate.<-> ]]; then
-    rm -f -- "$rotate_temp"
-  fi
+  remove_rotate_temp
 }
-trap cleanup_logger EXIT INT TERM
+trap cleanup_logger EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 if [[ "${WEB_VIDEO_HELPER_TESTING:-}" == "1" && -n "${WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH:-}" ]]; then
   logger_pid_path="${WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH:A}"
@@ -89,7 +106,7 @@ while true; do
   if (( logging_enabled && used_bytes + copied > max_bytes )); then
     exec {log_fd}>&-
     log_fd=-1
-    if ! sysopen -w -o creat,excl,nofollow -m 0600 -u log_fd "$rotate_temp"; then
+    if ! create_rotate_temp || ! sysopen -w -o nofollow,trunc -u log_fd "$rotate_temp"; then
       disable_log_storage
     elif (( recent_bytes > 0 )) && ! syswrite -o "$log_fd" "$recent_data"; then
       disable_log_storage
@@ -98,9 +115,12 @@ while true; do
       log_fd=-1
       if ! mv -f -- "$rotate_temp" "$target_log"; then
         disable_log_storage
-      elif ! sysopen -a -o nofollow -u log_fd "$target_log"; then
-        disable_log_storage
       else
+        rotate_temp=""
+      fi
+      if (( logging_enabled )) && ! sysopen -a -o nofollow -u log_fd "$target_log"; then
+        disable_log_storage
+      elif (( logging_enabled )); then
         used_bytes=$recent_bytes
       fi
     fi

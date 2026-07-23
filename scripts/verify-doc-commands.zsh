@@ -8,7 +8,7 @@ repo_real="${repo_root:A}"
 verification_root="$repo_root/work/doc-verification"
 helper_binary="$repo_root/work/dist/web-video-helper"
 
-for required_command in curl ps lsof file lipo mktemp; do
+for required_command in curl ps lsof file lipo mktemp go; do
   command -v "$required_command" >/dev/null 2>&1 || {
     print -u2 -- "文档验证缺少命令：$required_command"
     exit 1
@@ -54,16 +54,9 @@ cleanup_verification() {
 }
 trap cleanup_verification EXIT INT TERM
 
-test_port=""
-for attempt in {1..50}; do
-  candidate_port=$(( 30000 + RANDOM % 20000 ))
-  if ! /usr/bin/curl -fsS --max-time 0.2 "http://127.0.0.1:$candidate_port/health" >/dev/null 2>&1; then
-    test_port="$candidate_port"
-    break
-  fi
-done
-[[ -n "$test_port" ]] || {
-  print -u2 -- "无法找到空闲的测试回环端口"
+test_port="$(go run "$script_dir/testtools/loopback-port/main.go")"
+[[ "$test_port" == <-> && "$test_port" -ge 1 && "$test_port" -le 65535 ]] || {
+  print -u2 -- "实际临时 bind 返回了无效回环端口"
   exit 1
 }
 
@@ -133,8 +126,8 @@ logger_pid="$(<"$logger_pid_path")"
   exit 1
 }
 
-mv "$state_dir/helper.pid" "$saved_pid_path"
 pid_was_moved="1"
+mv "$state_dir/helper.pid" "$saved_pid_path"
 if "$script_dir/start-helper.zsh" >"$duplicate_output" 2>&1; then
   print -u2 -- "移走 PID 文件后，已有健康实例未阻止重复启动"
   exit 1
