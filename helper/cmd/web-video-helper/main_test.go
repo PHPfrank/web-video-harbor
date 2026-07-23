@@ -184,21 +184,82 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	}
 }
 
-func TestShutdownServicesStopsHTTPBeforeWaitingForEngine(t *testing.T) {
-	var order []string
-	engine := shutdownEngineFunc(func(context.Context) error {
-		order = append(order, "engine")
-		return nil
-	})
-	err := shutdownServices(context.Background(), func(context.Context) error {
-		order = append(order, "http")
-		return nil
-	}, engine)
-	if err != nil {
+func TestShutdownServicesCancelsEngineWhileHTTPShutdownBlocks(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	httpStarted := make(chan struct{})
+	engineCalled := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- shutdownServices(ctx, func(ctx context.Context) error {
+			close(httpStarted)
+			<-ctx.Done()
+			return ctx.Err()
+		}, shutdownEngineFunc(func(context.Context) error {
+			close(engineCalled)
+			return nil
+		}))
+	}()
+	select {
+	case <-httpStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP shutdown did not start")
+	}
+	select {
+	case <-engineCalled:
+	case <-time.After(20 * time.Millisecond):
+		t.Fatal("engine shutdown waited behind blocked HTTP shutdown")
+	}
+	if err := <-result; !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("shutdownServices() error = %v", err)
 	}
-	if got := strings.Join(order, ","); got != "http,engine" {
-		t.Fatalf("shutdown order = %q", got)
+}
+
+func TestShutdownServicesWaitsForHTTPAndEngine(t *testing.T) {
+	httpStarted := make(chan struct{})
+	engineStarted := make(chan struct{})
+	releaseHTTP := make(chan struct{})
+	releaseEngine := make(chan struct{})
+	result := make(chan error, 1)
+	go func() {
+		result <- shutdownServices(context.Background(), func(context.Context) error {
+			close(httpStarted)
+			<-releaseHTTP
+			return nil
+		}, shutdownEngineFunc(func(context.Context) error {
+			close(engineStarted)
+			<-releaseEngine
+			return nil
+		}))
+	}()
+	select {
+	case <-httpStarted:
+	case <-time.After(time.Second):
+		t.Fatal("HTTP shutdown did not start")
+	}
+	select {
+	case <-engineStarted:
+	case <-time.After(time.Second):
+		t.Fatal("engine shutdown did not start")
+	}
+	close(releaseHTTP)
+	select {
+	case err := <-result:
+		t.Fatalf("returned before engine drained: %v", err)
+	case <-time.After(20 * time.Millisecond):
+	}
+	close(releaseEngine)
+	if err := <-result; err != nil {
+		t.Fatalf("shutdownServices() error = %v", err)
+	}
+}
+
+func TestShutdownServicesPreservesBothErrors(t *testing.T) {
+	httpErr := errors.New("HTTP drain failed")
+	engineErr := errors.New("engine drain failed")
+	err := shutdownServices(context.Background(), func(context.Context) error { return httpErr }, shutdownEngineFunc(func(context.Context) error { return engineErr }))
+	if !errors.Is(err, httpErr) || !errors.Is(err, engineErr) {
+		t.Fatalf("shutdownServices() error = %v", err)
 	}
 }
 

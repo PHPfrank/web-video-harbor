@@ -148,9 +148,12 @@ type engineShutdowner interface {
 }
 
 func shutdownServices(ctx context.Context, shutdownHTTP func(context.Context) error, engine engineShutdowner) error {
-	httpErr := shutdownHTTP(ctx)
-	engineErr := engine.Shutdown(ctx)
-	return errors.Join(httpErr, engineErr)
+	results := make(chan error, 2)
+	go func() { results <- shutdownHTTP(ctx) }()
+	go func() { results <- engine.Shutdown(ctx) }()
+	first := <-results
+	second := <-results
+	return errors.Join(first, second)
 }
 
 func main() {
