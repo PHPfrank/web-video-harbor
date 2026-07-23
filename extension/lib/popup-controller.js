@@ -33,6 +33,8 @@
     const pendingCandidates = new Set();
     const pendingTasks = new Set();
     let focusedCandidate = null;
+    let focusedTask = null;
+    let taskSnapshot = '[]';
     let refreshInFlight = null;
     let pollCycle = null;
     let pollTimer = null;
@@ -82,7 +84,7 @@
     }
 
     function renderTasks() {
-      renderer.renderTasks(buildView());
+      renderer.renderTasks({ ...buildView(), focusedTask: focusedTask ? { ...focusedTask } : null });
     }
 
     function setNotice(message, tone) {
@@ -90,7 +92,9 @@
     }
 
     function errorMessage(error, fallback) {
-      return error && typeof error.message === 'string' && error.message ? error.message : fallback;
+      if (error && error.name === 'HelperClientError' && typeof error.message === 'string'
+        && error.message && error.message.length <= 100) return error.message;
+      return fallback;
     }
 
     function findCandidate(url) {
@@ -102,6 +106,18 @@
       const index = model.tasks.findIndex((item) => item.id === task.id);
       if (index === -1) model.tasks = [task, ...model.tasks];
       else model.tasks = model.tasks.map((item, itemIndex) => (itemIndex === index ? task : item));
+      taskSnapshot = tasksFingerprint(model.tasks);
+    }
+
+    function tasksFingerprint(tasks) {
+      return JSON.stringify(tasks.map((task) => [
+        task && task.id,
+        task && task.title,
+        task && task.status,
+        Number(task && task.progress) || 0,
+        task && task.error,
+        task && task.errorCode,
+      ]));
     }
 
     function refreshCandidates() {
@@ -122,18 +138,26 @@
       if (refreshInFlight) return refreshInFlight;
       const previousCapability = capabilityKey();
       refreshInFlight = (async () => {
+        let tasksChanged = false;
         try {
           const health = await helper.health();
           model.ffmpegAvailable = Boolean(health && health.ffmpeg);
           const tasks = await helper.listTasks();
           model.connection = 'connected';
-          model.tasks = Array.isArray(tasks) ? tasks : [];
+          const nextTasks = Array.isArray(tasks) ? tasks : [];
+          const nextSnapshot = tasksFingerprint(nextTasks);
+          if (nextSnapshot !== taskSnapshot) {
+            model.tasks = nextTasks;
+            taskSnapshot = nextSnapshot;
+            tasksChanged = true;
+            if (focusedTask && !model.tasks.some((task) => task.id === focusedTask.id)) focusedTask = null;
+          }
         } catch (error) {
           model.connection = error && (error.code === 'missing_token' || error.code === 'unauthorized')
             ? 'disconnected' : 'error';
         }
         renderStatus();
-        renderTasks();
+        if (tasksChanged) renderTasks();
         if (previousCapability !== capabilityKey()) renderCandidates();
         return model.tasks;
       })().finally(() => {
@@ -186,6 +210,11 @@
       focusedCandidate = { url: candidateURL, control };
     }
 
+    function focusTask(id, action) {
+      if (!model.tasks.some((task) => task.id === id)) return;
+      focusedTask = { id, action };
+    }
+
     function unavailableForCandidate(candidate) {
       if (model.connection !== 'connected') {
         setNotice('本地助手尚未连接');
@@ -231,7 +260,8 @@
           return candidate;
         } catch (error) {
           candidate.error = errorMessage(error, '无法检查视频画质');
-          throw error;
+          setNotice(candidate.error);
+          return null;
         } finally {
           candidate.inspecting = false;
         }
@@ -251,15 +281,22 @@
         }
       }
       return runCandidateOperation(url, async () => {
-        const task = await helper.createTask({
-          url: sourceURL,
-          title: candidate.title || '未命名视频',
-          mediaType: candidate.kind,
-        });
-        replaceTask(task);
-        renderTasks();
-        setNotice('已添加到本地下载队列。', 'success');
-        return task;
+        try {
+          const task = await helper.createTask({
+            url: sourceURL,
+            title: candidate.title || '未命名视频',
+            mediaType: candidate.kind,
+          });
+          replaceTask(task);
+          renderTasks();
+          setNotice('已添加到本地下载队列。', 'success');
+          return task;
+        } catch (error) {
+          const message = errorMessage(error, '无法创建下载任务');
+          candidate.error = message;
+          setNotice(message);
+          return null;
+        }
       });
     }
 
@@ -275,7 +312,7 @@
       }
       const promise = Promise.resolve(started).catch((error) => {
         setNotice(errorMessage(error, '无法操作该任务'));
-        throw error;
+        return null;
       }).finally(() => {
         taskOperations.delete(id);
         pendingTasks.delete(id);
@@ -330,6 +367,7 @@
     return {
       downloadCandidate,
       focusCandidate,
+      focusTask,
       inspectCandidate,
       refreshCandidates,
       refreshTasks,

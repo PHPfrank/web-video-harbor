@@ -68,35 +68,44 @@
   }
 
   function sendCandidates(candidates) {
-    if (!candidates.length) return;
-    try {
-      chrome.runtime.sendMessage({
-        type: 'ADD_CANDIDATES',
-        pageUrl: location.href,
-        candidates,
-      }, function ignoreResponse() {
-        void chrome.runtime.lastError;
-      });
-    } catch (_error) {
-      // The extension may have been reloaded while this page was open.
-    }
+    if (!candidates.length) return Promise.resolve({ ok: true, candidates: [] });
+    return new Promise((resolve) => {
+      try {
+        chrome.runtime.sendMessage({
+          type: 'ADD_CANDIDATES',
+          pageUrl: location.href,
+          candidates,
+        }, function onCandidatesStored(response) {
+          const runtimeError = chrome.runtime.lastError;
+          if (runtimeError || !response || response.ok !== true) {
+            resolve({ ok: false, error: '后台未能保存扫描结果' });
+            return;
+          }
+          resolve({ ok: true, candidates: Array.isArray(response.candidates) ? response.candidates : candidates });
+        });
+      } catch (_error) {
+        resolve({ ok: false, error: '后台未能保存扫描结果' });
+      }
+    });
   }
 
-  function scan(force) {
+  async function scan(force) {
     const candidates = collectCandidates();
     const fingerprint = JSON.stringify(candidates);
     if (force || fingerprint !== lastFingerprint) {
+      const stored = await sendCandidates(candidates);
+      if (!stored.ok) return stored;
       lastFingerprint = fingerprint;
-      sendCandidates(candidates);
+      return { ok: true, candidates: stored.candidates };
     }
-    return candidates;
+    return { ok: true, candidates };
   }
 
   function scheduleScan() {
     if (rescanTimer !== null) clearTimeout(rescanTimer);
     rescanTimer = setTimeout(function runDebouncedScan() {
       rescanTimer = null;
-      scan(false);
+      void scan(false);
     }, RESCAN_DELAY_MS);
   }
 
@@ -125,9 +134,10 @@
 
   chrome.runtime.onMessage.addListener(function onMessage(request, _sender, sendResponse) {
     if (!request || request.type !== 'RESCAN') return false;
-    const candidates = scan(true);
-    sendResponse({ ok: true, candidates });
-    return false;
+    void scan(true).then(sendResponse, function onScanFailure() {
+      sendResponse({ ok: false, error: '后台未能保存扫描结果' });
+    });
+    return true;
   });
 
   if (document.documentElement && typeof MutationObserver === 'function') {
@@ -152,5 +162,5 @@
   } catch (_error) {
     // The extension may have been reloaded while this page was open.
   }
-  scan(false);
+  void scan(false);
 }());

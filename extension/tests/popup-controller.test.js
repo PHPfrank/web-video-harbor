@@ -90,7 +90,12 @@ test('task refresh updates task/status regions without rebuilding candidate cont
     pageUrl: 'https://example.com/watch',
     candidates: [{ url: 'https://cdn.example/master.m3u8', kind: 'hls', title: 'HLS' }],
   };
-  const { controller, renderer } = harness({ bridge: { getTabMedia: async () => media } });
+  const { controller, renderer } = harness({
+    bridge: { getTabMedia: async () => media },
+    helper: {
+      listTasks: async () => [{ id: 'stable', title: 'task', status: 'downloading', progress: 20 }],
+    },
+  });
   await controller.refreshCandidates();
   await controller.refreshTasks();
   const candidateRenders = renderer.candidates.length;
@@ -98,8 +103,28 @@ test('task refresh updates task/status regions without rebuilding candidate cont
   await controller.refreshTasks();
 
   assert.equal(renderer.candidates.length, candidateRenders);
-  assert.equal(renderer.tasks.length, 2);
+  assert.equal(renderer.tasks.length, 1);
   assert.equal(renderer.status.length, 2);
+});
+
+test('changed task data rerenders once and preserves focused action by task ID', async () => {
+  const taskResults = [
+    [{ id: 'task-1', title: 'task', status: 'downloading', progress: 20 }],
+    [{ id: 'task-1', title: 'task', status: 'downloading', progress: 20 }],
+    [{ id: 'task-1', title: 'task', status: 'downloading', progress: 21 }],
+  ];
+  const { controller, renderer } = harness({
+    helper: { listTasks: async () => taskResults.shift() },
+  });
+  await controller.refreshTasks();
+  controller.focusTask('task-1', 'cancel');
+  await controller.refreshTasks();
+  const stableRenders = renderer.tasks.length;
+
+  await controller.refreshTasks();
+
+  assert.equal(renderer.tasks.length, stableRenders + 1);
+  assert.deepEqual(renderer.tasks.at(-1).focusedTask, { id: 'task-1', action: 'cancel' });
 });
 
 test('capability rerender preserves selected HLS variant and focused control by candidate URL', async () => {
@@ -220,6 +245,32 @@ test('candidate pending lock prevents concurrent duplicate downloads and exposes
   assert.equal(renderer.candidates.at(-1).candidates[0].pending, false);
 });
 
+test('rejected download restores the button and shows a safe visible error', async () => {
+  const candidateURL = 'https://cdn.example/video.mp4';
+  const secret = 'https://private.example/video.mp4?token=secret';
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: 'https://example.com',
+        candidates: [{ url: candidateURL, kind: 'mp4', title: 'MP4' }],
+      }),
+    },
+    helper: {
+      createTask: async () => { throw new Error(secret); },
+    },
+  });
+  await controller.refreshCandidates();
+  await controller.refreshTasks();
+
+  const result = await controller.downloadCandidate(candidateURL);
+
+  assert.equal(result, null);
+  assert.equal(renderer.candidates.at(-1).candidates[0].pending, false);
+  assert.equal(renderer.candidates.at(-1).candidates[0].error, '无法创建下载任务');
+  assert.equal(renderer.notices.at(-1).message, '无法创建下载任务');
+  assert.doesNotMatch(JSON.stringify(renderer.notices), /private|token|https?:/i);
+});
+
 test('task pending lock prevents duplicate actions and restores controls in finally', async () => {
   const cancellation = deferred();
   let cancelCalls = 0;
@@ -237,8 +288,9 @@ test('task pending lock prevents duplicate actions and restores controls in fina
   assert.equal(cancelCalls, 1);
   assert.equal(renderer.tasks.at(-1).tasks[0].pending, true);
   cancellation.reject(new Error('offline'));
-  await assert.rejects(first);
+  assert.equal(await first, null);
   assert.equal(renderer.tasks.at(-1).tasks[0].pending, false);
+  assert.equal(renderer.notices.at(-1).message, '无法操作该任务');
 });
 
 test('health ffmpeg=false leaves MP4 usable but blocks HLS inspect and download', async () => {

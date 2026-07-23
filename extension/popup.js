@@ -197,6 +197,11 @@
       const cards = view.tasks.map(renderTask);
       elements.taskList.replaceChildren(...cards);
       elements.taskEmpty.hidden = cards.length > 0;
+      if (view.focusedTask) {
+        const card = cards.find((item) => taskIDs.get(item) === view.focusedTask.id);
+        const control = card && card.querySelector(`[data-control="${view.focusedTask.action}"]`);
+        if (control && !control.disabled) control.focus({ preventScroll: true });
+      }
     },
     setNotice(message, tone) {
       viewState.setText(elements.notice, message || '');
@@ -227,7 +232,14 @@
     if (!button || !url) return;
     const operation = button.dataset.action === 'inspect'
       ? controller.inspectCandidate(url) : controller.downloadCandidate(url);
-    void operation.catch(() => {});
+    void operation;
+  });
+
+  elements.taskList.addEventListener('focusin', function onTaskFocus(event) {
+    const control = event.target.closest('[data-control]');
+    const card = control && control.closest('.task-card');
+    const id = card && taskIDs.get(card);
+    if (control && id) controller.focusTask(id, control.dataset.control);
   });
 
   elements.taskList.addEventListener('click', function onTaskAction(event) {
@@ -235,7 +247,7 @@
     const card = button && button.closest('.task-card');
     const id = card && taskIDs.get(card);
     if (!button || !id) return;
-    void controller.taskAction(id, button.dataset.action).catch(() => {});
+    void controller.taskAction(id, button.dataset.action);
   });
 
   elements.rescanButton.addEventListener('click', function onRescan() {
