@@ -30,6 +30,11 @@ if [[ -e "$helper_pid_path" || -L "$helper_pid_path" ]]; then
   helper_remove_pid_file
 fi
 
+if helper_health_response; then
+  print -u2 -- "目标健康端点已有实例响应，已拒绝启动新的本地助手。"
+  exit 1
+fi
+
 if [[ -L "$helper_log_path" || ( -e "$helper_log_path" && ! -f "$helper_log_path" ) ]]; then
   print -u2 -- "日志路径不是安全的普通文件：$helper_log_path"
   exit 1
@@ -45,7 +50,7 @@ fi
 trap 'rm -f -- "$pid_temp"' EXIT
 
 nohup "$helper_binary" --config "$helper_config_path" \
-  >"$helper_log_path" 2>&1 </dev/null &
+  > >(/bin/zsh "$script_dir/bounded-log.zsh" "$helper_log_path") 2>&1 </dev/null &
 started_pid=$!
 print -r -- "$started_pid" >"$pid_temp"
 chmod 0600 "$pid_temp"
@@ -57,22 +62,38 @@ for attempt in {1..50}; do
   if ! kill -0 "$started_pid" 2>/dev/null; then
     break
   fi
-  if helper_health_response && helper_process_matches "$started_pid"; then
+  if helper_health_response && [[ "$helper_health_pid" == "$started_pid" ]] && helper_process_matches "$started_pid"; then
     print -- "本地助手启动成功（PID $started_pid）。"
     print -- "状态目录：$helper_state_dir"
     exit 0
   fi
 done
 
-if kill -0 "$started_pid" 2>/dev/null && helper_process_matches "$started_pid"; then
+if kill -0 "$started_pid" 2>/dev/null; then
+  if ! helper_process_matches "$started_pid"; then
+    print -u2 -- "本地助手未通过健康检查，且无法确认新进程身份，无法安全清理；PID 文件已保留：$helper_pid_path"
+    exit 1
+  fi
   kill -TERM "$started_pid" 2>/dev/null || true
 fi
 for attempt in {1..20}; do
   kill -0 "$started_pid" 2>/dev/null || break
   /bin/sleep 0.1
 done
-if kill -0 "$started_pid" 2>/dev/null && helper_process_matches "$started_pid"; then
+if kill -0 "$started_pid" 2>/dev/null; then
+  if ! helper_process_matches "$started_pid"; then
+    print -u2 -- "等待清理期间进程身份发生变化，无法安全清理；PID 文件已保留：$helper_pid_path"
+    exit 1
+  fi
   kill -KILL "$started_pid" 2>/dev/null || true
+fi
+for attempt in {1..20}; do
+  kill -0 "$started_pid" 2>/dev/null || break
+  /bin/sleep 0.1
+done
+if kill -0 "$started_pid" 2>/dev/null; then
+  print -u2 -- "无法确认本地助手已经停止；PID 文件已保留：$helper_pid_path"
+  exit 1
 fi
 helper_remove_pid_file
 print -u2 -- "本地助手未能在 5 秒内通过健康检查，请查看：$helper_log_path"

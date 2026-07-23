@@ -157,9 +157,10 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		Ready   bool   `json:"ready"`
 		Version string `json:"version"`
 		FFmpeg  bool   `json:"ffmpeg"`
+		PID     int    `json:"pid"`
 	}
 	getJSON(t, helperURL+"/health", false, &health)
-	if !health.Ready || !health.FFmpeg || health.Version != "integration" {
+	if !health.Ready || !health.FFmpeg || health.Version != "integration" || health.PID <= 1 {
 		t.Fatalf("unexpected health response: %+v", health)
 	}
 

@@ -5,6 +5,12 @@ script_dir="${0:A:h}"
 source "$script_dir/helper-common.zsh"
 helper_initialize_paths "$0"
 
+if [[ ! -e "$helper_state_dir" && ! -L "$helper_state_dir" ]]; then
+  print -- "本地助手未运行（没有状态目录）。"
+  exit 0
+fi
+helper_validate_existing_state_dir
+
 if [[ ! -e "$helper_pid_path" && ! -L "$helper_pid_path" ]]; then
   print -- "本地助手未运行（没有 PID 文件）。"
   exit 0

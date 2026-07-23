@@ -116,6 +116,7 @@ type Options struct {
 type Server struct {
 	tokenHash       [32]byte
 	version         string
+	processID       int
 	ffmpegAvailable bool
 	downloadDir     string
 	inspector       MediaInspector
@@ -152,6 +153,7 @@ func New(options Options) (*Server, error) {
 
 	s := &Server{
 		tokenHash: sha256.Sum256([]byte(options.Token)), version: options.Version,
+		processID: os.Getpid(),
 		ffmpegAvailable: options.FFmpegAvailable, downloadDir: filepath.Clean(absDir),
 		inspector: options.Inspector, tasks: options.Tasks, revealer: options.Revealer,
 	}
@@ -193,7 +195,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ready": true, "version": s.version, "ffmpeg": s.ffmpegAvailable})
+		writeJSON(w, http.StatusOK, map[string]any{"ready": true, "version": s.version, "ffmpeg": s.ffmpegAvailable, "pid": s.processID})
 		return
 	}
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {

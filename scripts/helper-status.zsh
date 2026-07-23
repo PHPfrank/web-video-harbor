@@ -5,6 +5,14 @@ script_dir="${0:A:h}"
 source "$script_dir/helper-common.zsh"
 helper_initialize_paths "$0"
 
+if [[ ! -e "$helper_state_dir" && ! -L "$helper_state_dir" ]]; then
+  print -- "助手状态：未运行"
+  print -- "状态目录：$helper_state_dir"
+  print -- "下载目录：$helper_download_dir"
+  exit 1
+fi
+helper_validate_existing_state_dir
+
 if [[ ! -e "$helper_pid_path" && ! -L "$helper_pid_path" ]]; then
   print -- "助手状态：未运行"
   print -- "状态目录：$helper_state_dir"
@@ -31,6 +39,10 @@ if ! helper_health_response; then
   exit 1
 fi
 health_json="$REPLY"
+if [[ "$helper_health_pid" != "$recorded_pid" ]]; then
+  print -u2 -- "助手状态：PID 存在，但健康端点不属于该实例"
+  exit 1
+fi
 
 print -- "助手状态：健康"
 print -- "PID：$recorded_pid"

@@ -164,8 +164,11 @@ func TestHealthIsUnauthenticatedAndMinimal(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 	got := decodeObject(t, rr)
-	if len(got) != 3 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true {
+	if len(got) != 4 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true || got["pid"] != float64(os.Getpid()) {
 		t.Fatalf("health = %#v", got)
+	}
+	if got["pid"].(float64) <= 1 {
+		t.Fatalf("health PID is not a real process: %#v", got)
 	}
 	for _, secret := range []string{testToken, "download", "task", "url", "path"} {
 		if strings.Contains(strings.ToLower(rr.Body.String()), strings.ToLower(secret)) {

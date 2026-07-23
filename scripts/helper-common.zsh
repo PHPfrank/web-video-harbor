@@ -35,6 +35,24 @@ helper_initialize_paths() {
   helper_pid_path="$helper_state_dir/helper.pid"
   helper_log_path="$helper_state_dir/helper.log"
   helper_health_url="http://127.0.0.1:17432/health"
+
+  if [[ -n "${WEB_VIDEO_HELPER_TEST_ADDRESS:-}" ]]; then
+    if [[ "${WEB_VIDEO_HELPER_TESTING:-}" != "1" ]]; then
+      print -u2 -- "health 地址覆盖只允许用于受控测试"
+      return 1
+    fi
+    local requested_address="$WEB_VIDEO_HELPER_TEST_ADDRESS"
+    if [[ ! "$requested_address" =~ '^127\.0\.0\.1:([1-9][0-9]{0,4})$' ]]; then
+      print -u2 -- "测试 health 地址必须是 127.0.0.1 和有效端口"
+      return 1
+    fi
+    local requested_port="${match[1]}"
+    if (( requested_port > 65535 )); then
+      print -u2 -- "测试 health 端口超出范围"
+      return 1
+    fi
+    helper_health_url="http://$requested_address/health"
+  fi
 }
 
 helper_prepare_state_dir() {
@@ -48,6 +66,32 @@ helper_prepare_state_dir() {
     return 1
   fi
   chmod 0700 "$helper_state_dir"
+}
+
+helper_validate_existing_state_dir() {
+  if [[ ! -d "$helper_state_dir" || -L "$helper_state_dir" || ! -O "$helper_state_dir" ]]; then
+    print -u2 -- "状态路径不是当前用户拥有的真实目录：$helper_state_dir"
+    return 1
+  fi
+  if [[ "$(/usr/bin/stat -f '%Lp' "$helper_state_dir" 2>/dev/null)" != "700" ]]; then
+    print -u2 -- "状态目录权限不安全，应为 0700：$helper_state_dir"
+    return 1
+  fi
+
+  local state_file state_mode
+  for state_file in "$helper_config_path" "$helper_pid_path" "$helper_log_path"; do
+    if [[ -e "$state_file" || -L "$state_file" ]]; then
+      if [[ ! -f "$state_file" || -L "$state_file" || ! -O "$state_file" ]]; then
+        print -u2 -- "状态文件不是当前用户拥有的普通文件：$state_file"
+        return 1
+      fi
+      state_mode="$(/usr/bin/stat -f '%Lp' "$state_file" 2>/dev/null)" || return 1
+      if [[ "$state_mode" != "600" ]]; then
+        print -u2 -- "状态文件权限不安全，应为 0600：$state_file"
+        return 1
+      fi
+    fi
+  done
 }
 
 helper_read_pid() {
@@ -64,6 +108,7 @@ helper_read_pid() {
 helper_process_matches() {
   local candidate_pid="$1"
   local ps_command="/bin/ps"
+  local lsof_command="/usr/sbin/lsof"
   if [[ "${WEB_VIDEO_HELPER_TESTING:-}" == "1" && -n "${WEB_VIDEO_HELPER_TEST_PS_COMMAND:-}" ]]; then
     local requested_ps_real="${WEB_VIDEO_HELPER_TEST_PS_COMMAND:A}"
     local allowed_work_real="${helper_work_dir:A}"
@@ -73,11 +118,33 @@ helper_process_matches() {
     fi
     ps_command="$requested_ps_real"
   fi
+  if [[ "${WEB_VIDEO_HELPER_TESTING:-}" == "1" && -n "${WEB_VIDEO_HELPER_TEST_LSOF_COMMAND:-}" ]]; then
+    local requested_lsof_real="${WEB_VIDEO_HELPER_TEST_LSOF_COMMAND:A}"
+    local allowed_lsof_work_real="${helper_work_dir:A}"
+    if [[ "$requested_lsof_real" != "$allowed_lsof_work_real"/* || ! -x "$requested_lsof_real" ]]; then
+      print -u2 -- "测试可执行文件检查器必须是当前项目 work/ 内的可执行文件"
+      return 1
+    fi
+    lsof_command="$requested_lsof_real"
+  fi
+  [[ -x "$lsof_command" ]] || return 1
+
+  local lsof_output expected_executable executable_matched=""
+  lsof_output="$("$lsof_command" -a -p "$candidate_pid" -d txt -Fn 2>/dev/null)" || return 1
+  expected_executable="${helper_binary:A}"
+  local lsof_line
+  while IFS= read -r lsof_line; do
+    if [[ "$lsof_line" == "n$expected_executable" ]]; then
+      executable_matched="1"
+      break
+    fi
+  done <<<"$lsof_output"
+  [[ -n "$executable_matched" ]] || return 1
+
   local process_command
   process_command="$("$ps_command" -ww -p "$candidate_pid" -o command= 2>/dev/null)" || return 1
   [[ -n "$process_command" ]] || return 1
-  [[ "$process_command" == *"$helper_binary"* ]] || return 1
-  [[ "$process_command" == *"--config"*"$helper_config_path"* ]]
+  [[ "$process_command" == "$helper_binary --config $helper_config_path" ]]
 }
 
 helper_remove_pid_file() {
@@ -93,7 +160,11 @@ helper_health_response() {
   local curl_command
   curl_command="$(command -v curl)" || return 1
   REPLY="$("$curl_command" -fsS --max-time 1 "$helper_health_url" 2>/dev/null)" || return 1
-  [[ "$REPLY" == *'"ready":true'* ]]
+  [[ "$REPLY" == *'"ready":true'* ]] || return 1
+  helper_health_pid=""
+  if [[ "$REPLY" =~ '"pid":[[:space:]]*([0-9]+)' ]]; then
+    helper_health_pid="${match[1]}"
+  fi
 }
 
 helper_config_download_dir() {

@@ -29,14 +29,15 @@ test('health is unauthenticated while every v1 request uses the locally stored t
     async fetchImpl(url, options) {
       calls.push({ url, options });
       return url.endsWith('/health')
-        ? jsonResponse(200, { ready: true, version: '0.1.0', ffmpeg: true })
+        ? jsonResponse(200, { ready: true, version: '0.1.0', ffmpeg: true, pid: 4321 })
         : jsonResponse(200, []);
     },
   });
 
-  await client.health();
+  const health = await client.health();
   await client.listTasks();
 
+  assert.equal(health.pid, 4321);
   assert.equal(calls[0].url, 'http://127.0.0.1:17432/health');
   assert.equal(calls[0].options.headers['X-Video-Helper-Token'], undefined);
   assert.equal(calls[1].url, 'http://127.0.0.1:17432/v1/tasks');
