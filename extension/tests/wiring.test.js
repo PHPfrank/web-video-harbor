@@ -42,4 +42,6 @@ test('content scanner covers DOM, performance, rescan, playback, and dynamic pag
   assert.match(source, /loadedmetadata/);
   assert.match(source, /MutationObserver/);
   assert.match(source, /attributeFilter:\s*\[['"]src['"]\]/);
+  const domScanner = source.slice(source.indexOf('function domCandidates'), source.indexOf('function performanceCandidates'));
+  assert.match(domScanner, /MAX_PAGE_CANDIDATES/);
 });

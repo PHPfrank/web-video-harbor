@@ -26,7 +26,10 @@
       };
       for (const url of [video.currentSrc, video.src]) {
         const candidate = media.normalizeCandidate({ ...details, url });
-        if (candidate) candidates.push(candidate);
+        if (candidate) {
+          candidates.push(candidate);
+          if (candidates.length >= MAX_PAGE_CANDIDATES) return candidates;
+        }
       }
       for (const source of video.querySelectorAll('source')) {
         const candidate = media.normalizeCandidate({
@@ -34,7 +37,10 @@
           url: source.src,
           contentType: source.type,
         });
-        if (candidate) candidates.push(candidate);
+        if (candidate) {
+          candidates.push(candidate);
+          if (candidates.length >= MAX_PAGE_CANDIDATES) return candidates;
+        }
       }
     }
     return candidates;

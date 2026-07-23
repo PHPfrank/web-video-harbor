@@ -9,7 +9,9 @@ const navigationStarts = new Map();
 const documentStates = new Map();
 const navigationInProgress = new Set();
 const tabPageUrls = new Map();
+const authoritativeKinds = new Map();
 let persistenceQueue = Promise.resolve();
+let sessionPersistenceEnabled = true;
 
 function validTabId(tabId) {
   return Number.isInteger(tabId) && tabId >= 0;
@@ -22,6 +24,25 @@ function validDocumentId(documentId) {
 function boundedDocumentSet(values) {
   const entries = Array.from(values);
   return new Set(entries.slice(Math.max(0, entries.length - 100)));
+}
+
+function rememberAuthoritativeKind(tabId, url, kind) {
+  let kinds = authoritativeKinds.get(tabId);
+  if (!kinds) {
+    kinds = new Map();
+    authoritativeKinds.set(tabId, kinds);
+  }
+  kinds.delete(url);
+  kinds.set(url, kind);
+  while (kinds.size > 100) kinds.delete(kinds.keys().next().value);
+}
+
+function explicitMediaMime(contentType) {
+  const mime = typeof contentType === 'string' ? contentType.split(';', 1)[0].trim().toLowerCase() : '';
+  return mime === 'video/mp4'
+    || mime === 'application/vnd.apple.mpegurl'
+    || mime === 'application/x-mpegurl'
+    || mime === 'audio/mpegurl';
 }
 
 function resetDocumentState(tabId, staleDocumentId, generation) {
@@ -136,11 +157,34 @@ function persistedSnapshot() {
   return { [STORAGE_KEY]: tabs };
 }
 
+function writeSessionSnapshot(session, snapshot) {
+  return new Promise((resolve) => {
+    let settled = false;
+    function finish(succeeded) {
+      if (settled) return;
+      settled = true;
+      resolve(succeeded);
+    }
+    try {
+      const returned = session.set(snapshot, function onStored() {
+        finish(!chrome.runtime.lastError);
+      });
+      if (returned && typeof returned.then === 'function') {
+        returned.then(function stored() { finish(true); }, function storageFailed() { finish(false); });
+      }
+    } catch (_error) {
+      finish(false);
+    }
+  });
+}
+
 function persistStore() {
   const session = storageSession();
-  if (!session) return Promise.resolve();
-  persistenceQueue = persistenceQueue.then(function writeLatestSnapshot() {
-    return invokeChromeMethod(session, 'set', persistedSnapshot());
+  if (!session || !sessionPersistenceEnabled) return Promise.resolve();
+  persistenceQueue = persistenceQueue.then(async function writeLatestSnapshot() {
+    if (!sessionPersistenceEnabled) return;
+    const succeeded = await writeSessionSnapshot(session, persistedSnapshot());
+    if (!succeeded) sessionPersistenceEnabled = false;
   });
   return persistenceQueue;
 }
@@ -180,9 +224,7 @@ async function trustedPageUrl(tabId) {
   if (!chrome.tabs || typeof chrome.tabs.get !== 'function') return null;
   const tab = await invokeChromeMethod(chrome.tabs, 'get', tabId);
   const pageUrl = media.normalizeUrl(tab && tab.url);
-  if (!pageUrl) return null;
-  tabPageUrls.set(tabId, pageUrl);
-  return pageUrl;
+  return pageUrl || null;
 }
 
 async function recordRequest(details, contentType) {
@@ -191,6 +233,7 @@ async function recordRequest(details, contentType) {
   const pageUrl = await trustedPageUrl(details.tabId);
   if (!pageUrl || documentState(details.tabId).generation !== generation
     || !belongsToCurrentRequest(details)) return;
+  tabPageUrls.set(details.tabId, pageUrl);
   const candidate = media.normalizeCandidate({
     url: details.url,
     pageUrl,
@@ -198,6 +241,13 @@ async function recordRequest(details, contentType) {
     source: 'webRequest',
   });
   if (candidate) {
+    if (explicitMediaMime(contentType)) {
+      rememberAuthoritativeKind(details.tabId, candidate.url, candidate.kind);
+    }
+    const suffixKind = media.inferMediaKind(details.url, '');
+    if (contentType && suffixKind !== 'unknown' && suffixKind !== candidate.kind) {
+      await removeCandidateUrl(details.tabId, details.url);
+    }
     await addCandidates(details.tabId, [candidate]);
     return;
   }
@@ -228,6 +278,7 @@ function beginNavigation(details) {
   const pageUrl = media.normalizeUrl(details.url);
   if (pageUrl) tabPageUrls.set(tabId, pageUrl);
   else tabPageUrls.delete(tabId);
+  authoritativeKinds.delete(tabId);
   resetDocumentState(tabId, details.documentId, generation);
   void clearTab(tabId);
 }
@@ -253,6 +304,22 @@ chrome.webRequest.onHeadersReceived.addListener(
 
 chrome.tabs.onUpdated.addListener(function onTabUpdated(tabId, changeInfo, tab) {
   if (!changeInfo) return;
+  if (!changeInfo.status && typeof changeInfo.url === 'string') {
+    const pageUrl = media.normalizeUrl(changeInfo.url);
+    if (pageUrl && tabPageUrls.get(tabId) !== pageUrl) {
+      tabPageUrls.set(tabId, pageUrl);
+      authoritativeKinds.delete(tabId);
+      const state = documentState(tabId);
+      state.generation += 1;
+      navigationStarts.set(tabId, {
+        startedAt: Date.now(),
+        generation: state.generation,
+        requestId: null,
+      });
+      void clearTab(tabId);
+    }
+    return;
+  }
   if (changeInfo.status === 'complete') {
     navigationInProgress.delete(tabId);
     const pageUrl = media.normalizeUrl(tab && tab.url);
@@ -273,6 +340,7 @@ chrome.tabs.onRemoved.addListener(function onTabRemoved(tabId) {
   navigationInProgress.delete(tabId);
   documentStates.delete(tabId);
   tabPageUrls.delete(tabId);
+  authoritativeKinds.delete(tabId);
   void clearTab(tabId);
 });
 
@@ -308,10 +376,17 @@ async function handleMessage(request, sender) {
       return { ok: false, error: '页面已导航' };
     }
     const pageUrl = tabPageUrls.get(tabId);
-    const candidates = await addCandidates(tabId, request.candidates.map((candidate) => ({
+    const knownKinds = authoritativeKinds.get(tabId);
+    const submitted = request.candidates.map((candidate) => ({
       ...(candidate && typeof candidate === 'object' && !Array.isArray(candidate) ? candidate : {}),
       pageUrl,
-    })));
+    })).filter((candidate) => {
+      if (!knownKinds) return true;
+      const normalized = media.normalizeCandidate(candidate);
+      return !normalized || !knownKinds.has(normalized.url)
+        || knownKinds.get(normalized.url) === normalized.kind;
+    });
+    const candidates = await addCandidates(tabId, submitted);
     return { ok: true, candidates };
   }
   if (request.type === 'CLAIM_DOCUMENT') {

@@ -27,6 +27,8 @@ function createHarness(options = {}) {
     message: eventHook(),
   };
   const storageState = {};
+  const pendingTabGets = [];
+  let storageSetCalls = 0;
   let now = 10_000;
   class FakeDate extends Date {
     static now() { return now; }
@@ -36,7 +38,17 @@ function createHarness(options = {}) {
     storage: {
       session: {
         get(key, callback) { callback({ [key]: storageState[key] }); },
-        set(values, callback) { Object.assign(storageState, values); callback(); },
+        set(values, callback) {
+          storageSetCalls += 1;
+          if (options.storageSetFails) {
+            chrome.runtime.lastError = { message: 'QUOTA_BYTES quota exceeded' };
+            callback();
+            chrome.runtime.lastError = undefined;
+            return;
+          }
+          Object.assign(storageState, values);
+          callback();
+        },
       },
     },
     webRequest: {
@@ -47,6 +59,10 @@ function createHarness(options = {}) {
       onUpdated: hooks.updated,
       onRemoved: hooks.removed,
       get(tabId, callback) {
+        if (options.deferTabGet) {
+          pendingTabGets.push({ tabId, callback });
+          return;
+        }
         const url = options.tabUrls && options.tabUrls[tabId];
         callback(url ? { id: tabId, url } : undefined);
       },
@@ -74,6 +90,13 @@ function createHarness(options = {}) {
     dispatch,
     flush,
     advance(milliseconds) { now += milliseconds; },
+    resolveTabGet(tabId, url) {
+      const index = pendingTabGets.findIndex((pending) => pending.tabId === tabId);
+      assert.notEqual(index, -1, `missing pending tabs.get for tab ${tabId}`);
+      const [pending] = pendingTabGets.splice(index, 1);
+      pending.callback(url ? { id: tabId, url } : undefined);
+    },
+    storageSetCalls() { return storageSetCalls; },
   };
 }
 
@@ -310,4 +333,123 @@ test('background drops network candidates when trusted tab pageUrl is unavailabl
 
   const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 22 });
   assert.equal(result.candidates.length, 0);
+});
+
+test('late tabs.get result cannot overwrite pageUrl after navigation generation changes', async () => {
+  const harness = createHarness({ deferTabGet: true });
+  harness.hooks.headers.listeners[0]({
+    tabId: 31,
+    frameId: 0,
+    documentId: 'old-document',
+    type: 'media',
+    url: 'https://cdn.example/old.mp4',
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+  harness.hooks.before.listeners[0]({
+    tabId: 31,
+    frameId: 0,
+    documentId: 'old-document',
+    requestId: 'navigation-31',
+    type: 'main_frame',
+    url: 'https://example.com/new',
+    timeStamp: 12_000,
+  });
+  harness.resolveTabGet(31, 'https://example.com/old');
+  await harness.flush();
+
+  const claim = await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://example.com/new',
+  }, { tab: { id: 31 }, frameId: 0, documentId: 'new-document' });
+  assert.equal(claim.ok, true);
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 31 })).candidates.length, 0);
+});
+
+test('authoritative response MIME replaces conflicting suffix inference in both directions', async () => {
+  const harness = createHarness({
+    tabUrls: {
+      41: 'https://example.com/one',
+      42: 'https://example.com/two',
+    },
+  });
+  const cases = [
+    { tabId: 41, url: 'https://cdn.example/stream.mp4', mime: 'application/vnd.apple.mpegurl', kind: 'hls' },
+    { tabId: 42, url: 'https://cdn.example/stream.m3u8', mime: 'video/mp4', kind: 'mp4' },
+  ];
+  for (const item of cases) {
+    const pageUrl = `https://example.com/${item.tabId === 41 ? 'one' : 'two'}`;
+    const details = {
+      tabId: item.tabId,
+      frameId: 0,
+      documentId: `document-${item.tabId}`,
+      type: 'xmlhttprequest',
+      url: item.url,
+    };
+    harness.hooks.before.listeners[0](details);
+    await harness.flush();
+    harness.hooks.headers.listeners[0]({
+      ...details,
+      responseHeaders: [{ name: 'content-type', value: item.mime }],
+    });
+    await harness.flush();
+    await harness.dispatch({
+      type: 'ADD_CANDIDATES',
+      pageUrl,
+      candidates: [{
+        url: item.url,
+        pageUrl,
+        source: 'performance',
+      }],
+    }, { tab: { id: item.tabId }, frameId: 0, documentId: `document-${item.tabId}` });
+    const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: item.tabId });
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].kind, item.kind);
+  }
+});
+
+test('SPA URL update clears candidates and keeps the current document eligible', async () => {
+  const harness = createHarness();
+  const sender = { tab: { id: 51 }, frameId: 0, documentId: 'spa-document' };
+  await harness.dispatch({
+    type: 'ADD_CANDIDATES',
+    pageUrl: 'https://example.com/old-route',
+    candidates: [{ url: 'https://cdn.example/old.mp4', pageUrl: 'https://example.com/old-route' }],
+  }, sender);
+  harness.hooks.updated.listeners[0](
+    51,
+    { url: 'https://example.com/new-route' },
+    { id: 51, url: 'https://example.com/new-route' },
+  );
+  await harness.flush();
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 51 })).candidates.length, 0);
+
+  const result = await harness.dispatch({
+    type: 'ADD_CANDIDATES',
+    pageUrl: 'https://example.com/new-route',
+    candidates: [{ url: 'https://cdn.example/new.mp4', pageUrl: 'https://example.com/new-route' }],
+  }, sender);
+  assert.equal(result.ok, true);
+  assert.equal(result.candidates[0].pageUrl, 'https://example.com/new-route');
+});
+
+test('storage.session quota failure disables repeated persistence attempts but keeps memory candidates', async () => {
+  const harness = createHarness({
+    storageSetFails: true,
+    tabUrls: { 61: 'https://example.com/watch' },
+  });
+  for (const name of ['one', 'two']) {
+    harness.hooks.headers.listeners[0]({
+      tabId: 61,
+      frameId: 0,
+      documentId: 'quota-document',
+      type: 'media',
+      url: `https://cdn.example/${name}.mp4`,
+      responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+    });
+    await harness.flush();
+  }
+
+  assert.equal(harness.storageSetCalls(), 1);
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 61 })).candidates.length, 2);
 });
