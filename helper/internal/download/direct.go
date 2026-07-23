@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 	"unicode/utf8"
@@ -23,6 +24,7 @@ const (
 	defaultAttempts  = 3
 	copyBufferSize   = 64 * 1024
 	maxFileNameBytes = 255
+	maxRetryAfter    = 5 * time.Minute
 )
 
 // Code is a stable download failure category for API consumers.
@@ -44,6 +46,7 @@ type Error struct {
 	Message    string
 	StatusCode int
 	cause      error
+	retryAfter time.Duration
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -66,17 +69,23 @@ type RetryPolicy struct {
 	Backoff     func(failedAttempt int) time.Duration
 }
 
-// Config provides dependencies for one direct downloader. Production callers
-// should use NewSafe. Tests in this package may opt out of URL validation when
-// using an httptest server through skipURLCheck.
+// Config contains production-safe downloader settings. HTTP transport and URL
+// validation are always installed by exported constructors and cannot be
+// replaced through this configuration.
 type Config struct {
-	Client     *http.Client
 	OutputDir  string
 	Resolver   safety.Resolver
 	Retry      RetryPolicy
 	OnProgress ProgressFunc
-	Sleep      SleepFunc
+}
 
+type internalConfig struct {
+	client       *http.Client
+	outputDir    string
+	resolver     safety.Resolver
+	retry        RetryPolicy
+	onProgress   ProgressFunc
+	sleep        SleepFunc
 	skipURLCheck bool
 }
 
@@ -87,16 +96,28 @@ type Downloader struct {
 	retry        RetryPolicy
 	onProgress   ProgressFunc
 	sleep        SleepFunc
+	now          func() time.Time
 	validateURLs bool
 	partWriter   func(io.Writer) io.Writer
 }
 
-// New constructs a downloader with explicit dependencies.
+// New constructs a production downloader with a safe transport and redirect
+// policy. Test-only dependency injection remains package-private.
 func New(config Config) (*Downloader, error) {
-	if config.Client == nil {
+	return newDownloader(internalConfig{
+		client:     newSafeHTTPClient(config.Resolver, nil),
+		outputDir:  config.OutputDir,
+		resolver:   config.Resolver,
+		retry:      config.Retry,
+		onProgress: config.OnProgress,
+	})
+}
+
+func newDownloader(config internalConfig) (*Downloader, error) {
+	if config.client == nil {
 		return nil, errors.New("download client is required")
 	}
-	absDir, err := filepath.Abs(config.OutputDir)
+	absDir, err := filepath.Abs(config.outputDir)
 	if err != nil {
 		return nil, fmt.Errorf("resolve output directory: %w", err)
 	}
@@ -108,7 +129,7 @@ func New(config Config) (*Downloader, error) {
 		return nil, errors.New("output path is not a directory")
 	}
 
-	retry := config.Retry
+	retry := config.retry
 	if retry.MaxAttempts == 0 {
 		retry.MaxAttempts = defaultAttempts
 	}
@@ -118,18 +139,20 @@ func New(config Config) (*Downloader, error) {
 	if retry.Backoff == nil {
 		retry.Backoff = defaultBackoff
 	}
-	sleep := config.Sleep
+	sleep := config.sleep
 	if sleep == nil {
 		sleep = sleepContext
 	}
+	now := time.Now
 
 	return &Downloader{
-		client:       config.Client,
+		client:       config.client,
 		outputDir:    absDir,
-		resolver:     config.Resolver,
+		resolver:     config.resolver,
 		retry:        retry,
-		onProgress:   config.OnProgress,
+		onProgress:   config.onProgress,
 		sleep:        sleep,
+		now:          now,
 		validateURLs: !config.skipURLCheck,
 		partWriter:   identityWriter,
 	}, nil
@@ -141,7 +164,6 @@ func New(config Config) (*Downloader, error) {
 // hop, avoiding a validation-then-default-dial DNS rebinding gap.
 func NewSafe(outputDir string, resolver safety.Resolver, onProgress ProgressFunc) (*Downloader, error) {
 	return New(Config{
-		Client:     newSafeHTTPClient(resolver, nil),
 		OutputDir:  outputDir,
 		Resolver:   resolver,
 		OnProgress: onProgress,
@@ -185,6 +207,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 	}
 	partClosed := false
 	stagingCleaned := false
+	reportProgress := monotonicProgress(d.onProgress)
 	defer func() {
 		var closeErr error
 		if !partClosed {
@@ -206,7 +229,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 			return "", outputError("无法准备临时下载文件", err)
 		}
 
-		attemptErr, retry := d.downloadAttempt(ctx, rawURL, part)
+		attemptErr, retry := d.downloadAttempt(ctx, rawURL, part, reportProgress)
 		if attemptErr == nil {
 			if err := part.Sync(); err != nil {
 				return "", outputError("无法保存下载文件", err)
@@ -233,14 +256,18 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 		if !retry || attempt == d.retry.MaxAttempts {
 			return "", attemptErr
 		}
-		if err := d.sleep(ctx, d.retry.Backoff(attempt)); err != nil {
+		retryDelay := d.retry.Backoff(attempt)
+		if lastErr.retryAfter > retryDelay {
+			retryDelay = lastErr.retryAfter
+		}
+		if err := d.sleep(ctx, retryDelay); err != nil {
 			return "", canceledError(ctx)
 		}
 	}
 	return "", lastErr
 }
 
-func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *os.File) (*Error, bool) {
+func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *os.File, reportProgress ProgressFunc) (*Error, bool) {
 	if err := ctx.Err(); err != nil {
 		return canceledError(ctx), false
 	}
@@ -269,12 +296,13 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 		return &Error{Code: CodeNetwork, Message: "连接视频服务器失败", cause: errors.New("HTTP transport failed")}, isTransientNetworkError(err)
 	}
 
-	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
+	if response.StatusCode != http.StatusOK {
 		closeErr := response.Body.Close()
 		failure := &Error{
 			Code:       CodeHTTPStatus,
 			Message:    fmt.Sprintf("视频服务器返回错误（HTTP %d）", response.StatusCode),
 			StatusCode: response.StatusCode,
+			retryAfter: parseRetryAfter(response.Header.Get("Retry-After"), d.now()),
 		}
 		if closeErr != nil {
 			failure.cause = errors.New("close HTTP error response body failed")
@@ -289,7 +317,7 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 	written, copyErr := io.CopyBuffer(&progressWriter{
 		writer:     &destinationWriter{writer: d.partWriter(part)},
 		totalBytes: total,
-		callback:   d.onProgress,
+		callback:   reportProgress,
 	}, &sourceReader{reader: response.Body}, make([]byte, copyBufferSize))
 	closeErr := response.Body.Close()
 	if ctx.Err() != nil {
@@ -308,7 +336,24 @@ func (d *Downloader) downloadAttempt(ctx context.Context, rawURL string, part *o
 	if response.ContentLength >= 0 && written != response.ContentLength {
 		return &Error{Code: CodeTransfer, Message: "视频内容不完整", cause: fmt.Errorf("received %d bytes, expected %d", written, response.ContentLength)}, true
 	}
+	if written == 0 {
+		return &Error{Code: CodeTransfer, Message: "视频内容为空", cause: errors.New("empty HTTP 200 response body")}, false
+	}
 	return nil, false
+}
+
+func monotonicProgress(callback ProgressFunc) ProgressFunc {
+	if callback == nil {
+		return nil
+	}
+	var highWater int64
+	return func(progress Progress) {
+		if progress.DownloadedBytes < highWater {
+			return
+		}
+		highWater = progress.DownloadedBytes
+		callback(progress)
+	}
 }
 
 func identityWriter(writer io.Writer) io.Writer { return writer }
@@ -449,6 +494,34 @@ func cleanupOwnedStaging(stagingDir, partPath string, stagingInfo, partInfo os.F
 
 func isTransientStatus(status int) bool {
 	return status == http.StatusRequestTimeout || status == http.StatusTooManyRequests || (status >= 500 && status <= 599)
+}
+
+func parseRetryAfter(value string, now time.Time) time.Duration {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return 0
+	}
+	if seconds, err := strconv.ParseInt(value, 10, 64); err == nil {
+		if seconds <= 0 {
+			return 0
+		}
+		if seconds >= int64(maxRetryAfter/time.Second) {
+			return maxRetryAfter
+		}
+		return time.Duration(seconds) * time.Second
+	}
+	date, err := http.ParseTime(value)
+	if err != nil {
+		return 0
+	}
+	delay := date.Sub(now)
+	if delay <= 0 {
+		return 0
+	}
+	if delay > maxRetryAfter {
+		return maxRetryAfter
+	}
+	return delay
 }
 
 func isTransientNetworkError(err error) bool {

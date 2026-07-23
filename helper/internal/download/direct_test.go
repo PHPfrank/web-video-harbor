@@ -3,18 +3,43 @@ package download
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 )
+
+func TestDirectExportedConstructorCannotInjectUnsafeHTTPClient(t *testing.T) {
+	configType := reflect.TypeOf(Config{})
+	if _, ok := configType.FieldByName("Client"); ok {
+		t.Fatal("exported Config exposes an injectable HTTP client")
+	}
+	if _, ok := configType.FieldByName("skipURLCheck"); ok {
+		t.Fatal("production Config contains a URL-check bypass")
+	}
+
+	resolver := staticResolver{addresses: map[string][]net.IPAddr{}}
+	downloader, err := New(Config{OutputDir: t.TempDir(), Resolver: resolver})
+	if err != nil {
+		t.Fatalf("New() error = %v", err)
+	}
+	transport, ok := downloader.client.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("production transport type = %T, want *http.Transport", downloader.client.Transport)
+	}
+	if transport.Proxy != nil || transport.DialContext == nil || downloader.client.CheckRedirect == nil {
+		t.Fatal("production constructor did not install safe transport and redirect policy")
+	}
+}
 
 func TestDirectStreamsToPartAndPublishesOnlyWhenComplete(t *testing.T) {
 	firstWritten := make(chan struct{})
@@ -113,6 +138,35 @@ func TestDirectReportsProgressWithKnownAndUnknownLength(t *testing.T) {
 				t.Fatalf("last progress = %+v", last)
 			}
 		})
+	}
+}
+
+func TestDirectProgressDoesNotMoveBackwardAcrossRetries(t *testing.T) {
+	transport := &progressRetryTransport{}
+	client := &http.Client{Transport: transport}
+	var updates []Progress
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, func(progress Progress) {
+		updates = append(updates, progress)
+	}, instantSleep)
+
+	if _, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "monotonic"); err != nil {
+		t.Fatalf("Download() error = %v", err)
+	}
+	if transport.attempts.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2", transport.attempts.Load())
+	}
+	for index := 1; index < len(updates); index++ {
+		if updates[index].DownloadedBytes < updates[index-1].DownloadedBytes {
+			t.Fatalf("progress moved backward: %+v", updates)
+		}
+	}
+	if len(updates) == 0 {
+		t.Fatal("progress callback was not called")
+	}
+	last := updates[len(updates)-1]
+	if last.DownloadedBytes != 10 || last.TotalBytes != 10 {
+		t.Fatalf("final progress = %+v, want 10/10", last)
 	}
 }
 
@@ -308,7 +362,14 @@ func TestDirectRetriesTransientResponseCloseErrorExactlyThreeTimes(t *testing.T)
 }
 
 func TestDirectRetriesTransientHTTPStatusesExactlyThreeTotalAttempts(t *testing.T) {
-	for _, status := range []int{http.StatusRequestTimeout, http.StatusTooManyRequests, http.StatusInternalServerError, http.StatusServiceUnavailable} {
+	for _, status := range []int{
+		http.StatusRequestTimeout,
+		http.StatusTooManyRequests,
+		http.StatusInternalServerError,
+		http.StatusNotImplemented,
+		http.StatusServiceUnavailable,
+		http.StatusHTTPVersionNotSupported,
+	} {
 		t.Run(http.StatusText(status), func(t *testing.T) {
 			var attempts atomic.Int32
 			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -329,6 +390,56 @@ func TestDirectRetriesTransientHTTPStatusesExactlyThreeTotalAttempts(t *testing.
 				t.Fatalf("attempts = %d, sleeps = %d; want 3 and 2", attempts.Load(), sleeps.Load())
 			}
 			assertDirectoryEmpty(t, dir)
+		})
+	}
+}
+
+func TestDirectRetryAfterUsesBoundedServerHintAndInjectedClock(t *testing.T) {
+	now := time.Date(2026, time.July, 23, 12, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name       string
+		status     int
+		retryAfter string
+		wantDelay  time.Duration
+	}{
+		{name: "429 delta seconds", status: http.StatusTooManyRequests, retryAfter: "120", wantDelay: 2 * time.Minute},
+		{name: "503 HTTP date", status: http.StatusServiceUnavailable, retryAfter: now.Add(90 * time.Second).Format(http.TimeFormat), wantDelay: 90 * time.Second},
+		{name: "server delay capped", status: http.StatusTooManyRequests, retryAfter: "999999", wantDelay: 5 * time.Minute},
+		{name: "shorter than local ignored", status: http.StatusServiceUnavailable, retryAfter: "1", wantDelay: 2 * time.Second},
+		{name: "invalid ignored", status: http.StatusTooManyRequests, retryAfter: "later", wantDelay: 2 * time.Second},
+		{name: "expired date ignored", status: http.StatusServiceUnavailable, retryAfter: now.Add(-time.Minute).Format(http.TimeFormat), wantDelay: 2 * time.Second},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			transport := &statusThenSuccessTransport{status: tt.status, retryAfter: tt.retryAfter}
+			client := &http.Client{Transport: transport}
+			var sleeps []time.Duration
+			dir := t.TempDir()
+			downloader := newTestDownloader(t, dir, client, RetryPolicy{
+				MaxAttempts: 3,
+				Backoff: func(int) time.Duration {
+					return 2 * time.Second
+				},
+			}, nil, func(_ context.Context, delay time.Duration) error {
+				sleeps = append(sleeps, delay)
+				return nil
+			})
+			downloader.now = func() time.Time { return now }
+
+			path, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "retry-after")
+			if err != nil {
+				t.Fatalf("Download() error = %v", err)
+			}
+			if transport.attempts.Load() != 2 {
+				t.Fatalf("attempts = %d, want 2", transport.attempts.Load())
+			}
+			if len(sleeps) != 1 || sleeps[0] != tt.wantDelay {
+				t.Fatalf("retry sleeps = %v, want [%v]", sleeps, tt.wantDelay)
+			}
+			if _, err := os.Stat(path); err != nil {
+				t.Fatalf("published output missing: %v", err)
+			}
 		})
 	}
 }
@@ -369,6 +480,58 @@ func TestDirectDoesNotRetryStatusOutside5xxRange(t *testing.T) {
 	assertDownloadCode(t, err, CodeHTTPStatus)
 	if attempts.Load() != 1 {
 		t.Fatalf("attempts = %d, want 1", attempts.Load())
+	}
+}
+
+func TestDirectAcceptsOnlyHTTP200OK(t *testing.T) {
+	for _, status := range []int{http.StatusCreated, http.StatusNoContent, http.StatusPartialContent} {
+		t.Run(http.StatusText(status), func(t *testing.T) {
+			var attempts atomic.Int32
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return &http.Response{
+					StatusCode:    status,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader("not a complete video")),
+					ContentLength: 20,
+				}, nil
+			})}
+			dir := t.TempDir()
+			downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+			_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "incomplete-status")
+			assertDownloadCode(t, err, CodeHTTPStatus)
+			if attempts.Load() != 1 {
+				t.Fatalf("attempts = %d, want 1", attempts.Load())
+			}
+			assertDirectoryEmpty(t, dir)
+		})
+	}
+}
+
+func TestDirectRejectsEmptyHTTP200Body(t *testing.T) {
+	for _, contentLength := range []int64{0, -1} {
+		t.Run(fmt.Sprintf("content-length-%d", contentLength), func(t *testing.T) {
+			var attempts atomic.Int32
+			client := &http.Client{Transport: roundTripFunc(func(*http.Request) (*http.Response, error) {
+				attempts.Add(1)
+				return &http.Response{
+					StatusCode:    http.StatusOK,
+					Header:        make(http.Header),
+					Body:          io.NopCloser(strings.NewReader("")),
+					ContentLength: contentLength,
+				}, nil
+			})}
+			dir := t.TempDir()
+			downloader := newTestDownloader(t, dir, client, RetryPolicy{MaxAttempts: 3}, nil, instantSleep)
+
+			_, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "empty")
+			assertDownloadCode(t, err, CodeTransfer)
+			if attempts.Load() != 1 {
+				t.Fatalf("attempts = %d, want 1", attempts.Load())
+			}
+			assertDirectoryEmpty(t, dir)
+		})
 	}
 }
 
@@ -521,12 +684,12 @@ func TestDirectAlwaysClosesResponseBodies(t *testing.T) {
 
 func newTestDownloader(t *testing.T, dir string, client *http.Client, retry RetryPolicy, progress ProgressFunc, sleep SleepFunc) *Downloader {
 	t.Helper()
-	downloader, err := New(Config{
-		Client:       client,
-		OutputDir:    dir,
-		Retry:        retry,
-		OnProgress:   progress,
-		Sleep:        sleep,
+	downloader, err := newDownloader(internalConfig{
+		client:       client,
+		outputDir:    dir,
+		retry:        retry,
+		onProgress:   progress,
+		sleep:        sleep,
 		skipURLCheck: true,
 	})
 	if err != nil {
@@ -615,6 +778,65 @@ type readFailureTransport struct {
 
 type successfulBodyTransport struct {
 	attempts atomic.Int32
+}
+
+type statusThenSuccessTransport struct {
+	status     int
+	retryAfter string
+	attempts   atomic.Int32
+}
+
+type progressRetryTransport struct {
+	attempts atomic.Int32
+}
+
+func (t *progressRetryTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	attempt := t.attempts.Add(1)
+	if attempt == 1 {
+		return &http.Response{
+			StatusCode:    http.StatusOK,
+			Header:        make(http.Header),
+			Body:          io.NopCloser(&errorAfterReader{data: []byte("12345678"), err: io.ErrUnexpectedEOF}),
+			ContentLength: -1,
+		}, nil
+	}
+	return &http.Response{
+		StatusCode:    http.StatusOK,
+		Header:        make(http.Header),
+		Body:          io.NopCloser(&chunkReader{chunks: [][]byte{[]byte("1234"), []byte("567890")}}),
+		ContentLength: 10,
+	}, nil
+}
+
+type chunkReader struct {
+	chunks [][]byte
+}
+
+func (r *chunkReader) Read(destination []byte) (int, error) {
+	if len(r.chunks) == 0 {
+		return 0, io.EOF
+	}
+	chunk := r.chunks[0]
+	r.chunks = r.chunks[1:]
+	return copy(destination, chunk), nil
+}
+
+func (t *statusThenSuccessTransport) RoundTrip(*http.Request) (*http.Response, error) {
+	attempt := t.attempts.Add(1)
+	status := http.StatusOK
+	body := "video"
+	header := make(http.Header)
+	if attempt == 1 {
+		status = t.status
+		body = "retry later"
+		header.Set("Retry-After", t.retryAfter)
+	}
+	return &http.Response{
+		StatusCode:    status,
+		Header:        header,
+		Body:          io.NopCloser(strings.NewReader(body)),
+		ContentLength: int64(len(body)),
+	}, nil
 }
 
 type closeFailureTransport struct {
