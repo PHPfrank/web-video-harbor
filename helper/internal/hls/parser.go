@@ -6,6 +6,7 @@ import (
 	"bytes"
 	"fmt"
 	"io"
+	"math"
 	"net/url"
 	"sort"
 	"strconv"
@@ -74,13 +75,18 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 	scanner.Buffer(make([]byte, 64*1024), maxPlaylistSize+2)
 
 	var (
-		headerSeen bool
-		mediaURI   bool
-		pending    *Variant
-		variants   []Variant
+		headerSeen     bool
+		kind           playlistKind
+		mediaURI       bool
+		pendingMedia   bool
+		pendingVariant *Variant
+		variants       []Variant
 	)
 
 	for scanner.Scan() {
+		if counter.n > maxPlaylistSize {
+			return nil, &Error{Code: CodePlaylistTooLarge, Message: "playlist exceeds the 2 MiB limit"}
+		}
 		line := strings.TrimSpace(strings.TrimPrefix(scanner.Text(), "\ufeff"))
 		if line == "" {
 			continue
@@ -92,38 +98,59 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 			headerSeen = true
 			continue
 		}
-		if pending != nil && strings.HasPrefix(line, "#") {
-			return nil, invalidError("variant URI is missing", nil)
+		if (pendingMedia || pendingVariant != nil) && strings.HasPrefix(line, "#") {
+			return nil, invalidError("media URI is missing after its tag", nil)
 		}
 
+		if strings.HasPrefix(line, "#EXT-X-SESSION-KEY:") {
+			if kindErr := setPlaylistKind(&kind, playlistMaster); kindErr != nil {
+				return nil, kindErr
+			}
+			if keyErr := inspectKey(strings.TrimPrefix(line, "#EXT-X-SESSION-KEY:"), true); keyErr != nil {
+				return nil, keyErr
+			}
+			continue
+		}
 		if strings.HasPrefix(line, "#EXT-X-KEY:") {
-			attrs, parseErr := parseAttributes(strings.TrimPrefix(line, "#EXT-X-KEY:"))
-			if parseErr != nil {
-				return nil, invalidError("invalid EXT-X-KEY attributes", parseErr)
+			if kindErr := setPlaylistKind(&kind, playlistMedia); kindErr != nil {
+				return nil, kindErr
 			}
-			method, ok := attrs["METHOD"]
-			if !ok || method == "" {
-				return nil, invalidError("EXT-X-KEY is missing METHOD", nil)
-			}
-			if !strings.EqualFold(method, "NONE") {
-				return nil, &Error{
-					Code:    CodeUnsupportedEncryption,
-					Message: fmt.Sprintf("HLS encryption method %q is not supported", method),
-				}
+			if keyErr := inspectKey(strings.TrimPrefix(line, "#EXT-X-KEY:"), false); keyErr != nil {
+				return nil, keyErr
 			}
 			continue
 		}
 
 		if strings.HasPrefix(line, "#EXT-X-STREAM-INF:") {
+			if kindErr := setPlaylistKind(&kind, playlistMaster); kindErr != nil {
+				return nil, kindErr
+			}
 			variant, parseErr := parseVariant(strings.TrimPrefix(line, "#EXT-X-STREAM-INF:"))
 			if parseErr != nil {
 				return nil, invalidError("invalid EXT-X-STREAM-INF attributes", parseErr)
 			}
-			pending = &variant
+			pendingVariant = &variant
+			continue
+		}
+
+		if strings.HasPrefix(line, "#EXTINF:") {
+			if kindErr := setPlaylistKind(&kind, playlistMedia); kindErr != nil {
+				return nil, kindErr
+			}
+			if parseErr := parseEXTINF(strings.TrimPrefix(line, "#EXTINF:")); parseErr != nil {
+				return nil, invalidError("invalid EXTINF tag", parseErr)
+			}
+			pendingMedia = true
 			continue
 		}
 
 		if strings.HasPrefix(line, "#") {
+			tagKind := kindForTag(line)
+			if tagKind != playlistUnknown {
+				if kindErr := setPlaylistKind(&kind, tagKind); kindErr != nil {
+					return nil, kindErr
+				}
+			}
 			continue
 		}
 
@@ -131,12 +158,15 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 		if resolveErr != nil {
 			return nil, invalidError("playlist contains an invalid URI", resolveErr)
 		}
-		if pending != nil {
-			pending.URL = resolved
-			variants = append(variants, *pending)
-			pending = nil
-		} else {
+		if pendingVariant != nil {
+			pendingVariant.URL = resolved
+			variants = append(variants, *pendingVariant)
+			pendingVariant = nil
+		} else if pendingMedia {
 			mediaURI = true
+			pendingMedia = false
+		} else {
+			return nil, invalidError("URI is not preceded by EXTINF or EXT-X-STREAM-INF", nil)
 		}
 	}
 
@@ -149,10 +179,10 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 	if !headerSeen {
 		return nil, invalidError("playlist is empty", nil)
 	}
-	if pending != nil {
-		return nil, invalidError("variant URI is missing", nil)
+	if pendingMedia || pendingVariant != nil {
+		return nil, invalidError("media URI is missing after its tag", nil)
 	}
-	if len(variants) > 0 {
+	if kind == playlistMaster && len(variants) > 0 {
 		sort.SliceStable(variants, func(i, j int) bool {
 			leftPixels := variants[i].Width * variants[i].Height
 			rightPixels := variants[j].Width * variants[j].Height
@@ -163,10 +193,72 @@ func Parse(manifestURL string, r io.Reader) (*Playlist, error) {
 		})
 		return &Playlist{Master: true, Variants: variants}, nil
 	}
-	if mediaURI {
+	if kind == playlistMedia && mediaURI {
 		return &Playlist{Variants: []Variant{{URL: base.String(), Label: "原始画质"}}}, nil
 	}
 	return nil, invalidError("playlist has no media or variants", nil)
+}
+
+type playlistKind uint8
+
+const (
+	playlistUnknown playlistKind = iota
+	playlistMaster
+	playlistMedia
+)
+
+func setPlaylistKind(current *playlistKind, next playlistKind) error {
+	if *current != playlistUnknown && *current != next {
+		return invalidError("master and media playlist tags cannot be mixed", nil)
+	}
+	*current = next
+	return nil
+}
+
+func kindForTag(line string) playlistKind {
+	masterTags := []string{
+		"#EXT-X-MEDIA",
+		"#EXT-X-I-FRAME-STREAM-INF",
+		"#EXT-X-SESSION-DATA",
+		"#EXT-X-CONTENT-STEERING",
+	}
+	for _, tag := range masterTags {
+		if hasTag(line, tag) {
+			return playlistMaster
+		}
+	}
+
+	mediaTags := []string{
+		"#EXT-X-TARGETDURATION",
+		"#EXT-X-MEDIA-SEQUENCE",
+		"#EXT-X-DISCONTINUITY-SEQUENCE",
+		"#EXT-X-ENDLIST",
+		"#EXT-X-PLAYLIST-TYPE",
+		"#EXT-X-I-FRAMES-ONLY",
+		"#EXT-X-MAP",
+		"#EXT-X-BYTERANGE",
+		"#EXT-X-DISCONTINUITY",
+		"#EXT-X-PROGRAM-DATE-TIME",
+		"#EXT-X-DATERANGE",
+		"#EXT-X-GAP",
+		"#EXT-X-BITRATE",
+		"#EXT-X-PART-INF",
+		"#EXT-X-SERVER-CONTROL",
+		"#EXT-X-PART",
+		"#EXT-X-PRELOAD-HINT",
+		"#EXT-X-RENDITION-REPORT",
+		"#EXT-X-SKIP",
+	}
+	for _, tag := range mediaTags {
+		if hasTag(line, tag) {
+			return playlistMedia
+		}
+	}
+	return playlistUnknown
+}
+
+func hasTag(line, tag string) bool {
+	return line == tag || strings.HasPrefix(line, tag+":")
 }
 
 type countingReader struct {
@@ -214,6 +306,39 @@ func parseVariant(raw string) (Variant, error) {
 		variant.Label = fmt.Sprintf("%d kbps", bandwidth/1000)
 	}
 	return variant, nil
+}
+
+func parseEXTINF(raw string) error {
+	durationValue, _, ok := strings.Cut(raw, ",")
+	if !ok || strings.TrimSpace(durationValue) == "" {
+		return fmt.Errorf("EXTINF duration and comma are required")
+	}
+	duration, err := strconv.ParseFloat(strings.TrimSpace(durationValue), 64)
+	if err != nil || duration <= 0 || math.IsNaN(duration) || math.IsInf(duration, 0) {
+		return fmt.Errorf("invalid EXTINF duration %q", durationValue)
+	}
+	return nil
+}
+
+func inspectKey(raw string, session bool) error {
+	attrs, err := parseAttributes(raw)
+	if err != nil {
+		return invalidError("invalid HLS key attributes", err)
+	}
+	method, ok := attrs["METHOD"]
+	if !ok || method == "" {
+		return invalidError("HLS key is missing METHOD", nil)
+	}
+	if strings.EqualFold(method, "NONE") {
+		if session {
+			return invalidError("EXT-X-SESSION-KEY cannot use METHOD=NONE", nil)
+		}
+		return nil
+	}
+	return &Error{
+		Code:    CodeUnsupportedEncryption,
+		Message: fmt.Sprintf("HLS encryption method %q is not supported", method),
+	}
 }
 
 func parseAttributes(raw string) (map[string]string, error) {

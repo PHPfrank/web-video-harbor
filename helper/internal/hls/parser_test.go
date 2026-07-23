@@ -69,6 +69,40 @@ func TestParseAcceptsEncryptionMethodNone(t *testing.T) {
 	}
 }
 
+func TestParseRejectsEncryptedSessionKey(t *testing.T) {
+	t.Parallel()
+
+	playlist := "#EXTM3U\n" +
+		"#EXT-X-SESSION-KEY:METHOD=AES-128,URI=\"key.bin\"\n" +
+		"#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n"
+	_, err := Parse("https://cdn.example/master.m3u8", strings.NewReader(playlist))
+	assertErrorCode(t, err, CodeUnsupportedEncryption)
+}
+
+func TestParseRejectsInvalidSessionKey(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name string
+		line string
+	}{
+		{name: "METHOD NONE", line: "#EXT-X-SESSION-KEY:METHOD=NONE"},
+		{name: "missing METHOD", line: "#EXT-X-SESSION-KEY:URI=\"key.bin\""},
+		{name: "duplicate METHOD", line: "#EXT-X-SESSION-KEY:METHOD=AES-128,METHOD=SAMPLE-AES"},
+		{name: "malformed attributes", line: "#EXT-X-SESSION-KEY:METHOD=\"AES-128"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			playlist := "#EXTM3U\n" + tt.line + "\n" +
+				"#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n"
+			_, err := Parse("https://cdn.example/master.m3u8", strings.NewReader(playlist))
+			assertErrorCode(t, err, CodeInvalidPlaylist)
+		})
+	}
+}
+
 func TestParseHandlesBOMCRLFAndBlankLines(t *testing.T) {
 	t.Parallel()
 
@@ -93,6 +127,10 @@ func TestParseRejectsMalformedPlaylists(t *testing.T) {
 		{name: "only blank lines", playlist: " \n\r\n"},
 		{name: "missing EXTM3U", playlist: "#EXTINF:4,\npart.ts\n"},
 		{name: "empty after header", playlist: "#EXTM3U\n"},
+		{name: "bare URI", playlist: "#EXTM3U\norphan.m3u8\n"},
+		{name: "segment without EXTINF", playlist: "#EXTM3U\n#EXT-X-TARGETDURATION:4\nsegment.ts\n"},
+		{name: "missing segment URI", playlist: "#EXTM3U\n#EXTINF:4,\n"},
+		{name: "tag instead of segment URI", playlist: "#EXTM3U\n#EXTINF:4,\n#EXT-X-ENDLIST\n"},
 		{name: "missing variant URI", playlist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1234\n"},
 		{name: "tag instead of variant URI", playlist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1234\n#EXT-X-ENDLIST\n"},
 		{name: "key tag instead of variant URI", playlist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1234\n#EXT-X-KEY:METHOD=NONE\nv.m3u8\n"},
@@ -108,6 +146,71 @@ func TestParseRejectsMalformedPlaylists(t *testing.T) {
 			t.Parallel()
 			_, err := Parse("https://cdn.example/master.m3u8", strings.NewReader(tt.playlist))
 			assertErrorCode(t, err, CodeInvalidPlaylist)
+		})
+	}
+}
+
+func TestParseRejectsMixedMasterAndMediaPlaylists(t *testing.T) {
+	t.Parallel()
+
+	tests := []struct {
+		name     string
+		playlist string
+	}{
+		{
+			name: "master then media segment",
+			playlist: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n" +
+				"#EXTINF:4,\nsegment.ts\n",
+		},
+		{
+			name: "media then master variant",
+			playlist: "#EXTM3U\n#EXTINF:4,\nsegment.ts\n" +
+				"#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n",
+		},
+		{
+			name: "master-only tag then media",
+			playlist: "#EXTM3U\n#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID=\"audio\",NAME=\"main\",URI=\"audio.m3u8\"\n" +
+				"#EXTINF:4,\nsegment.ts\n",
+		},
+		{
+			name: "media-only tag then master",
+			playlist: "#EXTM3U\n#EXT-X-TARGETDURATION:4\n" +
+				"#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			_, err := Parse("https://cdn.example/playlist.m3u8", strings.NewReader(tt.playlist))
+			assertErrorCode(t, err, CodeInvalidPlaylist)
+		})
+	}
+}
+
+func TestParseAllowsCommonTagsInBothPlaylistKinds(t *testing.T) {
+	t.Parallel()
+
+	common := "#EXT-X-VERSION:7\n#EXT-X-INDEPENDENT-SEGMENTS\n#EXT-X-START:TIME-OFFSET=0\n"
+	tests := []struct {
+		name     string
+		playlist string
+		master   bool
+	}{
+		{name: "master", playlist: "#EXTM3U\n" + common + "#EXT-X-STREAM-INF:BANDWIDTH=1000\nvideo.m3u8\n", master: true},
+		{name: "media", playlist: "#EXTM3U\n" + common + "#EXTINF:4,\nsegment.ts\n", master: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Parallel()
+			got, err := Parse("https://cdn.example/playlist.m3u8", strings.NewReader(tt.playlist))
+			if err != nil {
+				t.Fatalf("Parse() error = %v", err)
+			}
+			if got.Master != tt.master {
+				t.Fatalf("Parse() Master = %v, want %v", got.Master, tt.master)
+			}
 		})
 	}
 }
@@ -158,6 +261,27 @@ func TestParseRejectsOversizedPlaylist(t *testing.T) {
 	assertErrorCode(t, err, CodePlaylistTooLarge)
 }
 
+func TestParsePlaylistSizeBoundary(t *testing.T) {
+	t.Parallel()
+
+	atLimit := validMediaPlaylistOfSize(t, maxPlaylistSize)
+	if _, err := ParseBytes("https://cdn.example/media.m3u8", atLimit); err != nil {
+		t.Fatalf("ParseBytes() at limit error = %v", err)
+	}
+
+	oneOver := validMediaPlaylistOfSize(t, maxPlaylistSize+1)
+	_, err := ParseBytes("https://cdn.example/media.m3u8", oneOver)
+	assertErrorCode(t, err, CodePlaylistTooLarge)
+}
+
+func TestParseOversizedSingleLineUsesSizeError(t *testing.T) {
+	t.Parallel()
+
+	playlist := strings.Repeat("x", maxPlaylistSize+1)
+	_, err := Parse("https://cdn.example/media.m3u8", strings.NewReader(playlist))
+	assertErrorCode(t, err, CodePlaylistTooLarge)
+}
+
 func TestParseRejectsInvalidManifestURL(t *testing.T) {
 	t.Parallel()
 
@@ -190,4 +314,20 @@ func assertErrorCode(t *testing.T, err error, want Code) {
 	if parseErr.Message == "" {
 		t.Fatal("error message is empty")
 	}
+}
+
+func validMediaPlaylistOfSize(t *testing.T, size int) []byte {
+	t.Helper()
+	prefix := "#EXTM3U\n"
+	suffix := "#EXTINF:1,\nsegment.ts\n"
+	fillerSize := size - len(prefix) - len(suffix)
+	if fillerSize < 2 {
+		t.Fatalf("requested playlist size %d is too small", size)
+	}
+	filler := "#" + strings.Repeat("x", fillerSize-2) + "\n"
+	playlist := []byte(prefix + filler + suffix)
+	if len(playlist) != size {
+		t.Fatalf("playlist size = %d, want %d", len(playlist), size)
+	}
+	return playlist
 }
