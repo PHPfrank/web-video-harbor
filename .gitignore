@@ -1,0 +1,7 @@
+.worktrees/
+work/
+outputs/
+helper/bin/
+*.log
+.DS_Store
+config.local.json
