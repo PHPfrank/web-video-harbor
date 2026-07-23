@@ -43,6 +43,7 @@ for required_path in \
   scripts/start-helper.zsh \
   helper/go.mod \
   helper/cmd/web-video-helper/main.go \
+  helper/internal/safety/exact_host_default.go \
   work/dist/web-video-helper; do
   [[ -e "$package_root/$required_path" ]] || fail "ZIP 缺少：$required_path"
 done
@@ -56,6 +57,9 @@ for license_phrase in \
 done
 rg -Fq 'licenses/Go-LICENSE.txt' "$package_root/THIRD_PARTY_NOTICES.md" || \
   fail "第三方说明没有引用包内 Go LICENSE"
+if rg -l '^//go:build integration$' "$package_root/helper" -g '*.go' | rg -q .; then
+  fail "ZIP 包含 integration build-tag 的测试专用 Go 源码"
+fi
 
 [[ -x "$package_root/work/dist/web-video-helper" ]] || fail "预构建助手不可执行"
 /usr/bin/lipo "$package_root/work/dist/web-video-helper" -verify_arch arm64 x86_64 || \

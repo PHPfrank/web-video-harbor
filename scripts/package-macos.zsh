@@ -109,6 +109,9 @@ done
 
 copy_regular_file "$repo_root/helper/go.mod" "$stage_root/helper/go.mod"
 while IFS= read -r -d '' source_path; do
+  if rg -Pq '^//go:build[[:space:]].*(?<![![:alnum:]_])integration(?![[:alnum:]_])' "$source_path"; then
+    continue
+  fi
   relative_path="${source_path#$repo_root/}"
   copy_regular_file "$source_path" "$stage_root/$relative_path"
 done < <(/usr/bin/find "$repo_root/helper/cmd" "$repo_root/helper/internal" -type f -name '*.go' \
@@ -153,6 +156,10 @@ validate_package_tree() {
     '(^|/)(tests?|testdata|outputs|\.git|__MACOSX|\.DS_Store|chrome-profile|downloads|build-cache|go-cache)(/|$)|(^|/)(config(\.local)?\.json|token)(/|$)|(^|/)[^/]*\.(log|pid|part|mp4|m3u8|ts)$' \
     >/dev/null; then
     fail "$tree_label 包含测试、缓存、凭证、日志或媒体文件"
+  fi
+  if rg -Pl '^//go:build[[:space:]].*(?<![![:alnum:]_])integration(?![[:alnum:]_])' \
+    "$tree_root/helper" -g '*.go' | rg -q .; then
+    fail "$tree_label 包含 integration build-tag 的测试专用 Go 源码"
   fi
 }
 
