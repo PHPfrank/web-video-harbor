@@ -147,6 +147,36 @@ func TestProxyRewritesRelativeQueryAndURIAttributes(t *testing.T) {
 	}
 }
 
+func TestProxyUsesFFmpegSafeOpaqueResourceExtensions(t *testing.T) {
+	tests := []struct {
+		name       string
+		manifest   string
+		wantSuffix string
+	}{
+		{name: "transport stream segment", manifest: mediaPlaylist("segment.ts?secret"), wantSuffix: ".ts"},
+		{name: "fragmented MP4 segment", manifest: mediaPlaylist("segment.m4s?secret"), wantSuffix: ".m4s"},
+		{name: "extensionless segment", manifest: mediaPlaylist("segment?secret"), wantSuffix: ".ts"},
+		{name: "unknown extension segment", manifest: mediaPlaylist("segment.privateblob?secret"), wantSuffix: ".ts"},
+		{name: "child playlist", manifest: "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1\nchild?secret\n", wantSuffix: ".m3u8"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy := startTestProxy(t, "https://cdn.example/root.m3u8", tt.manifest, nil)
+			resourceURL := firstProxyResource(t, getBody(t, proxy.URL()), proxy.URL())
+			parsed, err := url.Parse(resourceURL)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.HasSuffix(parsed.Path, tt.wantSuffix) {
+				t.Fatalf("opaque resource path = %q, want suffix %q", parsed.Path, tt.wantSuffix)
+			}
+			if strings.Contains(resourceURL, "secret") || strings.Contains(resourceURL, "segment") || strings.Contains(resourceURL, "child") {
+				t.Fatalf("opaque resource URL leaked upstream data: %q", resourceURL)
+			}
+		})
+	}
+}
+
 func TestProxyNormalizesParserAcceptedBOMInRootPlaylist(t *testing.T) {
 	tests := []struct {
 		name     string

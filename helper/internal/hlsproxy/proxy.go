@@ -12,6 +12,7 @@ import (
 	"net"
 	"net/http"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -510,9 +511,23 @@ func (p *Proxy) registerReference(base *url.URL, reference string, kind resource
 	if err != nil {
 		return "", &Error{Code: CodeLifecycle, Message: "无法注册视频子资源", cause: errors.New("resource ID generation failed")}
 	}
-	p.resources[id] = resource{url: resolved.String(), kind: kind}
-	p.reverse[key] = id
-	return "http://" + p.host + "/" + p.token + "/r/" + id, nil
+	resourceID := id + ffmpegSafeSuffix(resolved, kind)
+	p.resources[resourceID] = resource{url: resolved.String(), kind: kind}
+	p.reverse[key] = resourceID
+	return "http://" + p.host + "/" + p.token + "/r/" + resourceID, nil
+}
+
+func ffmpegSafeSuffix(target *url.URL, kind resourceKind) string {
+	if kind == resourcePlaylist {
+		return ".m3u8"
+	}
+	extension := strings.ToLower(path.Ext(target.Path))
+	switch extension {
+	case ".aac", ".ac3", ".ec3", ".m4a", ".m4s", ".m4v", ".mp3", ".mp4", ".mpeg", ".mpegts", ".ts", ".vob", ".wav":
+		return extension
+	default:
+		return ".ts"
+	}
 }
 
 func inspectPlaylist(manifestURL string, body []byte) error {
