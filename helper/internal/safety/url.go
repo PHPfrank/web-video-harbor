@@ -23,6 +23,11 @@ var nonPublicNetworks = []*net.IPNet{
 	mustCIDR("fec0::/10"),       // deprecated site-local
 }
 
+var globallyReachableProtocolAssignments = []*net.IPNet{
+	mustCIDR("192.0.0.9/32"),  // Port Control Protocol anycast
+	mustCIDR("192.0.0.10/32"), // Traversal Using Relays around NAT anycast
+}
+
 const (
 	CodeInvalidURL            = "invalid_url"
 	CodeSchemeNotAllowed      = "scheme_not_allowed"
@@ -126,6 +131,11 @@ func isPublicIP(ip net.IP) bool {
 		ip.IsMulticast() ||
 		ip.IsUnspecified() {
 		return false
+	}
+	for _, network := range globallyReachableProtocolAssignments {
+		if network.Contains(ip) {
+			return true
+		}
 	}
 	for _, network := range nonPublicNetworks {
 		if network.Contains(ip) {

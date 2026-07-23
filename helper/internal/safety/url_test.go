@@ -36,6 +36,25 @@ func TestValidateRemoteURLAllowsPublicHTTPSURL(t *testing.T) {
 	}
 }
 
+func TestValidateRemoteURLAllowsGloballyReachableProtocolAssignmentAddresses(t *testing.T) {
+	tests := []string{
+		"http://192.0.0.9/video.mp4",
+		"https://192.0.0.10/video.m3u8",
+	}
+
+	for _, rawURL := range tests {
+		t.Run(rawURL, func(t *testing.T) {
+			got, err := ValidateRemoteURL(context.Background(), rawURL, &fakeResolver{})
+			if err != nil {
+				t.Fatalf("ValidateRemoteURL() error = %v", err)
+			}
+			if got.String() != rawURL {
+				t.Fatalf("ValidateRemoteURL() = %q, want %q", got, rawURL)
+			}
+		})
+	}
+}
+
 func TestValidateRemoteURLRejectsInvalidURLs(t *testing.T) {
 	tests := []struct {
 		name string
