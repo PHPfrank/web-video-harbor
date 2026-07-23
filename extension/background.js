@@ -9,7 +9,6 @@ const navigationStarts = new Map();
 const documentStates = new Map();
 const navigationInProgress = new Set();
 const tabPageUrls = new Map();
-const requestGenerations = new Map();
 let persistenceQueue = Promise.resolve();
 
 function validTabId(tabId) {
@@ -54,48 +53,15 @@ function documentState(tabId) {
   return state;
 }
 
-function rememberRequest(details, generation) {
-  if (!details || typeof details.requestId !== 'string' || !details.requestId) return false;
-  requestGenerations.delete(details.requestId);
-  requestGenerations.set(details.requestId, { tabId: details.tabId, generation });
-  while (requestGenerations.size > 1000) {
-    requestGenerations.delete(requestGenerations.keys().next().value);
-  }
-  return true;
-}
-
-function belongsToCurrentRequest(details, phase) {
+function belongsToCurrentRequest(details) {
   if (!details || !validTabId(details.tabId)) return false;
   const state = documentState(details.tabId);
-  if (phase === 'headers' && typeof details.requestId === 'string') {
-    const request = requestGenerations.get(details.requestId);
-    if (request && (request.tabId !== details.tabId || request.generation !== state.generation)) {
-      return false;
-    }
-  }
   const documentId = details.documentId;
-  if (!validDocumentId(documentId)) {
-    if (phase === 'before') {
-      const navigation = navigationStarts.get(details.tabId);
-      if (state.isolating && (!Number.isFinite(details.timeStamp)
-        || !navigation || details.timeStamp < navigation.startedAt)) {
-        return false;
-      }
-      const remembered = rememberRequest(details, state.generation);
-      return remembered || !state.isolating;
-    }
-    const request = typeof details.requestId === 'string'
-      ? requestGenerations.get(details.requestId)
-      : null;
-    return request
-      ? request.tabId === details.tabId && request.generation === state.generation
-      : !state.isolating;
-  }
+  if (!validDocumentId(documentId)) return false;
   if (state.blocked.has(documentId)) return false;
   if (details.frameId === 0 && state.top && state.top !== documentId) return false;
   state.current.add(documentId);
   state.current = boundedDocumentSet(state.current);
-  if (phase === 'before') rememberRequest(details, state.generation);
   return true;
 }
 
@@ -208,22 +174,37 @@ function responseContentType(headers) {
   return header && typeof header.value === 'string' ? header.value : '';
 }
 
-function recordRequest(details, contentType, phase) {
-  if (!belongsToCurrentRequest(details, phase)) return;
+async function trustedPageUrl(tabId) {
+  const cached = tabPageUrls.get(tabId);
+  if (cached) return cached;
+  if (!chrome.tabs || typeof chrome.tabs.get !== 'function') return null;
+  const tab = await invokeChromeMethod(chrome.tabs, 'get', tabId);
+  const pageUrl = media.normalizeUrl(tab && tab.url);
+  if (!pageUrl) return null;
+  tabPageUrls.set(tabId, pageUrl);
+  return pageUrl;
+}
+
+async function recordRequest(details, contentType) {
+  if (!belongsToCurrentRequest(details)) return;
+  const generation = documentState(details.tabId).generation;
+  const pageUrl = await trustedPageUrl(details.tabId);
+  if (!pageUrl || documentState(details.tabId).generation !== generation
+    || !belongsToCurrentRequest(details)) return;
   const candidate = media.normalizeCandidate({
     url: details.url,
-    pageUrl: tabPageUrls.get(details.tabId),
+    pageUrl,
     contentType,
     source: 'webRequest',
   });
   if (candidate) {
-    void addCandidates(details.tabId, [candidate]);
+    await addCandidates(details.tabId, [candidate]);
     return;
   }
   const mime = typeof contentType === 'string' ? contentType.split(';', 1)[0].trim().toLowerCase() : '';
   const hadSuffixCandidate = media.inferMediaKind(details.url, '') !== 'unknown';
   if (mime && mime !== 'application/octet-stream' && hadSuffixCandidate) {
-    void removeCandidateUrl(details.tabId, details.url);
+    await removeCandidateUrl(details.tabId, details.url);
   }
 }
 
@@ -257,14 +238,14 @@ chrome.webRequest.onBeforeRequest.addListener(
       beginNavigation(details);
       return;
     }
-    recordRequest(details, '', 'before');
+    void recordRequest(details, '');
   },
   { urls: ['<all_urls>'], types: ['main_frame', 'media', 'xmlhttprequest'] },
 );
 
 chrome.webRequest.onHeadersReceived.addListener(
   function onHeadersReceived(details) {
-    recordRequest(details, responseContentType(details.responseHeaders), 'headers');
+    void recordRequest(details, responseContentType(details.responseHeaders));
   },
   { urls: ['<all_urls>'], types: ['media', 'xmlhttprequest'] },
   ['responseHeaders'],

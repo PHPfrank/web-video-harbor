@@ -18,7 +18,7 @@ function eventHook() {
   };
 }
 
-function createHarness() {
+function createHarness(options = {}) {
   const hooks = {
     before: eventHook(),
     headers: eventHook(),
@@ -46,6 +46,10 @@ function createHarness() {
     tabs: {
       onUpdated: hooks.updated,
       onRemoved: hooks.removed,
+      get(tabId, callback) {
+        const url = options.tabUrls && options.tabUrls[tabId];
+        callback(url ? { id: tabId, url } : undefined);
+      },
       sendMessage(_tabId, _message, callback) { callback({ ok: true }); },
     },
   };
@@ -105,9 +109,11 @@ test('background detects an extensionless WeChat CDN response from Content-Type 
 });
 
 test('explicit non-media response MIME removes an early suffix-based candidate', async () => {
-  const harness = createHarness();
+  const harness = createHarness({ tabUrls: { 4: 'https://example.com/watch' } });
   const request = {
     tabId: 4,
+    frameId: 0,
+    documentId: 'current-document',
     type: 'xmlhttprequest',
     url: 'https://example.com/error.mp4',
   };
@@ -210,7 +216,7 @@ test('old document responses and messages cannot repopulate a newly navigated ta
   assert.equal(newCandidate.candidates[0].pageUrl, 'https://new.example/watch');
 });
 
-test('navigation isolation rejects undocumented stale work but accepts a matching new-page claim', async () => {
+test('navigation isolation rejects all undocumented network work but accepts a matching new-page claim', async () => {
   const harness = createHarness();
   await harness.dispatch({
     type: 'CLAIM_DOCUMENT',
@@ -266,9 +272,42 @@ test('navigation isolation rejects undocumented stale work but accepts a matchin
 
   assert.equal(staleMessage.ok, false);
   assert.equal(newMessage.ok, true);
-  assert.equal(newMessage.candidates[1].pageUrl, 'https://new.example/watch');
+  assert.equal(newMessage.candidates[0].pageUrl, 'https://new.example/watch');
   assert.deepEqual(
     Array.from((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 3 })).candidates, (item) => item.url),
-    ['https://cdn.example/current.m3u8', 'https://cdn.example/new.mp4'],
+    ['https://cdn.example/new.mp4'],
   );
+});
+
+test('background resolves a trusted pageUrl with tabs.get after worker state loss', async () => {
+  const harness = createHarness({ tabUrls: { 21: 'https://example.com/current?page=1#video' } });
+  harness.hooks.headers.listeners[0]({
+    tabId: 21,
+    frameId: 0,
+    documentId: 'current-document',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/stream?id=1',
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+
+  const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 21 });
+  assert.equal(result.candidates.length, 1);
+  assert.equal(result.candidates[0].pageUrl, 'https://example.com/current?page=1');
+});
+
+test('background drops network candidates when trusted tab pageUrl is unavailable', async () => {
+  const harness = createHarness();
+  harness.hooks.headers.listeners[0]({
+    tabId: 22,
+    frameId: 0,
+    documentId: 'current-document',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/stream?id=2',
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+
+  const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 22 });
+  assert.equal(result.candidates.length, 0);
 });
