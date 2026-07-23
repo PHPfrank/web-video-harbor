@@ -14,6 +14,7 @@ import (
 	"web-video-downloader/helper/internal/ffmpeg"
 	"web-video-downloader/helper/internal/hls"
 	"web-video-downloader/helper/internal/media"
+	"web-video-downloader/helper/internal/output"
 	"web-video-downloader/helper/internal/safety"
 	"web-video-downloader/helper/internal/tasks"
 )
@@ -309,6 +310,10 @@ func (e *Engine) runHLS(ctx context.Context, id string, spec JobSpec) {
 		Title:     spec.Title,
 		Manifest:  append([]byte(nil), inspection.Manifest...),
 	})
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		path = publishedPath
+		err = nil
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			e.fail(id, err)
@@ -343,6 +348,10 @@ func (e *Engine) runMP4(ctx context.Context, id string, spec JobSpec) {
 		return
 	}
 	path, err := downloader.Download(ctx, spec.URL, spec.Title)
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		path = publishedPath
+		err = nil
+	}
 	if err != nil {
 		if ctx.Err() == nil {
 			e.fail(id, err)

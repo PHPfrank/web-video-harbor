@@ -97,14 +97,15 @@ type internalConfig struct {
 // Runner starts an FFmpeg process for each Run call and serializes progress
 // callback invocations, including when callers run multiple requests at once.
 type Runner struct {
-	outputDir      string
-	resolver       safety.Resolver
-	ffmpegPath     string
-	onProgress     ProgressFunc
-	commandFactory commandFactory
-	progressParser progressParserFunc
-	proxyFactory   proxyFactory
-	progressMu     sync.Mutex
+	outputDir           string
+	resolver            safety.Resolver
+	ffmpegPath          string
+	onProgress          ProgressFunc
+	commandFactory      commandFactory
+	progressParser      progressParserFunc
+	proxyFactory        proxyFactory
+	syncOutputDirectory func(string) error
+	progressMu          sync.Mutex
 }
 
 // New constructs a production runner backed by exec.CommandContext.
@@ -146,13 +147,14 @@ func newRunner(config internalConfig) (*Runner, error) {
 		proxyFactory = productionProxyFactory
 	}
 	return &Runner{
-		outputDir:      absDir,
-		resolver:       config.resolver,
-		ffmpegPath:     ffmpegPath,
-		onProgress:     config.onProgress,
-		commandFactory: factory,
-		progressParser: parser,
-		proxyFactory:   proxyFactory,
+		outputDir:           absDir,
+		resolver:            config.resolver,
+		ffmpegPath:          ffmpegPath,
+		onProgress:          config.onProgress,
+		commandFactory:      factory,
+		progressParser:      parser,
+		proxyFactory:        proxyFactory,
+		syncOutputDirectory: syncDirectory,
 	}, nil
 }
 
@@ -259,8 +261,11 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	defer func() {
 		cleanupErr := cleanupStaging(stagingDir, partPath, stagingInfo)
 		if cleanupErr != nil && returnErr == nil {
-			path = ""
-			returnErr = outputError("无法清理临时视频文件", cleanupErr)
+			if path != "" {
+				returnErr = output.NewPublishedError(path, outputError("无法清理临时视频文件", cleanupErr))
+			} else {
+				returnErr = outputError("无法清理临时视频文件", cleanupErr)
+			}
 		}
 	}()
 
@@ -330,8 +335,8 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if err != nil {
 		return "", outputError("无法保存合并后的视频", err)
 	}
-	if err := syncDirectory(r.outputDir); err != nil {
-		return "", outputError("无法确认视频文件已保存", err)
+	if err := r.syncOutputDirectory(r.outputDir); err != nil {
+		return published, output.NewPublishedError(published, outputError("无法确认视频文件已保存", err))
 	}
 	return published, nil
 }

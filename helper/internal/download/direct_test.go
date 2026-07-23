@@ -327,6 +327,76 @@ func TestDirectDoesNotRetryLocalPartWriteFailureAndCleansStaging(t *testing.T) {
 	assertDirectoryEmpty(t, dir)
 }
 
+func TestDirectReturnsPublishedOwnershipWhenStagingCleanupFails(t *testing.T) {
+	dir := t.TempDir()
+	var stagingDir string
+	downloader := newTestDownloader(
+		t,
+		dir,
+		&http.Client{Transport: &successfulBodyTransport{}},
+		RetryPolicy{MaxAttempts: 1},
+		func(Progress) {
+			matches, err := filepath.Glob(filepath.Join(dir, ".web-video-*"))
+			if err != nil || len(matches) != 1 {
+				t.Fatalf("locate staging directory: matches=%v error=%v", matches, err)
+			}
+			stagingDir = matches[0]
+			if err := os.Chmod(stagingDir, 0o500); err != nil {
+				t.Fatalf("make staging cleanup fail: %v", err)
+			}
+		},
+		nil,
+	)
+	t.Cleanup(func() {
+		if stagingDir != "" {
+			_ = os.Chmod(stagingDir, 0o700)
+			_ = os.Remove(filepath.Join(stagingDir, "download.part"))
+			_ = os.Remove(stagingDir)
+		}
+	})
+
+	path, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "published-direct")
+	wantPath := filepath.Join(dir, "published-direct.mp4")
+	if path != wantPath {
+		t.Fatalf("Download() path = %q, want published path %q", path, wantPath)
+	}
+	var published interface{ PublishedPath() string }
+	if !errors.As(err, &published) || published.PublishedPath() != wantPath {
+		t.Fatalf("Download() error = %T %v, want published ownership for %q", err, err, wantPath)
+	}
+	contents, readErr := os.ReadFile(wantPath)
+	if readErr != nil || string(contents) != "video" {
+		t.Fatalf("published file = %q, error = %v", contents, readErr)
+	}
+}
+
+func TestDirectReturnsPublishedOwnershipWhenOutputDirectorySyncFails(t *testing.T) {
+	dir := t.TempDir()
+	downloader := newTestDownloader(
+		t,
+		dir,
+		&http.Client{Transport: &successfulBodyTransport{}},
+		RetryPolicy{MaxAttempts: 1},
+		nil,
+		nil,
+	)
+	downloader.syncOutputDirectory = func(string) error { return errors.New("injected directory sync failure") }
+
+	path, err := downloader.Download(context.Background(), "https://media.example/video.mp4", "published-direct-sync")
+	wantPath := filepath.Join(dir, "published-direct-sync.mp4")
+	if path != wantPath {
+		t.Fatalf("Download() path = %q, want published path %q", path, wantPath)
+	}
+	var published interface{ PublishedPath() string }
+	if !errors.As(err, &published) || published.PublishedPath() != wantPath {
+		t.Fatalf("Download() error = %T %v, want published ownership for %q", err, err, wantPath)
+	}
+	if _, statErr := os.Stat(wantPath); statErr != nil {
+		t.Fatalf("published output missing after sync failure: %v", statErr)
+	}
+	assertNoPartFiles(t, dir)
+}
+
 func TestDirectDoesNotRetryPermanentResponseCloseError(t *testing.T) {
 	transport := &closeFailureTransport{err: errors.New("permanent response close failure")}
 	client := &http.Client{Transport: transport}

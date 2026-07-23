@@ -7,6 +7,8 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"sync"
 	"testing"
@@ -35,6 +37,15 @@ type manifestInspectorFunc func(context.Context, string) (ManifestInspection, er
 func (f manifestInspectorFunc) Inspect(ctx context.Context, rawURL string) (ManifestInspection, error) {
 	return f(ctx, rawURL)
 }
+
+type publishedTestError struct {
+	path string
+	err  error
+}
+
+func (e *publishedTestError) Error() string         { return e.err.Error() }
+func (e *publishedTestError) Unwrap() error         { return e.err }
+func (e *publishedTestError) PublishedPath() string { return e.path }
 
 func TestEngineStartsMP4AsynchronouslyAndReportsProgress(t *testing.T) {
 	manager := tasks.NewManager()
@@ -401,6 +412,94 @@ func TestPublishedHLSWinsConcurrentCancel(t *testing.T) {
 	completed := waitStatus(t, manager, task.ID, tasks.Completed)
 	if completed.OutputPath != "/downloads/published-hls.mp4" {
 		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+}
+
+func TestPublishedCleanupWarningsCompleteDirectAndHLSJobs(t *testing.T) {
+	tests := []struct {
+		name      string
+		mediaType string
+		configure func(*engineDeps, string, chan struct{}, chan struct{})
+	}{
+		{
+			name:      "direct",
+			mediaType: "mp4",
+			configure: func(deps *engineDeps, path string, published, release chan struct{}) {
+				deps.newDownloader = func(download.ProgressFunc) (directDownloader, error) {
+					return directDownloaderFunc(func(context.Context, string, string) (string, error) {
+						if err := os.WriteFile(path, []byte("direct"), 0o600); err != nil {
+							return "", err
+						}
+						close(published)
+						<-release
+						return path, &publishedTestError{path: path, err: errors.New("cleanup failed")}
+					}), nil
+				}
+			},
+		},
+		{
+			name:      "hls",
+			mediaType: "hls",
+			configure: func(deps *engineDeps, path string, published, release chan struct{}) {
+				deps.inspector = manifestInspectorFunc(func(context.Context, string) (ManifestInspection, error) {
+					return ManifestInspection{Playlist: &hls.Playlist{}, Manifest: []byte("#EXTM3U\n#EXTINF:1,\na.ts\n"), SourceURL: "https://cdn.example/final.m3u8"}, nil
+				})
+				deps.newHLSRunner = func(ffmpeg.ProgressFunc) (hlsRunner, error) {
+					return hlsRunnerFunc(func(context.Context, ffmpeg.Request) (string, error) {
+						if err := os.WriteFile(path, []byte("hls"), 0o600); err != nil {
+							return "", err
+						}
+						close(published)
+						<-release
+						return path, &publishedTestError{path: path, err: errors.New("directory sync failed")}
+					}), nil
+				}
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			dir := t.TempDir()
+			path := filepath.Join(dir, tt.name+".mp4")
+			published := make(chan struct{})
+			release := make(chan struct{})
+			manager := tasks.NewManager()
+			deps := engineDeps{manager: manager}
+			tt.configure(&deps, path, published, release)
+			engine, err := newEngine(deps)
+			if err != nil {
+				t.Fatal(err)
+			}
+			task, err := engine.Start(context.Background(), JobSpec{
+				URL:       "https://media.example/video." + tt.mediaType,
+				Title:     tt.name,
+				MediaType: tt.mediaType,
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			<-published
+			before, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("stat published output: %v", err)
+			}
+			if _, err := engine.Cancel(task.ID); err != nil {
+				t.Fatal(err)
+			}
+			close(release)
+			completed := waitStatus(t, manager, task.ID, tasks.Completed)
+			if completed.OutputPath != path {
+				t.Fatalf("OutputPath = %q, want %q", completed.OutputPath, path)
+			}
+			after, err := os.Stat(path)
+			if err != nil {
+				t.Fatalf("published output disappeared: %v", err)
+			}
+			if !os.SameFile(before, after) {
+				t.Fatal("completed task no longer owns the originally published inode")
+			}
+		})
 	}
 }
 

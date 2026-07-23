@@ -33,6 +33,7 @@ function createHarness(options = {}) {
   const pendingStorageSets = [];
   let storageSetCalls = 0;
   let storageRemoveCalls = 0;
+  const localAccessLevels = [];
   if (options.initialStorageCandidates) {
     storageState.videoGrabberCandidatesV1 = options.initialStorageCandidates;
   }
@@ -43,6 +44,12 @@ function createHarness(options = {}) {
   const chrome = {
     runtime: { lastError: undefined, onMessage: hooks.message },
     storage: {
+      local: options.localAccessLevelUnavailable ? {} : {
+        setAccessLevel(options, callback) {
+          localAccessLevels.push(options);
+          if (callback) callback();
+        },
+      },
       session: {
         get(key, callback) { callback({ [key]: storageState[key] }); },
         set(values, callback) {
@@ -122,6 +129,8 @@ function createHarness(options = {}) {
     pendingTabGetCount() { return pendingTabGets.length; },
     storageSetCalls() { return storageSetCalls; },
     storageRemoveCalls() { return storageRemoveCalls; },
+    localAccessLevels() { return localAccessLevels.slice(); },
+    storageCandidates() { return storageState.videoGrabberCandidatesV1 || {}; },
     pendingStorageSetCount() { return pendingStorageSets.length; },
     resolveStorageSet() {
       assert.ok(pendingStorageSets.length, 'missing pending storage.session.set');
@@ -131,6 +140,87 @@ function createHarness(options = {}) {
     },
   };
 }
+
+test('cold-start headers cannot claim an old document but claimed current requests still work', async () => {
+  const harness = createHarness({ tabUrls: { 90: 'https://new.example/watch' } });
+  harness.hooks.headers.listeners[0]({
+    tabId: 90,
+    frameId: 0,
+    documentId: 'old-document',
+    requestId: 'late-old-request',
+    type: 'xmlhttprequest',
+    url: 'https://cdn.example/old.mp4',
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 90 })).candidates.length, 0);
+
+  const sender = { tab: { id: 90 }, frameId: 0, documentId: 'new-document' };
+  assert.equal((await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://new.example/watch',
+  }, sender)).ok, true);
+  const currentRequest = {
+    tabId: 90,
+    frameId: 0,
+    documentId: 'new-document',
+    requestId: 'current-request',
+    type: 'xmlhttprequest',
+    url: 'https://finder.video.qq.com/extensionless?id=current',
+  };
+  harness.hooks.before.listeners[0](currentRequest);
+  harness.hooks.headers.listeners[0]({
+    ...currentRequest,
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  await harness.flush();
+
+  const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 90 });
+  assert.deepEqual(Array.from(result.candidates, (candidate) => candidate.url), [currentRequest.url]);
+  assert.equal(result.candidates[0].pageUrl, 'https://new.example/watch');
+});
+
+test('GET_TAB_MEDIA reconciles restored candidates with the current tab URL', async () => {
+  const oldCandidate = {
+    url: 'https://cdn.example/old.mp4',
+    pageUrl: 'https://old.example/watch',
+    contentType: 'video/mp4',
+    source: 'webRequest',
+  };
+  const changed = createHarness({
+    initialStorageCandidates: { 92: [oldCandidate] },
+    tabUrls: { 92: 'https://new.example/watch' },
+  });
+  const changedResult = await changed.dispatch({ type: 'GET_TAB_MEDIA', tabId: 92 });
+  await changed.flush();
+  assert.equal(changedResult.pageUrl, 'https://new.example/watch');
+  assert.equal(changedResult.candidates.length, 0);
+  assert.deepEqual(Object.keys(changed.storageCandidates()), []);
+
+  const unchanged = createHarness({
+    initialStorageCandidates: { 93: [{ ...oldCandidate, pageUrl: 'https://same.example/watch' }] },
+    tabUrls: { 93: 'https://same.example/watch#player' },
+  });
+  const unchangedResult = await unchanged.dispatch({ type: 'GET_TAB_MEDIA', tabId: 93 });
+  assert.equal(unchangedResult.pageUrl, 'https://same.example/watch');
+  assert.equal(unchangedResult.candidates.length, 1);
+  assert.equal(unchangedResult.candidates[0].pageUrl, unchangedResult.pageUrl);
+});
+
+test('background restricts local pairing storage to trusted extension contexts', async () => {
+  const harness = createHarness();
+  await harness.flush();
+  assert.equal(harness.localAccessLevels().length, 1);
+  assert.equal(harness.localAccessLevels()[0].accessLevel, 'TRUSTED_CONTEXTS');
+});
+
+test('background still starts when storage.local access-level control is unavailable', async () => {
+  const harness = createHarness({ localAccessLevelUnavailable: true });
+  await harness.flush();
+  assert.equal(harness.localAccessLevels().length, 0);
+  assert.equal(harness.hooks.before.listeners.length, 1);
+  assert.equal(harness.hooks.message.listeners.length, 1);
+});
 
 test('popup bridge returns current page URL and candidates together', async () => {
   const harness = createHarness();
@@ -355,8 +445,12 @@ test('navigation isolation rejects all undocumented network work but accepts a m
   );
 });
 
-test('background resolves a trusted pageUrl with tabs.get after worker state loss', async () => {
+test('background accepts headers-only media after the current document claims its page', async () => {
   const harness = createHarness({ tabUrls: { 21: 'https://example.com/current?page=1#video' } });
+  await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://example.com/current?page=1#video',
+  }, { tab: { id: 21 }, frameId: 0, documentId: 'current-document' });
   harness.hooks.headers.listeners[0]({
     tabId: 21,
     frameId: 0,
@@ -390,13 +484,13 @@ test('background drops network candidates when trusted tab pageUrl is unavailabl
 
 test('late tabs.get result cannot overwrite pageUrl after navigation generation changes', async () => {
   const harness = createHarness({ deferTabGet: true });
-  harness.hooks.headers.listeners[0]({
+  harness.hooks.before.listeners[0]({
     tabId: 31,
     frameId: 0,
     documentId: 'old-document',
+    requestId: 'old-media-31',
     type: 'media',
     url: 'https://cdn.example/old.mp4',
-    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
   });
   await harness.flush();
   harness.hooks.before.listeners[0]({
@@ -491,6 +585,10 @@ test('storage.session quota failure disables repeated persistence attempts but k
     storageSetFails: true,
     tabUrls: { 61: 'https://example.com/watch' },
   });
+  await harness.dispatch({
+    type: 'CLAIM_DOCUMENT',
+    pageUrl: 'https://example.com/watch',
+  }, { tab: { id: 61 }, frameId: 0, documentId: 'quota-document' });
   for (const name of ['one', 'two']) {
     harness.hooks.headers.listeners[0]({
       tabId: 61,

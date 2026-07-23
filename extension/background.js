@@ -69,11 +69,16 @@ function rememberRequestContext(details) {
 }
 
 function beginHeadersContext(details) {
+  const state = details && validTabId(details.tabId) ? documentState(details.tabId) : null;
+  const claimedDocument = Boolean(state && validDocumentId(details.documentId)
+    && state.current.has(details.documentId) && !state.blocked.has(details.documentId));
   if (!details || typeof details.requestId !== 'string' || !details.requestId) {
-    return { accepted: true, token: null };
+    return { accepted: claimedDocument, token: null };
   }
-  const state = documentState(details.tabId);
   let context = requestContexts.get(details.requestId);
+  if (!context && !claimedDocument) {
+    return { accepted: false, token: null };
+  }
   const matches = !context || (context.tabId === details.tabId
     && context.generation === state.generation
     && context.documentId === details.documentId);
@@ -205,6 +210,14 @@ function invokeChromeMethod(target, method, argument) {
   });
 }
 
+function restrictLocalStorageAccess() {
+  const local = chrome.storage && chrome.storage.local;
+  if (!local || typeof local.setAccessLevel !== 'function') return;
+  void invokeChromeMethod(local, 'setAccessLevel', { accessLevel: 'TRUSTED_CONTEXTS' });
+}
+
+restrictLocalStorageAccess();
+
 async function hydrateStore() {
   const session = storageSession();
   if (!session) return;
@@ -307,6 +320,38 @@ async function trustedPageUrl(tabId) {
   const tab = await invokeChromeMethod(chrome.tabs, 'get', tabId);
   const pageUrl = media.normalizeUrl(tab && tab.url);
   return pageUrl || null;
+}
+
+async function reconciledTabMedia(tabId) {
+  const generation = documentState(tabId).generation;
+  let pageUrl = null;
+  if (chrome.tabs && typeof chrome.tabs.get === 'function') {
+    const tab = await invokeChromeMethod(chrome.tabs, 'get', tabId);
+    pageUrl = media.normalizeUrl(tab && tab.url);
+  }
+  if (!pageUrl) pageUrl = tabPageUrls.get(tabId) || null;
+  if (documentState(tabId).generation !== generation) {
+    return { pageUrl: tabPageUrls.get(tabId) || null, candidates: [] };
+  }
+  if (!pageUrl) return { pageUrl: null, candidates: [] };
+
+  const candidates = candidateStore.get(tabId);
+  const matching = candidates.filter((candidate) => media.normalizeUrl(candidate.pageUrl) === pageUrl);
+  if (matching.length !== candidates.length) {
+    candidateStore.replace(tabId, matching);
+    authoritativeKinds.delete(tabId);
+    for (const candidate of matching) {
+      if (explicitMediaMime(candidate.contentType)) {
+        rememberAuthoritativeKind(tabId, candidate.url, candidate.kind);
+      }
+    }
+    await persistStore();
+    if (documentState(tabId).generation !== generation) {
+      return { pageUrl: tabPageUrls.get(tabId) || null, candidates: [] };
+    }
+  }
+  tabPageUrls.set(tabId, pageUrl);
+  return { pageUrl, candidates: candidateStore.get(tabId) };
 }
 
 async function recordRequest(details, contentType, token) {
@@ -512,8 +557,8 @@ async function handleMessage(request, sender) {
     const tabId = requestedTabId(request, sender);
     if (!validTabId(tabId)) return { ok: false, error: '无效标签页' };
     await ready;
-    const pageUrl = await trustedPageUrl(tabId);
-    return { ok: true, pageUrl, candidates: candidateStore.get(tabId) };
+    const result = await reconciledTabMedia(tabId);
+    return { ok: true, pageUrl: result.pageUrl, candidates: result.candidates };
   }
   if (request.type === 'CLEAR') {
     const tabId = requestedTabId(request, sender);

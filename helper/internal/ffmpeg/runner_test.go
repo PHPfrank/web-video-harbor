@@ -777,6 +777,72 @@ func TestRunnerPublishesOutputWithPrivatePermissions(t *testing.T) {
 	}
 }
 
+func TestRunnerReturnsPublishedOwnershipWhenDeferredCleanupFails(t *testing.T) {
+	var stagingDir string
+	runner := newTestRunner(t, func(_ context.Context, _ string, args ...string) command {
+		partPath := args[len(args)-1]
+		return &fakeCommand{onStart: func() error {
+			if err := os.WriteFile(partPath, []byte("video"), 0o600); err != nil {
+				return err
+			}
+			stagingDir = filepath.Dir(partPath)
+			return os.Chmod(stagingDir, 0o500)
+		}}
+	}, nil)
+	t.Cleanup(func() {
+		if stagingDir != "" {
+			_ = os.Chmod(stagingDir, 0o700)
+			_ = os.Remove(filepath.Join(stagingDir, "output.part"))
+			_ = os.Remove(stagingDir)
+		}
+	})
+
+	path, err := runner.Run(context.Background(), Request{
+		SourceURL: "https://cdn.example/video.m3u8",
+		Title:     "published-hls",
+		Manifest:  []byte(validMediaManifest),
+	})
+	wantPath := filepath.Join(runner.outputDir, "published-hls.mp4")
+	if path != wantPath {
+		t.Fatalf("Run() path = %q, want published path %q", path, wantPath)
+	}
+	var published interface{ PublishedPath() string }
+	if !errors.As(err, &published) || published.PublishedPath() != wantPath {
+		t.Fatalf("Run() error = %T %v, want published ownership for %q", err, err, wantPath)
+	}
+	contents, readErr := os.ReadFile(wantPath)
+	if readErr != nil || string(contents) != "video" {
+		t.Fatalf("published file = %q, error = %v", contents, readErr)
+	}
+}
+
+func TestRunnerReturnsPublishedOwnershipWhenOutputDirectorySyncFails(t *testing.T) {
+	runner := newTestRunner(t, func(_ context.Context, _ string, args ...string) command {
+		return &fakeCommand{onStart: func() error {
+			return os.WriteFile(args[len(args)-1], []byte("video"), 0o600)
+		}}
+	}, nil)
+	runner.syncOutputDirectory = func(string) error { return errors.New("injected directory sync failure") }
+
+	path, err := runner.Run(context.Background(), Request{
+		SourceURL: "https://cdn.example/video.m3u8",
+		Title:     "published-hls-sync",
+		Manifest:  []byte(validMediaManifest),
+	})
+	wantPath := filepath.Join(runner.outputDir, "published-hls-sync.mp4")
+	if path != wantPath {
+		t.Fatalf("Run() path = %q, want published path %q", path, wantPath)
+	}
+	var published interface{ PublishedPath() string }
+	if !errors.As(err, &published) || published.PublishedPath() != wantPath {
+		t.Fatalf("Run() error = %T %v, want published ownership for %q", err, err, wantPath)
+	}
+	if _, statErr := os.Stat(wantPath); statErr != nil {
+		t.Fatalf("published output missing after sync failure: %v", statErr)
+	}
+	assertNoStagingFiles(t, runner.outputDir)
+}
+
 func TestRunnerDoesNotOverwriteExistingFileOrSymlink(t *testing.T) {
 	dir := t.TempDir()
 	existing := filepath.Join(dir, "video.mp4")

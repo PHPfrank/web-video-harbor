@@ -1,6 +1,7 @@
 package output
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -173,6 +174,26 @@ func TestReservationPublishAndRelease(t *testing.T) {
 	}
 	if _, err := os.Stat(releasedPath); !os.IsNotExist(err) {
 		t.Fatalf("released reservation still exists: %v", err)
+	}
+}
+
+func TestPublishedErrorCarriesOwnershipWithoutLeakingPathInMessage(t *testing.T) {
+	path := "/Users/example/Downloads/private-title.mp4"
+	cause := errors.New("cleanup failed")
+	err := NewPublishedError(path, cause)
+
+	gotPath, ok := PublishedPath(err)
+	if !ok || gotPath != path {
+		t.Fatalf("PublishedPath() = %q, %t, want %q, true", gotPath, ok, path)
+	}
+	if !errors.Is(err, cause) {
+		t.Fatalf("published error does not wrap cause: %v", err)
+	}
+	if strings.Contains(err.Error(), path) {
+		t.Fatalf("published error leaked output path: %q", err)
+	}
+	if _, ok := PublishedPath(cause); ok {
+		t.Fatal("ordinary error was treated as published output")
 	}
 }
 

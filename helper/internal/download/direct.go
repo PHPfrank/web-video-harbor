@@ -90,15 +90,16 @@ type internalConfig struct {
 }
 
 type Downloader struct {
-	client       *http.Client
-	outputDir    string
-	resolver     safety.Resolver
-	retry        RetryPolicy
-	onProgress   ProgressFunc
-	sleep        SleepFunc
-	now          func() time.Time
-	validateURLs bool
-	partWriter   func(io.Writer) io.Writer
+	client              *http.Client
+	outputDir           string
+	resolver            safety.Resolver
+	retry               RetryPolicy
+	onProgress          ProgressFunc
+	sleep               SleepFunc
+	now                 func() time.Time
+	validateURLs        bool
+	partWriter          func(io.Writer) io.Writer
+	syncOutputDirectory func(string) error
 }
 
 // New constructs a production downloader with a safe transport and redirect
@@ -146,15 +147,16 @@ func newDownloader(config internalConfig) (*Downloader, error) {
 	now := time.Now
 
 	return &Downloader{
-		client:       config.client,
-		outputDir:    absDir,
-		resolver:     config.resolver,
-		retry:        retry,
-		onProgress:   config.onProgress,
-		sleep:        sleep,
-		now:          now,
-		validateURLs: !config.skipURLCheck,
-		partWriter:   identityWriter,
+		client:              config.client,
+		outputDir:           absDir,
+		resolver:            config.resolver,
+		retry:               retry,
+		onProgress:          config.onProgress,
+		sleep:               sleep,
+		now:                 now,
+		validateURLs:        !config.skipURLCheck,
+		partWriter:          identityWriter,
+		syncOutputDirectory: syncDirectory,
 	}, nil
 }
 
@@ -218,8 +220,11 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 			cleanupErr = cleanupOwnedStaging(stagingDir, partPath, stagingInfo, partInfo)
 		}
 		if finalizationErr := errors.Join(closeErr, cleanupErr); finalizationErr != nil && returnErr == nil {
-			path = ""
-			returnErr = outputError("无法清理临时下载文件", finalizationErr)
+			if path != "" {
+				returnErr = output.NewPublishedError(path, outputError("无法清理临时下载文件", finalizationErr))
+			} else {
+				returnErr = outputError("无法清理临时下载文件", finalizationErr)
+			}
 		}
 	}()
 
@@ -244,11 +249,11 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 				return "", outputError("无法保存下载文件", err)
 			}
 			if err := cleanupOwnedStaging(stagingDir, partPath, stagingInfo, partInfo); err != nil {
-				return "", outputError("无法清理临时下载文件", err)
+				return published, output.NewPublishedError(published, outputError("无法清理临时下载文件", err))
 			}
 			stagingCleaned = true
-			if err := syncDirectory(d.outputDir); err != nil {
-				return "", outputError("无法确认下载文件已保存", err)
+			if err := d.syncOutputDirectory(d.outputDir); err != nil {
+				return published, output.NewPublishedError(published, outputError("无法确认下载文件已保存", err))
 			}
 			return published, nil
 		}
