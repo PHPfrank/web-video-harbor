@@ -6,10 +6,51 @@ const media = globalThis.VideoGrabberMedia;
 const candidateStore = media.createCandidateStore({ maxTabs: 50, maxCandidatesPerTab: 100 });
 const STORAGE_KEY = 'videoGrabberCandidatesV1';
 const navigationStarts = new Map();
+const documentStates = new Map();
 let persistenceQueue = Promise.resolve();
 
 function validTabId(tabId) {
   return Number.isInteger(tabId) && tabId >= 0;
+}
+
+function validDocumentId(documentId) {
+  return typeof documentId === 'string' && documentId.length > 0 && documentId.length <= 128;
+}
+
+function boundedDocumentSet(values) {
+  const entries = Array.from(values);
+  return new Set(entries.slice(Math.max(0, entries.length - 100)));
+}
+
+function resetDocumentState(tabId, topDocumentId) {
+  const previous = documentStates.get(tabId);
+  const blocked = new Set(previous ? [...previous.blocked, ...previous.current] : []);
+  const current = new Set();
+  let top = null;
+  if (validDocumentId(topDocumentId)) {
+    blocked.delete(topDocumentId);
+    current.add(topDocumentId);
+    top = topDocumentId;
+  }
+  documentStates.set(tabId, { top, current, blocked: boundedDocumentSet(blocked) });
+}
+
+function belongsToCurrentDocument(details) {
+  const documentId = details && details.documentId;
+  if (!validDocumentId(documentId)) return true;
+  let state = documentStates.get(details.tabId);
+  if (!state) {
+    state = { top: null, current: new Set(), blocked: new Set() };
+    documentStates.set(details.tabId, state);
+  }
+  if (state.blocked.has(documentId)) return false;
+  if (details.frameId === 0) {
+    if (state.top && state.top !== documentId) return false;
+    state.top = documentId;
+  }
+  state.current.add(documentId);
+  state.current = boundedDocumentSet(state.current);
+  return true;
 }
 
 function storageSession() {
@@ -101,7 +142,7 @@ function responseContentType(headers) {
 }
 
 function recordRequest(details, contentType) {
-  if (!details || !validTabId(details.tabId)) return;
+  if (!details || !validTabId(details.tabId) || !belongsToCurrentDocument(details)) return;
   const candidate = media.normalizeCandidate({
     url: details.url,
     contentType,
@@ -118,19 +159,25 @@ function recordRequest(details, contentType) {
   }
 }
 
-function beginNavigation(tabId, timestamp) {
+function beginNavigation(tabId, timestamp, documentId) {
   if (!validTabId(tabId)) return;
   const eventTime = Number.isFinite(timestamp) ? timestamp : Date.now();
   const previous = navigationStarts.get(tabId);
-  if (previous && eventTime <= previous.startedAt) return;
-  navigationStarts.set(tabId, { startedAt: eventTime });
+  const hasNewDocument = validDocumentId(documentId)
+    && (!previous || previous.documentId !== documentId);
+  if (previous && eventTime <= previous.startedAt && !hasNewDocument) return;
+  navigationStarts.set(tabId, {
+    startedAt: Math.max(eventTime, previous ? previous.startedAt : eventTime),
+    documentId: validDocumentId(documentId) ? documentId : null,
+  });
+  resetDocumentState(tabId, documentId);
   void clearTab(tabId);
 }
 
 chrome.webRequest.onBeforeRequest.addListener(
   function onBeforeRequest(details) {
     if (details.type === 'main_frame') {
-      beginNavigation(details.tabId, details.timeStamp);
+      beginNavigation(details.tabId, details.timeStamp, details.documentId);
       return;
     }
     recordRequest(details, '');
@@ -155,11 +202,12 @@ chrome.tabs.onUpdated.addListener(function onTabUpdated(tabId, changeInfo) {
   if (changeInfo.status !== 'loading') return;
   const navigation = navigationStarts.get(tabId);
   if (navigation) return;
-  beginNavigation(tabId, Date.now());
+  beginNavigation(tabId, Date.now(), null);
 });
 
 chrome.tabs.onRemoved.addListener(function onTabRemoved(tabId) {
   navigationStarts.delete(tabId);
+  documentStates.delete(tabId);
   void clearTab(tabId);
 });
 
@@ -190,6 +238,13 @@ async function handleMessage(request, sender) {
     const tabId = sender && sender.tab ? sender.tab.id : null;
     if (!validTabId(tabId) || !Array.isArray(request.candidates)) {
       return { ok: false, error: '无效媒体列表' };
+    }
+    if (!belongsToCurrentDocument({
+      tabId,
+      frameId: sender.frameId,
+      documentId: sender.documentId,
+    })) {
+      return { ok: false, error: '页面已导航' };
     }
     const candidates = await addCandidates(tabId, request.candidates);
     return { ok: true, candidates };

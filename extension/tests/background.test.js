@@ -132,3 +132,49 @@ test('late loading notification for the same navigation does not erase new candi
   const result = await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 9 });
   assert.equal(result.candidates.length, 1);
 });
+
+test('old document responses and messages cannot repopulate a newly navigated tab', async () => {
+  const harness = createHarness();
+  harness.hooks.before.listeners[0]({
+    tabId: 6,
+    frameId: 0,
+    documentId: 'old-document',
+    type: 'main_frame',
+    url: 'https://old.example/watch',
+    timeStamp: 10_000,
+  });
+  harness.hooks.before.listeners[0]({
+    tabId: 6,
+    frameId: 0,
+    documentId: 'old-document',
+    type: 'media',
+    url: 'https://cdn.example/old.mp4',
+  });
+  await harness.flush();
+
+  harness.hooks.before.listeners[0]({
+    tabId: 6,
+    frameId: 0,
+    documentId: 'new-document',
+    type: 'main_frame',
+    url: 'https://new.example/watch',
+    timeStamp: 11_000,
+  });
+  await harness.flush();
+  harness.hooks.headers.listeners[0]({
+    tabId: 6,
+    frameId: 0,
+    documentId: 'old-document',
+    type: 'media',
+    url: 'https://cdn.example/old.mp4',
+    responseHeaders: [{ name: 'content-type', value: 'video/mp4' }],
+  });
+  const staleMessage = await harness.dispatch(
+    { type: 'ADD_CANDIDATES', candidates: [{ url: 'https://cdn.example/stale.m3u8' }] },
+    { tab: { id: 6 }, frameId: 0, documentId: 'old-document' },
+  );
+  await harness.flush();
+
+  assert.equal(staleMessage.ok, false);
+  assert.equal((await harness.dispatch({ type: 'GET_CANDIDATES', tabId: 6 })).candidates.length, 0);
+});
