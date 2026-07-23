@@ -121,13 +121,16 @@ func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPa
 
 	select {
 	case err := <-serveDone:
-		if errors.Is(err, http.ErrServerClosed) || errors.Is(err, net.ErrClosed) {
-			return nil
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		shutdownErr := shutdownServices(shutdownCtx, httpServer.Shutdown, engine)
+		cancel()
+		if err != nil && !errors.Is(err, http.ErrServerClosed) && !errors.Is(err, net.ErrClosed) {
+			return errors.Join(fmt.Errorf("serve loopback API: %w", err), shutdownErr)
 		}
-		return fmt.Errorf("serve loopback API: %w", err)
+		return shutdownErr
 	case <-ctx.Done():
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		shutdownErr := httpServer.Shutdown(shutdownCtx)
+		shutdownErr := shutdownServices(shutdownCtx, httpServer.Shutdown, engine)
 		cancel()
 		serveErr := <-serveDone
 		if shutdownErr != nil {
@@ -138,6 +141,16 @@ func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPa
 		}
 		return nil
 	}
+}
+
+type engineShutdowner interface {
+	Shutdown(context.Context) error
+}
+
+func shutdownServices(ctx context.Context, shutdownHTTP func(context.Context) error, engine engineShutdowner) error {
+	httpErr := shutdownHTTP(ctx)
+	engineErr := engine.Shutdown(ctx)
+	return errors.Join(httpErr, engineErr)
 }
 
 func main() {

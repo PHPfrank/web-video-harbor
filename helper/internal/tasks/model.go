@@ -21,4 +21,5 @@ type Task struct {
 	Progress   float64 `json:"progress"`
 	OutputPath string  `json:"outputPath,omitempty"`
 	Error      string  `json:"error,omitempty"`
+	ErrorCode  string  `json:"errorCode,omitempty"`
 }

@@ -31,6 +31,52 @@ func TestTaskLifecycleCompletes(t *testing.T) {
 	}
 }
 
+func TestCompletePublishedAllowsCanceledTask(t *testing.T) {
+	m := NewManager()
+	task := mustCreate(t, m, "https://media.example/video.mp4", "视频")
+	task = mustTransition(t, m, task.ID, Downloading)
+	task = mustProgress(t, m, task.ID, 75)
+
+	m.mu.Lock()
+	m.records[task.ID].task.Error = "stale message"
+	m.records[task.ID].task.ErrorCode = "stale_code"
+	m.mu.Unlock()
+
+	if _, err := m.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+
+	completed, err := m.CompletePublished(task.ID, "/Users/test/Downloads/视频.mp4")
+	if err != nil {
+		t.Fatalf("CompletePublished() error = %v", err)
+	}
+	assertTaskState(t, completed, Completed, 100)
+	if completed.OutputPath != "/Users/test/Downloads/视频.mp4" {
+		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+	if completed.Error != "" || completed.ErrorCode != "" {
+		t.Fatalf("published task retained stale error: %#v", completed)
+	}
+}
+
+func TestCompleteStillRejectsCanceledTask(t *testing.T) {
+	m := NewManager()
+	task := mustCreate(t, m, "https://media.example/video.mp4", "视频")
+	task = mustTransition(t, m, task.ID, Downloading)
+	if _, err := m.Cancel(task.ID); err != nil {
+		t.Fatalf("Cancel() error = %v", err)
+	}
+
+	_, err := m.Complete(task.ID, "/Users/test/Downloads/视频.mp4")
+	var transitionErr *TransitionError
+	if !errors.As(err, &transitionErr) {
+		t.Fatalf("Complete() error = %v, want *TransitionError", err)
+	}
+	if transitionErr.From != Canceled || transitionErr.To != Completed {
+		t.Fatalf("Complete() transition = %q -> %q", transitionErr.From, transitionErr.To)
+	}
+}
+
 func TestFailKeepsInternalDetailOutOfJSON(t *testing.T) {
 	m := NewManager()
 	task := mustCreate(t, m, "https://media.example/video.mp4", "视频")
@@ -53,6 +99,32 @@ func TestFailKeepsInternalDetailOutOfJSON(t *testing.T) {
 		t.Fatalf("json.Marshal() error = %v", err)
 	}
 	if got := string(encoded); contains(got, "secret-value") || contains(got, "token=") {
+		t.Fatalf("JSON leaked internal detail: %s", got)
+	}
+}
+
+func TestFailWithCodeJSONContainsSafeDetailsOnly(t *testing.T) {
+	m := NewManager()
+	task := mustCreate(t, m, "https://media.example/video.mp4", "视频")
+	internal := errors.New("upstream token=secret-value")
+
+	task, err := m.FailWithCode(task.ID, "network_error", "网络异常，请稍后重试", internal)
+	if err != nil {
+		t.Fatalf("FailWithCode() error = %v", err)
+	}
+	if !errors.Is(m.internalError(task.ID), internal) {
+		t.Fatalf("internalError() did not retain original error")
+	}
+
+	encoded, err := json.Marshal(task)
+	if err != nil {
+		t.Fatalf("json.Marshal() error = %v", err)
+	}
+	got := string(encoded)
+	if !contains(got, `"errorCode":"network_error"`) || !contains(got, `"error":"网络异常，请稍后重试"`) {
+		t.Fatalf("JSON omitted safe failure details: %s", got)
+	}
+	if contains(got, "secret-value") || contains(got, "token=") {
 		t.Fatalf("JSON leaked internal detail: %s", got)
 	}
 }

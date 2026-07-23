@@ -82,11 +82,23 @@ type Revealer interface {
 	Reveal(context.Context, string) error
 }
 
-// FinderRevealer invokes Finder directly, without a shell.
-type FinderRevealer struct{}
+type commandRunner func(context.Context, string, ...string) error
 
-func (FinderRevealer) Reveal(ctx context.Context, path string) error {
-	return exec.CommandContext(ctx, "open", "-R", path).Run()
+// FinderRevealer invokes Finder directly, without a shell.
+type FinderRevealer struct{ run commandRunner }
+
+func (f FinderRevealer) Reveal(ctx context.Context, path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("reveal target is not a regular file")
+	}
+	run := f.run
+	if run == nil {
+		run = func(ctx context.Context, name string, args ...string) error {
+			return exec.CommandContext(ctx, name, args...).Run()
+		}
+	}
+	return run(ctx, "/usr/bin/open", "-R", path)
 }
 
 // Options configures an API handler.

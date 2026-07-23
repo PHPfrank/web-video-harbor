@@ -184,6 +184,24 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	}
 }
 
+func TestShutdownServicesStopsHTTPBeforeWaitingForEngine(t *testing.T) {
+	var order []string
+	engine := shutdownEngineFunc(func(context.Context) error {
+		order = append(order, "engine")
+		return nil
+	})
+	err := shutdownServices(context.Background(), func(context.Context) error {
+		order = append(order, "http")
+		return nil
+	}, engine)
+	if err != nil {
+		t.Fatalf("shutdownServices() error = %v", err)
+	}
+	if got := strings.Join(order, ","); got != "http,engine" {
+		t.Fatalf("shutdown order = %q", got)
+	}
+}
+
 type blockingListener struct {
 	accepted chan struct{}
 	closed   chan struct{}
@@ -220,6 +238,10 @@ type testAddr string
 
 func (a testAddr) Network() string { return "tcp" }
 func (a testAddr) String() string  { return string(a) }
+
+type shutdownEngineFunc func(context.Context) error
+
+func (f shutdownEngineFunc) Shutdown(ctx context.Context) error { return f(ctx) }
 
 func privateTempDir(t *testing.T) string {
 	t.Helper()

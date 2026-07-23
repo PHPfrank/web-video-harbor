@@ -3,9 +3,11 @@ package config
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 )
 
@@ -56,6 +58,7 @@ func TestLoadFirstRunCreatesSecureDefaults(t *testing.T) {
 	if !info.IsDir() {
 		t.Fatalf("download path is not a directory")
 	}
+	assertMode(t, wantDownloadDir, 0o700)
 }
 
 func TestLoadPreservesExistingToken(t *testing.T) {
@@ -74,6 +77,102 @@ func TestLoadPreservesExistingToken(t *testing.T) {
 	if second.Token != first.Token {
 		t.Fatalf("token changed across loads")
 	}
+}
+
+func TestLoadConcurrentFirstRunPublishesOneCompleteConfig(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "app", "config.json")
+
+	const callers = 32
+	start := make(chan struct{})
+	results := make(chan Config, callers)
+	errorsSeen := make(chan error, callers)
+	var ready sync.WaitGroup
+	ready.Add(callers)
+	for range callers {
+		go func() {
+			ready.Done()
+			<-start
+			cfg, err := Load(path)
+			results <- cfg
+			errorsSeen <- err
+		}()
+	}
+	ready.Wait()
+	close(start)
+
+	var token string
+	for range callers {
+		cfg := <-results
+		if err := <-errorsSeen; err != nil {
+			t.Errorf("concurrent Load() error = %v", err)
+			continue
+		}
+		if token == "" {
+			token = cfg.Token
+		} else if cfg.Token != token {
+			t.Errorf("concurrent Load() returned token %q, want winning token %q", cfg.Token, token)
+		}
+	}
+
+	final, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load() final config error = %v", err)
+	}
+	if final.Token == "" || final.Token != token {
+		t.Fatalf("final token = %q, concurrent winning token = %q", final.Token, token)
+	}
+	assertMode(t, path, 0o600)
+	entries, err := os.ReadDir(filepath.Dir(path))
+	if err != nil {
+		t.Fatalf("read config parent: %v", err)
+	}
+	if len(entries) != 1 || entries[0].Name() != filepath.Base(path) {
+		t.Fatalf("config parent entries = %v, want only %q", entries, filepath.Base(path))
+	}
+}
+
+func TestLoadDoesNotPublishPartialConfigAfterWriteFailure(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	parent := filepath.Join(home, "app")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "config.json")
+
+	original := writeConfigData
+	writeConfigData = func(*os.File, []byte) (int, error) {
+		return 0, errors.New("injected write failure")
+	}
+	t.Cleanup(func() { writeConfigData = original })
+
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "write config") {
+		t.Fatalf("Load() error = %v, want write config error", err)
+	}
+	assertNoConfigArtifacts(t, parent, path)
+}
+
+func TestLoadDoesNotPublishPartialConfigAfterFileSyncFailure(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	parent := filepath.Join(home, "app")
+	if err := os.Mkdir(parent, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(parent, "config.json")
+
+	original := syncConfigFile
+	syncConfigFile = func(*os.File) error {
+		return errors.New("injected sync failure")
+	}
+	t.Cleanup(func() { syncConfigFile = original })
+
+	if _, err := Load(path); err == nil || !strings.Contains(err.Error(), "sync config") {
+		t.Fatalf("Load() error = %v, want sync config error", err)
+	}
+	assertNoConfigArtifacts(t, parent, path)
 }
 
 func TestLoadFirstRunRejectsInsecureExistingConfigParent(t *testing.T) {
@@ -305,6 +404,71 @@ func TestLoadRejectsSymlinkDownloadDirectory(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsGroupOrWorldWritableDownloadDirectory(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	downloadDir := filepath.Join(home, "shared-downloads")
+	if err := os.Mkdir(downloadDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(downloadDir, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "config.json")
+	writeConfig(t, path, Config{
+		Address:     DefaultAddress,
+		Token:       testToken(10),
+		DownloadDir: downloadDir,
+	}, 0o600)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "download directory permissions") {
+		t.Fatalf("Load() error = %v, want download directory permissions error", err)
+	}
+}
+
+func TestLoadRejectsDownloadDirectoryOwnedByAnotherUser(t *testing.T) {
+	if os.Getuid() == 0 {
+		t.Skip("root owns the platform root directory")
+	}
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	path := filepath.Join(home, "config.json")
+	writeConfig(t, path, Config{
+		Address:     DefaultAddress,
+		Token:       testToken(11),
+		DownloadDir: string(filepath.Separator),
+	}, 0o600)
+
+	_, err := Load(path)
+	if err == nil || !strings.Contains(err.Error(), "download directory owner") {
+		t.Fatalf("Load() error = %v, want download directory owner error", err)
+	}
+}
+
+func TestLoadAcceptsExistingPrivateDownloadDirectoryWithoutChangingMode(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	downloadDir := filepath.Join(home, "existing-downloads")
+	if err := os.Mkdir(downloadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(downloadDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(home, "config.json")
+	writeConfig(t, path, Config{
+		Address:     DefaultAddress,
+		Token:       testToken(12),
+		DownloadDir: downloadDir,
+	}, 0o600)
+
+	if _, err := Load(path); err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	assertMode(t, downloadDir, 0o755)
+}
+
 func TestLoadRejectsRelativeDownloadDirectory(t *testing.T) {
 	home := privateTempDir(t)
 	t.Setenv("HOME", home)
@@ -353,6 +517,20 @@ func assertMode(t *testing.T, path string, want os.FileMode) {
 	}
 	if got := info.Mode().Perm(); got != want {
 		t.Fatalf("mode for %s = %04o, want %04o", path, got, want)
+	}
+}
+
+func assertNoConfigArtifacts(t *testing.T, parent, finalPath string) {
+	t.Helper()
+	if _, err := os.Lstat(finalPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("final config exists after failed atomic write: %v", err)
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatalf("read config parent: %v", err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("config artifacts remain after failure: %v", entries)
 	}
 }
 

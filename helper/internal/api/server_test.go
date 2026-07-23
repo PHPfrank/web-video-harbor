@@ -445,6 +445,39 @@ func TestRevealOnlyCompletedExactRegularFileInsideDownloadDir(t *testing.T) {
 	}
 }
 
+func TestFinderRevealerRechecksFileAndUsesExplicitOpenBinary(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "视频.mp4")
+	if err := os.WriteFile(path, []byte("video"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var gotName string
+	var gotArgs []string
+	revealer := FinderRevealer{run: func(_ context.Context, name string, args ...string) error {
+		gotName = name
+		gotArgs = append([]string(nil), args...)
+		return nil
+	}}
+	if err := revealer.Reveal(context.Background(), path); err != nil {
+		t.Fatalf("Reveal() error = %v", err)
+	}
+	if gotName != "/usr/bin/open" || len(gotArgs) != 2 || gotArgs[0] != "-R" || gotArgs[1] != path {
+		t.Fatalf("command = %q %#v", gotName, gotArgs)
+	}
+
+	link := filepath.Join(dir, "link.mp4")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	gotName = ""
+	if err := revealer.Reveal(context.Background(), link); err == nil {
+		t.Fatal("Reveal symlink succeeded")
+	}
+	if gotName != "" {
+		t.Fatal("command ran for symlink")
+	}
+}
+
 func TestHTTPServerUsesConservativeTimeouts(t *testing.T) {
 	srv, _, _, _, _ := newTestServer(t, nil)
 	httpServer := srv.HTTPServer("127.0.0.1:0")

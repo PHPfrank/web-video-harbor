@@ -231,6 +231,209 @@ func TestEngineCancelSignalsTaskContext(t *testing.T) {
 	wantStatus(t, manager, task.ID, tasks.Canceled)
 }
 
+func TestEngineShutdownCancelsAndWaitsForWorkerCleanup(t *testing.T) {
+	manager := tasks.NewManager()
+	started := make(chan struct{})
+	cleaned := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+			return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) {
+				close(started)
+				<-ctx.Done()
+				close(cleaned)
+				return "", ctx.Err()
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{URL: "https://media.example/video.mp4", MediaType: "mp4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not start")
+	}
+	if err := engine.Shutdown(context.Background()); err != nil {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	select {
+	case <-cleaned:
+	default:
+		t.Fatal("Shutdown returned before cleanup")
+	}
+	wantStatus(t, manager, task.ID, tasks.Canceled)
+	var closed *EngineClosedError
+	if _, err := engine.Start(context.Background(), JobSpec{URL: "https://media.example/new.mp4", MediaType: "mp4"}); !errors.As(err, &closed) {
+		t.Fatalf("Start after shutdown error = %T %v", err, err)
+	}
+}
+
+func TestEngineShutdownHonorsTimeoutThenCanFinish(t *testing.T) {
+	manager := tasks.NewManager()
+	started := make(chan struct{})
+	release := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+			return directDownloaderFunc(func(context.Context, string, string) (string, error) {
+				close(started)
+				<-release
+				return "", context.Canceled
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := engine.Start(context.Background(), JobSpec{URL: "https://media.example/video.mp4", MediaType: "mp4"}); err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+	defer cancel()
+	if err := engine.Shutdown(ctx); !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Shutdown() error = %v", err)
+	}
+	close(release)
+	if err := engine.Shutdown(context.Background()); err != nil {
+		t.Fatalf("second Shutdown() error = %v", err)
+	}
+}
+
+func TestEngineStartRacingShutdownIsSafe(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+			return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) { <-ctx.Done(); return "", ctx.Err() }), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var callers sync.WaitGroup
+	for index := 0; index < 40; index++ {
+		callers.Add(1)
+		go func() {
+			defer callers.Done()
+			_, _ = engine.Start(context.Background(), JobSpec{URL: "https://media.example/video.mp4", MediaType: "mp4"})
+		}()
+	}
+	shutdownDone := make(chan error, 1)
+	go func() { shutdownDone <- engine.Shutdown(context.Background()) }()
+	callers.Wait()
+	if err := <-shutdownDone; err != nil {
+		t.Fatal(err)
+	}
+	for _, task := range manager.List() {
+		if task.Status != tasks.Canceled {
+			t.Fatalf("task %s status = %s", task.ID, task.Status)
+		}
+	}
+}
+
+func TestPublishedMP4WinsConcurrentCancel(t *testing.T) {
+	manager := tasks.NewManager()
+	published := make(chan struct{})
+	returnPath := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+			return directDownloaderFunc(func(context.Context, string, string) (string, error) {
+				close(published)
+				<-returnPath
+				return "/downloads/published.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{URL: "https://media.example/video.mp4", MediaType: "mp4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-published
+	if _, err := engine.Cancel(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(returnPath)
+	completed := waitStatus(t, manager, task.ID, tasks.Completed)
+	if completed.OutputPath != "/downloads/published.mp4" {
+		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+}
+
+func TestPublishedHLSWinsConcurrentCancel(t *testing.T) {
+	manager := tasks.NewManager()
+	published := make(chan struct{})
+	returnPath := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		inspector: manifestInspectorFunc(func(context.Context, string) (ManifestInspection, error) {
+			return ManifestInspection{Playlist: &hls.Playlist{}, Manifest: []byte("#EXTM3U\n#EXTINF:1,\na.ts\n"), SourceURL: "https://cdn.example/final.m3u8"}, nil
+		}),
+		newHLSRunner: func(_ ffmpeg.ProgressFunc) (hlsRunner, error) {
+			return hlsRunnerFunc(func(context.Context, ffmpeg.Request) (string, error) {
+				close(published)
+				<-returnPath
+				return "/downloads/published-hls.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{URL: "https://origin.example/master.m3u8", MediaType: "hls"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-published
+	if _, err := engine.Cancel(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(returnPath)
+	completed := waitStatus(t, manager, task.ID, tasks.Completed)
+	if completed.OutputPath != "/downloads/published-hls.mp4" {
+		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+}
+
+func TestShutdownCancellationNeverCompletesWithoutPublishedPath(t *testing.T) {
+	manager := tasks.NewManager()
+	started := make(chan struct{})
+	engine, err := newEngine(engineDeps{manager: manager, newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+		return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) {
+			close(started)
+			<-ctx.Done()
+			return "", ctx.Err()
+		}), nil
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{URL: "https://media.example/video.mp4", MediaType: "mp4"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	<-started
+	if err := engine.Shutdown(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	got, err := manager.Get(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.Status != tasks.Canceled || got.OutputPath != "" {
+		t.Fatalf("task = %#v", got)
+	}
+}
+
 func TestEngineFailureStoresOnlySafeChineseMessage(t *testing.T) {
 	manager := tasks.NewManager()
 	engine, err := newEngine(engineDeps{
@@ -256,6 +459,33 @@ func TestEngineFailureStoresOnlySafeChineseMessage(t *testing.T) {
 		if strings.Contains(failed.Error, secret) {
 			t.Fatalf("public error leaked %q: %q", secret, failed.Error)
 		}
+	}
+}
+
+func TestSafeFailureMappingUsesOnlyAllowlistedMessages(t *testing.T) {
+	secret := "https://signed.example/video?token=secret /Users/person"
+	tests := []struct {
+		name          string
+		err           error
+		code, message string
+	}{
+		{name: "encrypted", err: &ffmpeg.Error{Code: ffmpeg.CodeEncrypted, Message: secret}, code: "encrypted_hls", message: "不支持加密或 DRM 视频"},
+		{name: "ffmpeg missing", err: &ffmpeg.Error{Code: ffmpeg.CodeFFmpegMissing, Message: secret}, code: "ffmpeg_missing", message: "未安装 FFmpeg，请先安装后重试"},
+		{name: "unsafe direct", err: &download.Error{Code: download.CodeUnsafeSource, Message: secret}, code: "unsafe_source", message: "视频下载地址不安全或无效"},
+		{name: "output", err: &download.Error{Code: download.CodeOutput, Message: secret}, code: "output", message: "无法保存视频文件"},
+		{name: "manifest encrypted", err: newManifestError("encrypted_hls", secret, errors.New(secret)), code: "encrypted_hls", message: "不支持加密或 DRM 视频"},
+		{name: "unknown", err: errors.New(secret), code: "download_failed", message: "视频下载失败，请稍后重试"},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			gotCode, gotMessage := safeFailure(tc.err)
+			if gotCode != tc.code || gotMessage != tc.message {
+				t.Fatalf("safeFailure = %q %q", gotCode, gotMessage)
+			}
+			if strings.Contains(gotMessage, "signed.example") || strings.Contains(gotMessage, "token=secret") || strings.Contains(gotMessage, "/Users/person") {
+				t.Fatalf("message leaked: %q", gotMessage)
+			}
+		})
 	}
 }
 

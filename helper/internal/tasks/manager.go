@@ -213,9 +213,39 @@ func (m *Manager) Complete(id, outputPath string) (Task, error) {
 	return record.task, nil
 }
 
+// CompletePublished records an output that was published before cancellation
+// won the task-state race. Active and canceled tasks may be completed this way.
+func (m *Manager) CompletePublished(id, outputPath string) (Task, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	record, err := m.recordLocked(id)
+	if err != nil {
+		return Task{}, err
+	}
+	syncCanceledLocked(record)
+	if record.task.Status != Downloading && record.task.Status != Merging && record.task.Status != Canceled {
+		return Task{}, &TransitionError{ID: id, From: record.task.Status, To: Completed}
+	}
+	record.task.Status = Completed
+	record.task.Progress = 100
+	record.task.OutputPath = outputPath
+	record.task.Error = ""
+	record.task.ErrorCode = ""
+	record.internalError = nil
+	releaseContextLocked(record)
+	return record.task, nil
+}
+
 // Fail marks a non-terminal task failed. Only the user-facing message is kept
 // in Task; the internal diagnostic remains outside the serialized model.
 func (m *Manager) Fail(id, userMessage string, internal error) (Task, error) {
+	return m.FailWithCode(id, "", userMessage, internal)
+}
+
+// FailWithCode marks a non-terminal task failed with a safe, machine-readable
+// code. Internal diagnostics remain outside the serialized model.
+func (m *Manager) FailWithCode(id, code, userMessage string, internal error) (Task, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -229,6 +259,7 @@ func (m *Manager) Fail(id, userMessage string, internal error) (Task, error) {
 	}
 	record.task.Status = Failed
 	record.task.Error = userMessage
+	record.task.ErrorCode = code
 	record.internalError = internal
 	releaseContextLocked(record)
 	return record.task, nil

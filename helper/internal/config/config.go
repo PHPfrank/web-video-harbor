@@ -11,12 +11,20 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 )
 
 const (
 	DefaultAddress = "127.0.0.1:17432"
 	maxConfigSize  = 64 << 10
 )
+
+var (
+	writeConfigData = func(file *os.File, data []byte) (int, error) { return file.Write(data) }
+	syncConfigFile  = func(file *os.File) error { return file.Sync() }
+)
+
+var errConfigAlreadyExists = errors.New("config already exists")
 
 // Config contains the helper's persisted local settings.
 type Config struct {
@@ -66,7 +74,14 @@ func Load(path string) (Config, error) {
 		return Config{}, err
 	}
 	if err := writeNew(path, cfg); err != nil {
-		return Config{}, err
+		if !errors.Is(err, errConfigAlreadyExists) {
+			return Config{}, err
+		}
+		info, inspectErr := os.Lstat(path)
+		if inspectErr != nil {
+			return Config{}, fmt.Errorf("inspect concurrently created config: %w", inspectErr)
+		}
+		return loadExisting(path, info)
 	}
 	return cfg, nil
 }
@@ -166,13 +181,7 @@ func ensureDownloadDir(path string) error {
 	info, err := os.Lstat(path)
 	switch {
 	case err == nil:
-		if info.Mode()&os.ModeSymlink != 0 {
-			return errors.New("download directory must not be a symbolic link")
-		}
-		if !info.IsDir() {
-			return errors.New("download directory path is not a directory")
-		}
-		return nil
+		return validateDownloadDirInfo(info)
 	case !errors.Is(err, os.ErrNotExist):
 		return fmt.Errorf("inspect download directory: %w", err)
 	}
@@ -184,11 +193,32 @@ func ensureDownloadDir(path string) error {
 	if err != nil {
 		return fmt.Errorf("verify download directory: %w", err)
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.IsDir() {
-		return errors.New("download directory was not created as a real directory")
-	}
 	if err := os.Chmod(path, 0o700); err != nil {
 		return fmt.Errorf("secure download directory permissions: %w", err)
+	}
+	info, err = os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("verify secured download directory: %w", err)
+	}
+	return validateDownloadDirInfo(info)
+}
+
+func validateDownloadDirInfo(info os.FileInfo) error {
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("download directory must not be a symbolic link")
+	}
+	if !info.IsDir() {
+		return errors.New("download directory path is not a directory")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("download directory permissions %04o are insecure; group and other users must not have write access", info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok {
+		return errors.New("download directory owner could not be determined")
+	}
+	if int(stat.Uid) != os.Getuid() {
+		return fmt.Errorf("download directory owner %d does not match current user %d", stat.Uid, os.Getuid())
 	}
 	return nil
 }
@@ -242,20 +272,60 @@ func writeNew(path string, cfg Config) error {
 	}
 	data = append(data, '\n')
 
-	file, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	parent := filepath.Dir(path)
+	file, err := os.CreateTemp(parent, "."+filepath.Base(path)+"-*.tmp")
 	if err != nil {
-		return fmt.Errorf("create config without following links: %w", err)
+		return fmt.Errorf("create temporary config: %w", err)
 	}
-	writeErr := error(nil)
+	tempPath := file.Name()
+	closed := false
+	defer func() {
+		if !closed {
+			_ = file.Close()
+		}
+		_ = os.Remove(tempPath)
+	}()
+
 	if err := file.Chmod(0o600); err != nil {
-		writeErr = fmt.Errorf("secure config permissions: %w", err)
-	} else if _, err := file.Write(data); err != nil {
-		writeErr = fmt.Errorf("write config: %w", err)
-	} else if err := file.Sync(); err != nil {
-		writeErr = fmt.Errorf("sync config: %w", err)
+		return fmt.Errorf("secure temporary config permissions: %w", err)
 	}
-	if err := file.Close(); writeErr == nil && err != nil {
-		writeErr = fmt.Errorf("close config: %w", err)
+	written, err := writeConfigData(file, data)
+	if err != nil {
+		return fmt.Errorf("write config: %w", err)
 	}
-	return writeErr
+	if written != len(data) {
+		return fmt.Errorf("write config: %w", io.ErrShortWrite)
+	}
+	if err := syncConfigFile(file); err != nil {
+		return fmt.Errorf("sync config: %w", err)
+	}
+	if err := file.Close(); err != nil {
+		closed = true
+		return fmt.Errorf("close config: %w", err)
+	}
+	closed = true
+
+	if err := os.Link(tempPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("publish config: %w", errConfigAlreadyExists)
+		}
+		return fmt.Errorf("publish config: %w", err)
+	}
+	if err := os.Remove(tempPath); err != nil {
+		return fmt.Errorf("remove temporary config: %w", err)
+	}
+
+	directory, err := os.Open(parent)
+	if err != nil {
+		return fmt.Errorf("open config parent for sync: %w", err)
+	}
+	syncErr := directory.Sync()
+	closeErr := directory.Close()
+	if syncErr != nil {
+		return fmt.Errorf("sync config parent: %w", syncErr)
+	}
+	if closeErr != nil {
+		return fmt.Errorf("close config parent: %w", closeErr)
+	}
+	return nil
 }

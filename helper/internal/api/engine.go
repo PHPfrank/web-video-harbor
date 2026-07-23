@@ -64,8 +64,20 @@ type Engine struct {
 	newDownloader func(download.ProgressFunc) (directDownloader, error)
 	newHLSRunner  func(ffmpeg.ProgressFunc) (hlsRunner, error)
 
-	mu    sync.RWMutex
-	specs map[string]JobSpec
+	mu      sync.RWMutex
+	specs   map[string]JobSpec
+	rootCtx context.Context
+	cancel  context.CancelFunc
+	closing bool
+	wg      sync.WaitGroup
+}
+
+// EngineClosedError reports that the service no longer accepts new work.
+type EngineClosedError struct{}
+
+func (*EngineClosedError) Error() string { return "task engine is shutting down" }
+func (*EngineClosedError) SafeMessage() string {
+	return "本地助手正在退出，无法创建新任务"
 }
 
 // SpecNotFoundError means the task exists in Manager but was not created by
@@ -105,56 +117,57 @@ func newManifestInspector(resolver safety.Resolver, client *http.Client) *Manife
 // FFmpeg runner's independently enforced preflight.
 func (i *ManifestInspector) Inspect(ctx context.Context, rawURL string) (ManifestInspection, error) {
 	if ctx == nil {
-		return ManifestInspection{}, newManifestError("操作已取消", context.Canceled)
+		return ManifestInspection{}, newManifestError("canceled", "操作已取消", context.Canceled)
 	}
 	if _, err := safety.ValidateRemoteURL(ctx, rawURL, i.resolver); err != nil {
 		if ctx.Err() != nil {
-			return ManifestInspection{}, newManifestError("操作已取消", ctx.Err())
+			return ManifestInspection{}, newManifestError("canceled", "操作已取消", ctx.Err())
 		}
-		return ManifestInspection{}, newManifestError("视频地址不安全或无效", err)
+		return ManifestInspection{}, newManifestError("unsafe_source", "视频地址不安全或无效", err)
 	}
 	request, err := http.NewRequestWithContext(ctx, http.MethodGet, rawURL, nil)
 	if err != nil {
-		return ManifestInspection{}, newManifestError("视频地址格式无效", err)
+		return ManifestInspection{}, newManifestError("unsafe_source", "视频地址格式无效", err)
 	}
 	response, err := i.client.Do(request)
 	if err != nil {
 		if ctx.Err() != nil {
-			return ManifestInspection{}, newManifestError("操作已取消", ctx.Err())
+			return ManifestInspection{}, newManifestError("canceled", "操作已取消", ctx.Err())
 		}
-		return ManifestInspection{}, newManifestError("无法读取视频播放列表", err)
+		return ManifestInspection{}, newManifestError("network", "无法读取视频播放列表", err)
 	}
 	defer response.Body.Close()
 
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return ManifestInspection{}, newManifestError("视频播放列表暂时不可用", fmt.Errorf("unexpected HTTP status %d", response.StatusCode))
+		return ManifestInspection{}, newManifestError("http_status", "视频播放列表暂时不可用", fmt.Errorf("unexpected HTTP status %d", response.StatusCode))
 	}
 	finalURL := rawURL
 	if response.Request != nil && response.Request.URL != nil {
 		finalURL = response.Request.URL.String()
 	}
 	if media.Classify(finalURL, response.Header.Get("Content-Type")) != media.HLS {
-		return ManifestInspection{}, newManifestError("视频地址不是 M3U8 播放列表", errors.New("response content type is not HLS"))
+		return ManifestInspection{}, newManifestError("invalid_manifest", "视频地址不是 M3U8 播放列表", errors.New("response content type is not HLS"))
 	}
 	manifest, err := io.ReadAll(io.LimitReader(response.Body, maxManifestBytes+1))
 	if err != nil {
-		return ManifestInspection{}, newManifestError("无法读取视频播放列表", err)
+		return ManifestInspection{}, newManifestError("network", "无法读取视频播放列表", err)
 	}
 	if len(manifest) > maxManifestBytes {
-		return ManifestInspection{}, newManifestError("视频播放列表过大", errors.New("root manifest exceeds 2 MiB"))
+		return ManifestInspection{}, newManifestError("invalid_manifest", "视频播放列表过大", errors.New("root manifest exceeds 2 MiB"))
 	}
 	playlist, err := hls.ParseBytes(finalURL, manifest)
 	if err != nil {
 		var playlistError *hls.Error
 		if errors.As(err, &playlistError) && playlistError.Code == hls.CodeUnsupportedEncryption {
-			return ManifestInspection{}, newManifestError("不支持加密或 DRM 视频", err)
+			return ManifestInspection{}, newManifestError("encrypted_hls", "不支持加密或 DRM 视频", err)
 		}
-		return ManifestInspection{}, newManifestError("视频播放列表格式无效", err)
+		return ManifestInspection{}, newManifestError("invalid_manifest", "视频播放列表格式无效", err)
 	}
 	return ManifestInspection{Playlist: playlist, Manifest: manifest, SourceURL: finalURL}, nil
 }
 
 type manifestError struct {
+	code    string
 	message string
 	cause   error
 }
@@ -162,20 +175,23 @@ type manifestError struct {
 func (e *manifestError) Error() string { return e.message }
 func (e *manifestError) Unwrap() error { return e.cause }
 
-func newManifestError(message string, cause error) error {
-	return &manifestError{message: message, cause: cause}
+func newManifestError(code, message string, cause error) error {
+	return &manifestError{code: code, message: message, cause: cause}
 }
 
 func newEngine(deps engineDeps) (*Engine, error) {
 	if deps.manager == nil {
 		return nil, errors.New("task manager is required")
 	}
+	rootCtx, cancel := context.WithCancel(context.Background())
 	return &Engine{
 		manager:       deps.manager,
 		inspector:     deps.inspector,
 		newDownloader: deps.newDownloader,
 		newHLSRunner:  deps.newHLSRunner,
 		specs:         make(map[string]JobSpec),
+		rootCtx:       rootCtx,
+		cancel:        cancel,
 	}, nil
 }
 
@@ -214,20 +230,28 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 	if strings.TrimSpace(spec.URL) == "" {
 		return tasks.Task{}, errors.New("video URL is required")
 	}
-	task, err := e.manager.CreateWithContext(ctx, spec.URL, spec.Title)
-	if err != nil {
+	if err := ctx.Err(); err != nil {
 		return tasks.Task{}, err
 	}
 	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closing {
+		return tasks.Task{}, &EngineClosedError{}
+	}
+	task, err := e.manager.CreateWithContext(e.rootCtx, spec.URL, spec.Title)
+	if err != nil {
+		return tasks.Task{}, err
+	}
 	e.specs[task.ID] = spec
-	e.mu.Unlock()
 	if task.Status == tasks.Queued {
+		e.wg.Add(1)
 		go e.run(task.ID, spec)
 	}
 	return task, nil
 }
 
 func (e *Engine) run(id string, spec JobSpec) {
+	defer e.wg.Done()
 	ctx, err := e.manager.Context(id)
 	if err != nil || ctx.Err() != nil {
 		return
@@ -283,7 +307,9 @@ func (e *Engine) runHLS(ctx context.Context, id string, spec JobSpec) {
 		}
 		return
 	}
-	_, _ = e.manager.Complete(id, path)
+	if _, err := e.manager.CompletePublished(id, path); err != nil {
+		e.fail(id, fmt.Errorf("record published HLS output: %w", err))
+	}
 }
 
 func (e *Engine) runMP4(ctx context.Context, id string, spec JobSpec) {
@@ -315,11 +341,73 @@ func (e *Engine) runMP4(ctx context.Context, id string, spec JobSpec) {
 		}
 		return
 	}
-	_, _ = e.manager.Complete(id, path)
+	if _, err := e.manager.CompletePublished(id, path); err != nil {
+		e.fail(id, fmt.Errorf("record published direct output: %w", err))
+	}
 }
 
 func (e *Engine) fail(id string, internal error) {
-	_, _ = e.manager.Fail(id, "视频下载失败，请稍后重试", internal)
+	code, message := safeFailure(internal)
+	_, _ = e.manager.FailWithCode(id, code, message, internal)
+}
+
+func safeFailure(internal error) (string, string) {
+	var downloadErr *download.Error
+	if errors.As(internal, &downloadErr) {
+		switch downloadErr.Code {
+		case download.CodeCanceled:
+			return "canceled", "下载已取消"
+		case download.CodeUnsafeSource:
+			return "unsafe_source", "视频下载地址不安全或无效"
+		case download.CodeHTTPStatus:
+			return "http_status", "视频服务器拒绝了下载请求"
+		case download.CodeNetwork:
+			return "network", "网络连接失败，请稍后重试"
+		case download.CodeTransfer:
+			return "transfer", "视频传输中断，请稍后重试"
+		case download.CodeOutput:
+			return "output", "无法保存视频文件"
+		}
+	}
+	var ffmpegErr *ffmpeg.Error
+	if errors.As(internal, &ffmpegErr) {
+		switch ffmpegErr.Code {
+		case ffmpeg.CodeCanceled:
+			return "canceled", "下载已取消"
+		case ffmpeg.CodeEncrypted:
+			return "encrypted_hls", "不支持加密或 DRM 视频"
+		case ffmpeg.CodeFFmpegMissing:
+			return "ffmpeg_missing", "未安装 FFmpeg，请先安装后重试"
+		case ffmpeg.CodeUnsafeSource:
+			return "unsafe_source", "视频下载地址不安全或无效"
+		case ffmpeg.CodeManifest:
+			return "invalid_manifest", "视频播放列表格式无效"
+		case ffmpeg.CodeProcess:
+			return "ffmpeg_process", "FFmpeg 合并视频失败"
+		case ffmpeg.CodeProgress:
+			return "progress_output", "无法读取 FFmpeg 进度"
+		case ffmpeg.CodeOutput:
+			return "output", "无法保存视频文件"
+		}
+	}
+	var manifestErr *manifestError
+	if errors.As(internal, &manifestErr) {
+		switch manifestErr.code {
+		case "canceled":
+			return "canceled", "下载已取消"
+		case "encrypted_hls":
+			return "encrypted_hls", "不支持加密或 DRM 视频"
+		case "unsafe_source":
+			return "unsafe_source", "视频下载地址不安全或无效"
+		case "http_status":
+			return "http_status", "视频播放列表暂时不可用"
+		case "network":
+			return "network", "无法读取视频播放列表"
+		case "invalid_manifest":
+			return "invalid_manifest", "视频播放列表格式无效"
+		}
+	}
+	return "download_failed", "视频下载失败，请稍后重试"
 }
 
 // Get returns the current public task state.
@@ -337,13 +425,19 @@ func (e *Engine) Retry(ctx context.Context, id string) (tasks.Task, error) {
 	if ctx == nil {
 		return tasks.Task{}, errors.New("retry task: nil context")
 	}
+	if err := ctx.Err(); err != nil {
+		return tasks.Task{}, err
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closing {
+		return tasks.Task{}, &EngineClosedError{}
+	}
 	source, err := e.manager.Get(id)
 	if err != nil {
 		return tasks.Task{}, err
 	}
-	e.mu.RLock()
 	spec, ok := e.specs[id]
-	e.mu.RUnlock()
 	if !ok {
 		return tasks.Task{}, &SpecNotFoundError{ID: id}
 	}
@@ -351,15 +445,40 @@ func (e *Engine) Retry(ctx context.Context, id string) (tasks.Task, error) {
 		return tasks.Task{}, &tasks.TransitionError{ID: id, From: source.Status, To: tasks.Queued}
 	}
 
-	retry, err := e.manager.CreateWithContext(ctx, spec.URL, spec.Title)
+	retry, err := e.manager.CreateWithContext(e.rootCtx, spec.URL, spec.Title)
 	if err != nil {
 		return tasks.Task{}, err
 	}
-	e.mu.Lock()
 	e.specs[retry.ID] = spec
-	e.mu.Unlock()
 	if retry.Status == tasks.Queued {
+		e.wg.Add(1)
 		go e.run(retry.ID, spec)
 	}
 	return retry, nil
+}
+
+// Shutdown atomically rejects new attempts, cancels active work, and waits for
+// every worker to finish its downloader/runner cleanup.
+func (e *Engine) Shutdown(ctx context.Context) error {
+	if ctx == nil {
+		return errors.New("shutdown task engine: nil context")
+	}
+	e.mu.Lock()
+	if !e.closing {
+		e.closing = true
+		e.cancel()
+	}
+	e.mu.Unlock()
+
+	done := make(chan struct{})
+	go func() {
+		e.wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
