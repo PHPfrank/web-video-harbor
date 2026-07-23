@@ -1,0 +1,29 @@
+{
+  "manifest_version": 3,
+  "name": "网页视频下载器",
+  "version": "0.1.0",
+  "description": "发现网页中的 MP4 和 M3U8 视频，并发送给本地下载助手。",
+  "permissions": [
+    "storage",
+    "tabs",
+    "scripting",
+    "webRequest"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "http://*/*",
+        "https://*/*"
+      ],
+      "js": [
+        "content.js"
+      ]
+    }
+  ]
+}
