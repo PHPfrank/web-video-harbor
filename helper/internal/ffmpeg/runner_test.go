@@ -7,6 +7,7 @@ import (
 	"io"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"runtime"
@@ -15,6 +16,8 @@ import (
 	"sync/atomic"
 	"testing"
 	"time"
+
+	"web-video-downloader/helper/internal/hlsproxy"
 )
 
 const validMediaManifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n"
@@ -37,6 +40,26 @@ type fakeCommand struct {
 	waitFunc func() error
 	onStart  func() error
 	onWait   func(io.Writer)
+}
+
+type fakeHLSProxy struct {
+	url        string
+	err        error
+	closeErr   error
+	closeCalls atomic.Int64
+}
+
+func (p *fakeHLSProxy) URL() string { return p.url }
+func (p *fakeHLSProxy) Err() error  { return p.err }
+func (p *fakeHLSProxy) Close(context.Context) error {
+	p.closeCalls.Add(1)
+	return p.closeErr
+}
+
+func fixedProxyFactory(proxy *fakeHLSProxy) proxyFactory {
+	return func(context.Context, hlsproxy.Config) (hlsProxy, error) {
+		return proxy, nil
+	}
 }
 
 func (c *fakeCommand) StdoutPipe() (io.ReadCloser, error) {
@@ -91,12 +114,14 @@ func successfulFactory(capturedName *string, capturedArgs *[]string) commandFact
 
 func newTestRunner(t *testing.T, factory commandFactory, progress ProgressFunc) *Runner {
 	t.Helper()
+	proxy := &fakeHLSProxy{url: "http://127.0.0.1:54321/opaque/root.m3u8"}
 	runner, err := newRunner(internalConfig{
 		outputDir:      t.TempDir(),
 		resolver:       publicResolver{},
 		commandFactory: factory,
 		onProgress:     progress,
 		ffmpegPath:     "ffmpeg-test",
+		proxyFactory:   fixedProxyFactory(proxy),
 	})
 	if err != nil {
 		t.Fatalf("newRunner() error = %v", err)
@@ -122,16 +147,16 @@ func TestRunnerBuildsExplicitSafeArguments(t *testing.T) {
 		t.Fatalf("command name = %q", name)
 	}
 	want := []string{
-		"-protocol_whitelist", "http,https,tcp,tls",
-		"-nostdin", "-y", "-i", source,
+		"-protocol_whitelist", "http,tcp",
+		"-nostdin", "-y", "-i", "http://127.0.0.1:54321/opaque/root.m3u8",
 		"-map", "0", "-c", "copy", "-movflags", "+faststart",
-		"-progress", "pipe:1", "-nostats", args[len(args)-1],
+		"-progress", "pipe:1", "-nostats", "-f", "mp4", args[len(args)-1],
 	}
 	if !reflect.DeepEqual(args, want) {
 		t.Fatalf("command args = %#v, want %#v", args, want)
 	}
-	if args[5] != source {
-		t.Fatalf("source URL was split or changed: %q", args[5])
+	if strings.Contains(strings.Join(args, "\x00"), source) {
+		t.Fatalf("FFmpeg args leaked raw source URL: %#v", args)
 	}
 	for _, forbiddenProtocol := range []string{"crypto", "file", "data"} {
 		if strings.Contains(args[1], forbiddenProtocol) {
@@ -149,6 +174,196 @@ func TestRunnerBuildsExplicitSafeArguments(t *testing.T) {
 	}
 	if filepath.Base(path) != "标题;$(touch owned).mp4" {
 		t.Fatalf("published file = %q", filepath.Base(path))
+	}
+}
+
+func TestRunnerClosesHLSProxyOnEveryExitPath(t *testing.T) {
+	tests := []struct {
+		name    string
+		command func([]string) command
+	}{
+		{
+			name: "progress pipe error",
+			command: func([]string) command {
+				return &fakeCommand{pipeErr: errors.New("pipe failed")}
+			},
+		},
+		{
+			name: "start error",
+			command: func([]string) command {
+				return &fakeCommand{startErr: errors.New("start failed")}
+			},
+		},
+		{
+			name: "process error",
+			command: func(args []string) command {
+				return &fakeCommand{
+					onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("partial"), 0o600) },
+					waitErr: errors.New("exit status 1"),
+				}
+			},
+		},
+		{
+			name: "output error",
+			command: func([]string) command {
+				return &fakeCommand{}
+			},
+		},
+		{
+			name: "success",
+			command: func(args []string) command {
+				return &fakeCommand{onStart: func() error {
+					return os.WriteFile(args[len(args)-1], []byte("video"), 0o600)
+				}}
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy := &fakeHLSProxy{url: "http://127.0.0.1:54321/opaque/root.m3u8"}
+			runner, err := newRunner(internalConfig{
+				outputDir:    t.TempDir(),
+				resolver:     publicResolver{},
+				ffmpegPath:   "ffmpeg-test",
+				proxyFactory: fixedProxyFactory(proxy),
+				commandFactory: func(_ context.Context, _ string, args ...string) command {
+					return tt.command(args)
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, _ = runner.Run(context.Background(), Request{
+				SourceURL: "https://cdn.example/video.m3u8?source-secret",
+				Title:     "video",
+				Manifest:  []byte(validMediaManifest),
+			})
+			if got := proxy.closeCalls.Load(); got != 1 {
+				t.Fatalf("proxy Close calls = %d, want 1", got)
+			}
+		})
+	}
+}
+
+func TestRunnerDoesNotPublishWhenProxyCannotClose(t *testing.T) {
+	dir := t.TempDir()
+	proxy := &fakeHLSProxy{
+		url:      "http://127.0.0.1:54321/opaque/root.m3u8",
+		closeErr: errors.New("proxy close failed"),
+	}
+	runner, err := newRunner(internalConfig{
+		outputDir:    dir,
+		resolver:     publicResolver{},
+		ffmpegPath:   "ffmpeg-test",
+		proxyFactory: fixedProxyFactory(proxy),
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{onStart: func() error {
+				return os.WriteFile(args[len(args)-1], []byte("video"), 0o600)
+			}}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, runErr := runner.Run(context.Background(), Request{
+		SourceURL: "https://cdn.example/video.m3u8",
+		Title:     "video",
+		Manifest:  []byte(validMediaManifest),
+	})
+	assertCode(t, runErr, CodeProcess)
+	if _, statErr := os.Stat(filepath.Join(dir, "video.mp4")); !errors.Is(statErr, os.ErrNotExist) {
+		t.Fatalf("published file exists after proxy close failure: %v", statErr)
+	}
+	assertNoStagingFiles(t, dir)
+}
+
+func TestRunnerMapsProxyFailuresBeforeGenericFFmpegFailure(t *testing.T) {
+	tests := []struct {
+		name      string
+		proxyCode hlsproxy.Code
+		want      Code
+	}{
+		{name: "unsafe", proxyCode: hlsproxy.CodeUnsafeSource, want: CodeUnsafeSource},
+		{name: "encrypted", proxyCode: hlsproxy.CodeEncrypted, want: CodeEncrypted},
+		{name: "malformed", proxyCode: hlsproxy.CodeManifest, want: CodeManifest},
+		{name: "oversized", proxyCode: hlsproxy.CodeTooLarge, want: CodeManifest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			proxy := &fakeHLSProxy{
+				url: "http://127.0.0.1:54321/opaque/root.m3u8",
+				err: &hlsproxy.Error{Code: tt.proxyCode, Message: "安全代理读取失败"},
+			}
+			runner, err := newRunner(internalConfig{
+				outputDir:    t.TempDir(),
+				resolver:     publicResolver{},
+				ffmpegPath:   "ffmpeg-test",
+				proxyFactory: fixedProxyFactory(proxy),
+				commandFactory: func(_ context.Context, _ string, args ...string) command {
+					return &fakeCommand{
+						onStart: func() error { return os.WriteFile(args[len(args)-1], []byte("partial"), 0o600) },
+						waitErr: errors.New("exit status 1"),
+					}
+				},
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			_, runErr := runner.Run(context.Background(), Request{
+				SourceURL: "https://cdn.example/video.m3u8?source-secret",
+				Title:     "video",
+				Manifest:  []byte(validMediaManifest),
+			})
+			assertCode(t, runErr, tt.want)
+			if strings.Contains(runErr.Error(), "source-secret") {
+				t.Fatalf("proxy error leaked source URL: %v", runErr)
+			}
+		})
+	}
+}
+
+func TestRunnerDeclaresMP4MuxerForPrivatePartFile(t *testing.T) {
+	ffmpegPath, err := exec.LookPath("ffmpeg")
+	if err != nil {
+		t.Skip("FFmpeg is not installed")
+	}
+	dir := t.TempDir()
+	fixture := filepath.Join(dir, "fixture.m4a")
+	generate := exec.Command(ffmpegPath,
+		"-nostdin", "-loglevel", "error", "-f", "lavfi", "-i", "anullsrc=r=8000:cl=mono",
+		"-t", "0.05", "-c:a", "aac", "-y", fixture,
+	)
+	if output, err := generate.CombinedOutput(); err != nil {
+		t.Fatalf("generate fixture: %v: %s", err, output)
+	}
+	runner, err := newRunner(internalConfig{
+		outputDir:  dir,
+		resolver:   publicResolver{},
+		ffmpegPath: ffmpegPath,
+		commandFactory: func(ctx context.Context, _ string, args ...string) command {
+			localArgs := append([]string(nil), args[2:]...)
+			for index := range localArgs {
+				if localArgs[index] == "-i" && index+1 < len(localArgs) {
+					localArgs[index+1] = fixture
+					break
+				}
+			}
+			return productionCommand(ctx, ffmpegPath, localArgs...)
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/video.m3u8", Title: "fixture", Manifest: []byte(validMediaManifest)})
+	if err != nil {
+		t.Fatalf("Run() error = %v", err)
+	}
+	contents, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(contents) < 8 || string(contents[4:8]) != "ftyp" {
+		t.Fatalf("output is not an MP4 file: first bytes %x", contents)
 	}
 }
 
@@ -266,6 +481,20 @@ func TestRunnerMapsMissingFFmpegToChineseError(t *testing.T) {
 	assertCode(t, err, CodeFFmpegMissing)
 	if err == nil || err.Error() != "未安装 FFmpeg" {
 		t.Fatalf("Run() error = %v, want 未安装 FFmpeg", err)
+	}
+	assertNoStagingFiles(t, runner.outputDir)
+}
+
+func TestRunnerStartErrorAfterCancellationReturnsCanceled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	runner := newTestRunner(t, func(context.Context, string, ...string) command {
+		cancel()
+		return &fakeCommand{startErr: errors.New("start failed after cancellation")}
+	}, nil)
+	_, err := runner.Run(ctx, Request{SourceURL: "https://cdn.example/video.m3u8", Title: "video", Manifest: []byte(validMediaManifest)})
+	assertCode(t, err, CodeCanceled)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("Run() error = %v, want context cancellation cause", err)
 	}
 	assertNoStagingFiles(t, runner.outputDir)
 }
@@ -514,6 +743,36 @@ func TestRunnerPublishesOnlyAfterSuccessfulWait(t *testing.T) {
 		t.Fatalf("private part remains after publication: %v", err)
 	}
 	assertNoStagingFiles(t, dir)
+}
+
+func TestRunnerPublishesOutputWithPrivatePermissions(t *testing.T) {
+	dir := t.TempDir()
+	runner, err := newRunner(internalConfig{
+		outputDir: dir, resolver: publicResolver{}, ffmpegPath: "ffmpeg-test",
+		commandFactory: func(_ context.Context, _ string, args ...string) command {
+			return &fakeCommand{onStart: func() error {
+				partPath := args[len(args)-1]
+				if err := os.WriteFile(partPath, []byte("video"), 0o666); err != nil {
+					return err
+				}
+				return os.Chmod(partPath, 0o666)
+			}}
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	path, err := runner.Run(context.Background(), Request{SourceURL: "https://cdn.example/video.m3u8", Title: "private", Manifest: []byte(validMediaManifest)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != 0o600 {
+		t.Fatalf("published permissions = %o, want 600", got)
+	}
 }
 
 func TestRunnerDoesNotOverwriteExistingFileOrSymlink(t *testing.T) {

@@ -18,6 +18,7 @@ import (
 	"unicode/utf8"
 
 	"web-video-downloader/helper/internal/hls"
+	"web-video-downloader/helper/internal/hlsproxy"
 	"web-video-downloader/helper/internal/output"
 	"web-video-downloader/helper/internal/safety"
 )
@@ -26,7 +27,8 @@ const (
 	maxStderrBytes       = 8 * 1024
 	maxProgressTokenSize = 256 * 1024
 	maxFilenameBytes     = 255
-	protocolWhitelist    = "http,https,tcp,tls"
+	protocolWhitelist    = "http,tcp"
+	proxyCloseTimeout    = 5 * time.Second
 )
 
 // Code identifies a stable runner failure category.
@@ -89,6 +91,7 @@ type internalConfig struct {
 	onProgress     ProgressFunc
 	commandFactory commandFactory
 	progressParser progressParserFunc
+	proxyFactory   proxyFactory
 }
 
 // Runner starts an FFmpeg process for each Run call and serializes progress
@@ -100,6 +103,7 @@ type Runner struct {
 	onProgress     ProgressFunc
 	commandFactory commandFactory
 	progressParser progressParserFunc
+	proxyFactory   proxyFactory
 	progressMu     sync.Mutex
 }
 
@@ -137,6 +141,10 @@ func newRunner(config internalConfig) (*Runner, error) {
 	if parser == nil {
 		parser = parseProgress
 	}
+	proxyFactory := config.proxyFactory
+	if proxyFactory == nil {
+		proxyFactory = productionProxyFactory
+	}
 	return &Runner{
 		outputDir:      absDir,
 		resolver:       config.resolver,
@@ -144,6 +152,7 @@ func newRunner(config internalConfig) (*Runner, error) {
 		onProgress:     config.onProgress,
 		commandFactory: factory,
 		progressParser: parser,
+		proxyFactory:   proxyFactory,
 	}, nil
 }
 
@@ -158,6 +167,18 @@ type command interface {
 type commandFactory func(context.Context, string, ...string) command
 type progressParserFunc func(io.Reader, ProgressFunc) error
 
+type hlsProxy interface {
+	URL() string
+	Err() error
+	Close(context.Context) error
+}
+
+type proxyFactory func(context.Context, hlsproxy.Config) (hlsProxy, error)
+
+func productionProxyFactory(ctx context.Context, config hlsproxy.Config) (hlsProxy, error) {
+	return hlsproxy.Start(ctx, config)
+}
+
 type execCommand struct{ cmd *exec.Cmd }
 
 func productionCommand(ctx context.Context, name string, args ...string) command {
@@ -170,11 +191,9 @@ func (c *execCommand) SetEnv(env []string)                { c.cmd.Env = env }
 func (c *execCommand) Start() error                       { return c.cmd.Start() }
 func (c *execCommand) Wait() error                        { return c.cmd.Wait() }
 
-// Run remuxes an unencrypted HLS source to a new MP4 file. URL validation is
-// deliberately performed before process creation. This reduces SSRF exposure,
-// but it cannot pin FFmpeg's later DNS resolution or redirects; a future
-// helper-controlled local proxy/staged playlist is still required to close
-// that DNS-rebinding boundary fully.
+// Run remuxes an unencrypted HLS source to a new MP4 file. FFmpeg receives only
+// an opaque loopback URL; all remote HLS requests remain under the safe Go
+// transport owned by the helper.
 func (r *Runner) Run(ctx context.Context, request Request) (path string, returnErr error) {
 	if ctx == nil {
 		return "", canceledError(context.Canceled)
@@ -198,6 +217,34 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		}
 		return "", &Error{Code: CodeUnsafeSource, Message: "视频下载地址不安全或无效", cause: safeValidationDiagnostic(err)}
 	}
+	proxy, err := r.proxyFactory(ctx, hlsproxy.Config{
+		SourceURL: request.SourceURL,
+		Manifest:  request.Manifest,
+		Resolver:  r.resolver,
+	})
+	if err != nil {
+		if ctx.Err() != nil {
+			return "", canceledError(ctx.Err())
+		}
+		return "", mapProxyError(err)
+	}
+	var proxyCloseOnce sync.Once
+	var proxyCloseErr error
+	closeProxy := func() error {
+		proxyCloseOnce.Do(func() {
+			closeCtx, cancel := context.WithTimeout(context.Background(), proxyCloseTimeout)
+			proxyCloseErr = proxy.Close(closeCtx)
+			cancel()
+		})
+		return proxyCloseErr
+	}
+	defer func() {
+		closeErr := closeProxy()
+		if closeErr != nil && returnErr == nil {
+			path = ""
+			returnErr = &Error{Code: CodeProcess, Message: "无法关闭安全视频代理", cause: errors.New("close HLS proxy failed")}
+		}
+	}()
 
 	stagingDir, err := os.MkdirTemp(r.outputDir, ".web-video-ffmpeg-*")
 	if err != nil {
@@ -219,9 +266,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 
 	args := []string{
 		"-protocol_whitelist", protocolWhitelist,
-		"-nostdin", "-y", "-i", request.SourceURL,
+		"-nostdin", "-y", "-i", proxy.URL(),
 		"-map", "0", "-c", "copy", "-movflags", "+faststart",
-		"-progress", "pipe:1", "-nostats", partPath,
+		"-progress", "pipe:1", "-nostats", "-f", "mp4", partPath,
 	}
 	cmd := r.commandFactory(ctx, r.ffmpegPath, args...)
 	stdout, err := cmd.StdoutPipe()
@@ -233,6 +280,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	cmd.SetEnv(sanitizedEnvironment(os.Environ()))
 	if err := cmd.Start(); err != nil {
 		closeErr := stdout.Close()
+		if ctx.Err() != nil {
+			return "", canceledError(ctx.Err())
+		}
 		if isMissingExecutable(err) {
 			return "", &Error{Code: CodeFFmpegMissing, Message: "未安装 FFmpeg", cause: errors.New("FFmpeg executable not found")}
 		}
@@ -253,6 +303,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if parseErr != nil {
 		return "", &Error{Code: CodeProgress, Message: "无法读取 FFmpeg 进度", cause: errors.Join(parseErr, closeErr)}
 	}
+	if proxyErr := proxy.Err(); proxyErr != nil {
+		return "", mapProxyError(proxyErr)
+	}
 	if waitErr != nil {
 		return "", &Error{
 			Code:    CodeProcess,
@@ -263,6 +316,12 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	}
 	if closeErr != nil {
 		return "", &Error{Code: CodeProgress, Message: "无法读取 FFmpeg 进度", cause: closeErr}
+	}
+	if err := closeProxy(); err != nil {
+		return "", &Error{Code: CodeProcess, Message: "无法关闭安全视频代理", cause: errors.New("close HLS proxy failed")}
+	}
+	if proxyErr := proxy.Err(); proxyErr != nil {
+		return "", mapProxyError(proxyErr)
 	}
 	if err := syncAndClosePart(partPath); err != nil {
 		return "", outputError("无法保存合并后的视频", err)
@@ -275,6 +334,23 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", outputError("无法确认视频文件已保存", err)
 	}
 	return published, nil
+}
+
+func mapProxyError(err error) error {
+	var proxyErr *hlsproxy.Error
+	if !errors.As(err, &proxyErr) {
+		return &Error{Code: CodeProcess, Message: "安全视频代理失败", cause: errors.New("HLS proxy failed")}
+	}
+	switch proxyErr.Code {
+	case hlsproxy.CodeUnsafeSource:
+		return &Error{Code: CodeUnsafeSource, Message: "视频下载地址不安全或无效", cause: errors.New("HLS proxy rejected unsafe source")}
+	case hlsproxy.CodeEncrypted:
+		return &Error{Code: CodeEncrypted, Message: "不支持加密或 DRM 视频", cause: errors.New("HLS proxy rejected encrypted stream")}
+	case hlsproxy.CodeManifest, hlsproxy.CodeTooLarge:
+		return manifestError(errors.New("HLS proxy rejected invalid manifest"))
+	default:
+		return &Error{Code: CodeProcess, Message: "安全视频代理失败", cause: errors.New("HLS proxy failed")}
+	}
 }
 
 func sanitizedEnvironment(environment []string) []string {
@@ -487,9 +563,10 @@ func syncAndClosePart(path string) error {
 		}
 		return errors.Join(statErr, closeErr)
 	}
+	chmodErr := file.Chmod(0o600)
 	syncErr := file.Sync()
 	closeErr := file.Close()
-	return errors.Join(syncErr, closeErr)
+	return errors.Join(chmodErr, syncErr, closeErr)
 }
 
 func publishNoReplace(partPath, dir, title string) (string, error) {
