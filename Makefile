@@ -3,7 +3,7 @@ GO ?= go
 .PHONY: build test check
 
 build:
-	cd helper && $(GO) build -o bin/web-video-helper ./cmd/web-video-helper
+	cd helper && $(GO) build -o bin/web-video-harbor-helper ./cmd/web-video-harbor-helper
 
 test:
 	cd helper && $(GO) test ./...
