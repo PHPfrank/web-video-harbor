@@ -45,3 +45,16 @@ test('content scanner covers DOM, performance, rescan, playback, and dynamic pag
   const domScanner = source.slice(source.indexOf('function domCandidates'), source.indexOf('function performanceCandidates'));
   assert.match(domScanner, /MAX_PAGE_CANDIDATES/);
 });
+
+test('popup loads the platform classifier before popup state and controllers', () => {
+  const source = fs.readFileSync(path.join(extensionDir, 'popup.html'), 'utf8');
+  const scripts = Array.from(source.matchAll(/<script src="([^"]+)"><\/script>/g), (match) => match[1]);
+  assert.deepEqual(scripts, [
+    'lib/platform.js',
+    'lib/popup-state.js',
+    'lib/helper-client.js',
+    'lib/popup-controller.js',
+    'popup.js',
+  ]);
+  assert.equal(fs.existsSync(path.join(extensionDir, 'lib/platform.js')), true);
+});
