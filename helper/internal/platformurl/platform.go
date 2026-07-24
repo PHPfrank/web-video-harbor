@@ -40,7 +40,10 @@ func Classify(raw string) (Video, error) {
 	if parsed.User != nil || parsed.Port() != "" || parsed.Fragment != "" {
 		return Video{}, errUnsupported
 	}
-	if strings.Contains(parsed.EscapedPath(), "%") || strings.Contains(parsed.RawQuery, "%") {
+	if strings.Contains(parsed.EscapedPath(), "%") {
+		return Video{}, errUnsupported
+	}
+	if _, err := url.ParseQuery(parsed.RawQuery); err != nil {
 		return Video{}, errUnsupported
 	}
 
@@ -65,12 +68,13 @@ func classifyYouTube(parsed *url.URL) (Video, error) {
 
 	if parsed.Path == "/watch" {
 		query, err := url.ParseQuery(parsed.RawQuery)
-		if err != nil || len(query["v"]) != 1 || !youtubeIDPattern.MatchString(query.Get("v")) {
+		id, literal := literalQueryValue(parsed.RawQuery, "v", youtubeIDPattern)
+		if err != nil || len(query["v"]) != 1 || !literal {
 			return Video{}, errUnsupported
 		}
 		return Video{
 			Provider:     YouTube,
-			CanonicalURL: "https://www.youtube.com/watch?v=" + query.Get("v"),
+			CanonicalURL: "https://www.youtube.com/watch?v=" + id,
 		}, nil
 	}
 
@@ -96,14 +100,31 @@ func classifyBilibili(parsed *url.URL) (Video, error) {
 	}
 	canonical := "https://www.bilibili.com/video/" + id
 	if len(query["p"]) == 1 {
-		part := query.Get("p")
-		if !partPattern.MatchString(part) {
+		part, literal := literalQueryValue(parsed.RawQuery, "p", partPattern)
+		if !literal {
 			return Video{}, errUnsupported
 		}
 		canonical += "?p=" + part
 	}
 
 	return Video{Provider: Bilibili, CanonicalURL: canonical}, nil
+}
+
+func literalQueryValue(rawQuery, key string, pattern *regexp.Regexp) (string, bool) {
+	prefix := key + "="
+	var value string
+	count := 0
+	for _, field := range strings.Split(rawQuery, "&") {
+		if !strings.HasPrefix(field, prefix) {
+			continue
+		}
+		count++
+		value = strings.TrimPrefix(field, prefix)
+		if !pattern.MatchString(value) {
+			return "", false
+		}
+	}
+	return value, count == 1
 }
 
 func pathID(path, prefix string) (string, bool) {
