@@ -18,6 +18,7 @@ import (
 	"web-video-harbor/helper/internal/ffmpeg"
 	"web-video-harbor/helper/internal/hls"
 	"web-video-harbor/helper/internal/tasks"
+	"web-video-harbor/helper/internal/ytdlp"
 )
 
 type directDownloaderFunc func(context.Context, string, string) (string, error)
@@ -36,6 +37,12 @@ type manifestInspectorFunc func(context.Context, string) (ManifestInspection, er
 
 func (f manifestInspectorFunc) Inspect(ctx context.Context, rawURL string) (ManifestInspection, error) {
 	return f(ctx, rawURL)
+}
+
+type platformRunnerFunc func(context.Context, ytdlp.Request) (string, error)
+
+func (f platformRunnerFunc) Run(ctx context.Context, request ytdlp.Request) (string, error) {
+	return f(ctx, request)
 }
 
 type publishedTestError struct {
@@ -93,6 +100,264 @@ func TestEngineStartsMP4AsynchronouslyAndReportsProgress(t *testing.T) {
 	completed := waitStatus(t, manager, task.ID, tasks.Completed)
 	if completed.OutputPath != "/downloads/video.mp4" {
 		t.Fatalf("output path = %q", completed.OutputPath)
+	}
+}
+
+func TestEngineStartPlatformCanonicalizesBeforeCreatingTask(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{manager: manager})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL:       "https://www.youtube.com/watch?v=_mVb1D8wHxg&utm_source=test",
+		Title:     "video",
+		MediaType: "platform",
+		Quality:   "1080",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	if task.URL != "https://www.youtube.com/watch?v=_mVb1D8wHxg" {
+		t.Fatalf("task URL = %q", task.URL)
+	}
+}
+
+func TestEngineStartPlatformRejectsUnsupportedURLBeforeCreatingTask(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{manager: manager})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	if _, err := engine.Start(context.Background(), JobSpec{
+		URL:       "https://youtube.example/watch?v=_mVb1D8wHxg",
+		MediaType: "platform",
+		Quality:   "best",
+	}); err == nil {
+		t.Fatal("Start accepted an unsupported platform URL")
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("invalid platform URL created tasks: %#v", got)
+	}
+}
+
+func TestEngineStartPlatformRejectsUnknownQualityBeforeCreatingTask(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{manager: manager})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	if _, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "4k",
+	}); err == nil {
+		t.Fatal("Start accepted an unknown platform quality")
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("invalid platform quality created tasks: %#v", got)
+	}
+}
+
+func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testing.T) {
+	manager := tasks.NewManager()
+	requests := make(chan ytdlp.Request, 1)
+	factoryCalls := 0
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			factoryCalls++
+			return platformRunnerFunc(func(_ context.Context, request ytdlp.Request) (string, error) {
+				requests <- request
+				return "/downloads/platform.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL:       "https://www.bilibili.com/video/BV1K3Gz6pEoo/?spm_id_from=333.1007",
+		Title:     "Bilibili title",
+		MediaType: "platform",
+		Quality:   "720",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	completed := waitStatus(t, manager, task.ID, tasks.Completed)
+	if completed.OutputPath != "/downloads/platform.mp4" {
+		t.Fatalf("output path = %q", completed.OutputPath)
+	}
+	if factoryCalls != 1 {
+		t.Fatalf("factory calls = %d, want 1", factoryCalls)
+	}
+	wantRequest := ytdlp.Request{
+		URL:     "https://www.bilibili.com/video/BV1K3Gz6pEoo",
+		Title:   "Bilibili title",
+		Quality: ytdlp.Quality720,
+	}
+	if got := <-requests; got != wantRequest {
+		t.Fatalf("request = %#v, want %#v", got, wantRequest)
+	}
+}
+
+func TestEnginePlatformProgressIsMonotonicAndStopsAt99BeforeCompletion(t *testing.T) {
+	manager := tasks.NewManager()
+	progressReady := make(chan struct{})
+	release := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				progress(ytdlp.Progress{Percent: 40})
+				progress(ytdlp.Progress{Percent: 20})
+				progress(ytdlp.Progress{Percent: 100})
+				close(progressReady)
+				<-release
+				return "/downloads/platform.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatalf("new engine: %v", err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatalf("start: %v", err)
+	}
+	select {
+	case <-progressReady:
+	case <-time.After(time.Second):
+		t.Fatal("platform runner did not report progress")
+	}
+	wantProgress(t, manager, task.ID, 99)
+	active, err := manager.Get(task.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != tasks.Downloading {
+		t.Fatalf("status before output = %q", active.Status)
+	}
+	close(release)
+	waitStatus(t, manager, task.ID, tasks.Completed)
+	wantProgress(t, manager, task.ID, 100)
+}
+
+func TestEnginePlatformCancelSignalsRunnerContext(t *testing.T) {
+	manager := tasks.NewManager()
+	canceled := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(ctx context.Context, _ ytdlp.Request) (string, error) {
+				<-ctx.Done()
+				close(canceled)
+				return "", ctx.Err()
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, manager, task.ID, tasks.Downloading)
+	if _, err := engine.Cancel(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-canceled:
+	case <-time.After(time.Second):
+		t.Fatal("platform runner context was not canceled")
+	}
+	wantStatus(t, manager, task.ID, tasks.Canceled)
+}
+
+func TestEnginePlatformRetryUsesCanonicalStoredSpecAndFreshRunner(t *testing.T) {
+	manager := tasks.NewManager()
+	requests := make(chan ytdlp.Request, 2)
+	factoryCalls := 0
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			factoryCalls++
+			attempt := factoryCalls
+			return platformRunnerFunc(func(_ context.Context, request ytdlp.Request) (string, error) {
+				requests <- request
+				if attempt == 1 {
+					return "", &ytdlp.Error{Code: ytdlp.CodeNetwork, Message: "safe internal message"}
+				}
+				return "/downloads/retried-platform.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := engine.Start(context.Background(), JobSpec{
+		URL:       "https://www.youtube.com/watch?v=_mVb1D8wHxg&feature=share",
+		Title:     "same title",
+		MediaType: "platform",
+		Quality:   "1080",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, manager, original.ID, tasks.Failed)
+	retry, err := engine.Retry(context.Background(), original.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitStatus(t, manager, retry.ID, tasks.Completed)
+	if completed.OutputPath != "/downloads/retried-platform.mp4" {
+		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+	wantRequest := ytdlp.Request{
+		URL:     "https://www.youtube.com/watch?v=_mVb1D8wHxg",
+		Title:   "same title",
+		Quality: ytdlp.Quality1080,
+	}
+	for attempt := 1; attempt <= 2; attempt++ {
+		if got := <-requests; got != wantRequest {
+			t.Fatalf("attempt %d request = %#v, want %#v", attempt, got, wantRequest)
+		}
+	}
+	if factoryCalls != 2 {
+		t.Fatalf("factory calls = %d, want 2", factoryCalls)
+	}
+}
+
+func TestEnginePlatformPublishedPathCompletesDespiteCleanupWarning(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				path := "/downloads/published-platform.mp4"
+				return path, &publishedTestError{path: path, err: errors.New("cleanup failed")}
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "720",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	completed := waitStatus(t, manager, task.ID, tasks.Completed)
+	if completed.OutputPath != "/downloads/published-platform.mp4" {
+		t.Fatalf("OutputPath = %q", completed.OutputPath)
 	}
 }
 
@@ -583,6 +848,36 @@ func TestSafeFailureMappingUsesOnlyAllowlistedMessages(t *testing.T) {
 			}
 			if strings.Contains(gotMessage, "signed.example") || strings.Contains(gotMessage, "token=secret") || strings.Contains(gotMessage, "/Users/person") {
 				t.Fatalf("message leaked: %q", gotMessage)
+			}
+		})
+	}
+}
+
+func TestSafeFailureMapsPlatformCodesToAllowlistedChineseMessages(t *testing.T) {
+	tests := []struct {
+		code    ytdlp.Code
+		message string
+	}{
+		{code: ytdlp.CodeCanceled, message: "下载已取消"},
+		{code: ytdlp.CodeLoginRequired, message: "当前视频需要登录，v0.2.0 暂不支持"},
+		{code: ytdlp.CodeAccessLimited, message: "当前内容受会员、付费或私有访问限制"},
+		{code: ytdlp.CodeGeoRestricted, message: "当前网络所在地区无法访问此视频"},
+		{code: ytdlp.CodeExtractor, message: "平台解析规则已变化，请升级网页视频港"},
+		{code: ytdlp.CodeFFmpegMissing, message: "未安装 FFmpeg，请先安装后重试"},
+		{code: ytdlp.CodeNetwork, message: "网络连接失败，请稍后重试"},
+		{code: ytdlp.CodeOutput, message: "无法保存视频文件"},
+		{code: ytdlp.CodeProcess, message: "平台暂时拒绝了下载，请稍后重试"},
+	}
+	for _, tc := range tests {
+		t.Run(string(tc.code), func(t *testing.T) {
+			gotCode, gotMessage := safeFailure(&ytdlp.Error{
+				Code: tc.code, Message: "secret URL and local path",
+			})
+			if gotCode != string(tc.code) || gotMessage != tc.message {
+				t.Fatalf("safeFailure = %q %q", gotCode, gotMessage)
+			}
+			if strings.Contains(gotMessage, "secret") {
+				t.Fatalf("message leaked internal details: %q", gotMessage)
 			}
 		})
 	}

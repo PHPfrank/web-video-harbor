@@ -15,8 +15,10 @@ import (
 	"web-video-harbor/helper/internal/hls"
 	"web-video-harbor/helper/internal/media"
 	"web-video-harbor/helper/internal/output"
+	"web-video-harbor/helper/internal/platformurl"
 	"web-video-harbor/helper/internal/safety"
 	"web-video-harbor/helper/internal/tasks"
+	"web-video-harbor/helper/internal/ytdlp"
 )
 
 const maxManifestBytes = 2 * 1024 * 1024
@@ -39,6 +41,10 @@ type hlsRunner interface {
 	Run(context.Context, ffmpeg.Request) (string, error)
 }
 
+type platformRunner interface {
+	Run(context.Context, ytdlp.Request) (string, error)
+}
+
 type manifestInspector interface {
 	Inspect(context.Context, string) (ManifestInspection, error)
 }
@@ -52,19 +58,21 @@ type ManifestInspection struct {
 }
 
 type engineDeps struct {
-	manager       *tasks.Manager
-	inspector     manifestInspector
-	newDownloader func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner  func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	manager           *tasks.Manager
+	inspector         manifestInspector
+	newDownloader     func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner      func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner func(ytdlp.ProgressFunc) (platformRunner, error)
 }
 
 // Engine owns asynchronous task execution while Manager remains the source of
 // truth for public task state.
 type Engine struct {
-	manager       *tasks.Manager
-	inspector     manifestInspector
-	newDownloader func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner  func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	manager           *tasks.Manager
+	inspector         manifestInspector
+	newDownloader     func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner      func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner func(ytdlp.ProgressFunc) (platformRunner, error)
 
 	mu      sync.RWMutex
 	specs   map[string]JobSpec
@@ -187,13 +195,14 @@ func newEngine(deps engineDeps) (*Engine, error) {
 	}
 	rootCtx, cancel := context.WithCancel(context.Background())
 	return &Engine{
-		manager:       deps.manager,
-		inspector:     deps.inspector,
-		newDownloader: deps.newDownloader,
-		newHLSRunner:  deps.newHLSRunner,
-		specs:         make(map[string]JobSpec),
-		rootCtx:       rootCtx,
-		cancel:        cancel,
+		manager:           deps.manager,
+		inspector:         deps.inspector,
+		newDownloader:     deps.newDownloader,
+		newHLSRunner:      deps.newHLSRunner,
+		newPlatformRunner: deps.newPlatformRunner,
+		specs:             make(map[string]JobSpec),
+		rootCtx:           rootCtx,
+		cancel:            cancel,
 	}, nil
 }
 
@@ -226,11 +235,23 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 	if ctx == nil {
 		return tasks.Task{}, errors.New("start task: nil context")
 	}
-	if spec.MediaType != "mp4" && spec.MediaType != "hls" {
+	if spec.MediaType != "mp4" && spec.MediaType != "hls" && spec.MediaType != "platform" {
 		return tasks.Task{}, fmt.Errorf("unsupported media type %q", spec.MediaType)
 	}
 	if strings.TrimSpace(spec.URL) == "" {
 		return tasks.Task{}, errors.New("video URL is required")
+	}
+	if spec.MediaType == "platform" {
+		switch ytdlp.Quality(spec.Quality) {
+		case ytdlp.QualityBest, ytdlp.Quality1080, ytdlp.Quality720:
+		default:
+			return tasks.Task{}, fmt.Errorf("unsupported platform quality %q", spec.Quality)
+		}
+		video, err := platformurl.Classify(spec.URL)
+		if err != nil {
+			return tasks.Task{}, err
+		}
+		spec.URL = video.CanonicalURL
 	}
 	if err := ctx.Err(); err != nil {
 		return tasks.Task{}, err
@@ -275,6 +296,47 @@ func (e *Engine) run(id string, spec JobSpec) {
 		e.runMP4(ctx, id, spec)
 	case "hls":
 		e.runHLS(ctx, id, spec)
+	case "platform":
+		e.runPlatform(ctx, id, spec)
+	}
+}
+
+func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
+	if e.newPlatformRunner == nil {
+		e.fail(id, errors.New("platform runner factory is unavailable"))
+		return
+	}
+	runner, err := e.newPlatformRunner(func(progress ytdlp.Progress) {
+		percent := progress.Percent
+		if percent < 0 {
+			percent = 0
+		}
+		if percent > 99 {
+			percent = 99
+		}
+		_, _ = e.manager.SetProgress(id, percent)
+	})
+	if err != nil {
+		e.fail(id, err)
+		return
+	}
+	path, err := runner.Run(ctx, ytdlp.Request{
+		URL:     spec.URL,
+		Title:   spec.Title,
+		Quality: ytdlp.Quality(spec.Quality),
+	})
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		path = publishedPath
+		err = nil
+	}
+	if err != nil {
+		if ctx.Err() == nil {
+			e.fail(id, err)
+		}
+		return
+	}
+	if _, err := e.manager.CompletePublished(id, path); err != nil {
+		e.fail(id, fmt.Errorf("record published platform output: %w", err))
 	}
 }
 
@@ -370,6 +432,29 @@ func (e *Engine) fail(id string, internal error) {
 }
 
 func safeFailure(internal error) (string, string) {
+	var platformErr *ytdlp.Error
+	if errors.As(internal, &platformErr) {
+		switch platformErr.Code {
+		case ytdlp.CodeCanceled:
+			return "canceled", "下载已取消"
+		case ytdlp.CodeLoginRequired:
+			return "login_required", "当前视频需要登录，v0.2.0 暂不支持"
+		case ytdlp.CodeAccessLimited:
+			return "access_limited", "当前内容受会员、付费或私有访问限制"
+		case ytdlp.CodeGeoRestricted:
+			return "geo_restricted", "当前网络所在地区无法访问此视频"
+		case ytdlp.CodeExtractor:
+			return "extractor_outdated", "平台解析规则已变化，请升级网页视频港"
+		case ytdlp.CodeFFmpegMissing:
+			return "ffmpeg_missing", "未安装 FFmpeg，请先安装后重试"
+		case ytdlp.CodeNetwork:
+			return "network", "网络连接失败，请稍后重试"
+		case ytdlp.CodeOutput:
+			return "output", "无法保存视频文件"
+		case ytdlp.CodeProcess:
+			return "platform_process", "平台暂时拒绝了下载，请稍后重试"
+		}
+	}
 	var downloadErr *download.Error
 	if errors.As(internal, &downloadErr) {
 		switch downloadErr.Code {
