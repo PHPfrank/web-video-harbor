@@ -10,6 +10,7 @@
   const BASE_URL = 'http://127.0.0.1:17432';
   const TOKEN_KEY = 'videoHelperToken';
   const DEFAULT_TIMEOUT_MS = 8000;
+  const HEALTH_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
   const ERROR_MESSAGES = {
     unauthorized: '配对密钥无效，请重新配对',
     unsafe_source: '视频地址不安全或无效',
@@ -93,6 +94,32 @@
     return { message: '连接成功，本地助手可以使用。', tone: 'success' };
   }
 
+  function safeHealthVersion(value) {
+    return typeof value === 'string' && HEALTH_VERSION_PATTERN.test(value) ? value : '';
+  }
+
+  function normalizePlatformDownloader(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return { available: false, version: '' };
+    }
+    const version = safeHealthVersion(value.version);
+    if (value.available !== true || !version) {
+      return { available: false, version: '' };
+    }
+    return { available: true, version };
+  }
+
+  function normalizeHealth(value) {
+    const health = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    return {
+      ready: health.ready === true,
+      version: safeHealthVersion(health.version),
+      ffmpeg: health.ffmpeg === true,
+      pid: Number.isSafeInteger(health.pid) && health.pid > 1 ? health.pid : 0,
+      platformDownloader: normalizePlatformDownloader(health.platformDownloader),
+    };
+  }
+
   function createHelperClient(options) {
     const settings = options || {};
     const fetchImpl = settings.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
@@ -157,7 +184,7 @@
     }
 
     return {
-      health() { return request('/health'); },
+      async health() { return normalizeHealth(await request('/health')); },
       inspect(url) { return request('/v1/inspect', { method: 'POST', authenticated: true, body: { url } }); },
       listTasks() { return request('/v1/tasks', { authenticated: true }); },
       createTask(spec) { return request('/v1/tasks', { method: 'POST', authenticated: true, body: spec }); },
@@ -171,5 +198,13 @@
     };
   }
 
-  return { BASE_URL, TOKEN_KEY, HelperClientError, createHelperClient, describeHealth, readToken, saveToken };
+  return {
+    BASE_URL,
+    TOKEN_KEY,
+    HelperClientError,
+    createHelperClient,
+    describeHealth,
+    readToken,
+    saveToken,
+  };
 }));

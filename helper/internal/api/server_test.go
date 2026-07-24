@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -120,7 +121,11 @@ func newTestServer(t *testing.T, mutate func(*Options)) (*Server, *fakeTasks, *f
 	service := newFakeTasks()
 	inspector := &fakeInspector{result: Inspection{MediaType: "mp4"}}
 	revealer := &fakeRevealer{}
-	opts := Options{Token: testToken, Version: "1.2.3", FFmpegAvailable: true, DownloadDir: dir, Inspector: inspector, Tasks: service, Revealer: revealer}
+	opts := Options{
+		Token: testToken, Version: "1.2.3", FFmpegAvailable: true,
+		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: "2026.07.04",
+		DownloadDir: dir, Inspector: inspector, Tasks: service, Revealer: revealer,
+	}
 	if mutate != nil {
 		mutate(&opts)
 	}
@@ -164,15 +169,46 @@ func TestHealthIsUnauthenticatedAndMinimal(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 	got := decodeObject(t, rr)
-	if len(got) != 4 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true || got["pid"] != float64(os.Getpid()) {
+	if len(got) != 5 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true || got["pid"] != float64(os.Getpid()) {
 		t.Fatalf("health = %#v", got)
+	}
+	platform, ok := got["platformDownloader"].(map[string]any)
+	if !ok || len(platform) != 2 || platform["available"] != true || platform["version"] != "2026.07.04" {
+		t.Fatalf("platform downloader health = %#v", got["platformDownloader"])
 	}
 	if got["pid"].(float64) <= 1 {
 		t.Fatalf("health PID is not a real process: %#v", got)
 	}
-	for _, secret := range []string{testToken, "download", "task", "url", "path"} {
+	for _, secret := range []string{testToken, "downloadDir", "task", "url", "path"} {
 		if strings.Contains(strings.ToLower(rr.Body.String()), strings.ToLower(secret)) {
 			t.Fatalf("health leaked %q: %s", secret, rr.Body.String())
+		}
+	}
+}
+
+func TestHealthBoundsPlatformDownloaderVersion(t *testing.T) {
+	for _, unsafeVersion := range []string{
+		"",
+		strings.Repeat("1", 65),
+		"2026.07.04\n/Users/person/private-parser",
+		"../../private-parser",
+	} {
+		srv, _, _, _, _ := newTestServer(t, func(options *Options) {
+			options.PlatformDownloaderVersion = unsafeVersion
+		})
+		rr := perform(t, srv.Handler(), http.MethodGet, "/health", nil, "", "")
+		if rr.Code != http.StatusOK {
+			t.Fatalf("health status = %d: %s", rr.Code, rr.Body.String())
+		}
+		got := decodeObject(t, rr)
+		platform, ok := got["platformDownloader"].(map[string]any)
+		if !ok || platform["available"] != false || platform["version"] != "" {
+			t.Fatalf("unsafe version %q was not bounded: %#v", unsafeVersion, platform)
+		}
+		for _, secret := range []string{unsafeVersion, "/Users/person", "private-parser"} {
+			if secret != "" && strings.Contains(rr.Body.String(), secret) {
+				t.Fatalf("health leaked %q: %s", secret, rr.Body.String())
+			}
 		}
 	}
 }
@@ -344,6 +380,81 @@ func TestCreateListGetCancelAndRetry(t *testing.T) {
 	}
 	if len(service.retryIDs) != 1 || service.retryIDs[0] != "new-id" {
 		t.Fatalf("retry IDs = %#v", service.retryIDs)
+	}
+}
+
+func TestCreateAcceptsPlatformQualityContract(t *testing.T) {
+	cases := []struct {
+		name    string
+		body    string
+		wantURL string
+		quality string
+	}{
+		{
+			name:    "YouTube best",
+			body:    `{"url":"https://www.youtube.com/watch?v=_mVb1D8wHxg","title":"demo","mediaType":" PLATFORM ","quality":" BEST "}`,
+			wantURL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", quality: "best",
+		},
+		{
+			name:    "Bilibili 1080",
+			body:    `{"url":"https://www.bilibili.com/video/BV1K3Gz6pEoo/","title":"demo","mediaType":"platform","quality":"1080"}`,
+			wantURL: "https://www.bilibili.com/video/BV1K3Gz6pEoo/", quality: "1080",
+		},
+		{
+			name:    "platform 720",
+			body:    `{"url":"https://youtu.be/_mVb1D8wHxg","title":"demo","mediaType":"platform","quality":"720"}`,
+			wantURL: "https://youtu.be/_mVb1D8wHxg", quality: "720",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, service, _, _, _ := newTestServer(t, nil)
+			rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", []byte(tc.body), testToken, "")
+			if rr.Code != http.StatusCreated {
+				t.Fatalf("create status = %d: %s", rr.Code, rr.Body.String())
+			}
+			if len(service.startSpecs) != 1 {
+				t.Fatalf("start specs = %#v", service.startSpecs)
+			}
+			want := JobSpec{URL: tc.wantURL, Title: "demo", MediaType: "platform", Quality: tc.quality}
+			if service.startSpecs[0] != want {
+				t.Fatalf("start spec = %#v, want %#v", service.startSpecs[0], want)
+			}
+		})
+	}
+}
+
+func TestCreateRejectsInvalidMediaQualityContracts(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+	}{
+		{name: "platform missing quality", body: `{"url":"https://www.youtube.com/watch?v=_mVb1D8wHxg","title":"demo","mediaType":"platform"}`},
+		{name: "platform unknown quality", body: `{"url":"https://www.youtube.com/watch?v=_mVb1D8wHxg","title":"demo","mediaType":"platform","quality":"4k"}`},
+		{name: "mp4 with quality", body: `{"url":"https://media.example/video.mp4","title":"demo","mediaType":"mp4","quality":"best"}`},
+		{name: "hls with quality", body: `{"url":"https://media.example/video.m3u8","title":"demo","mediaType":"hls","quality":"720"}`},
+		{name: "unknown media type", body: `{"url":"https://media.example/video","title":"demo","mediaType":"dash"}`},
+	}
+	for _, field := range []string{"cookies", "headers", "arguments", "provider", "playlist"} {
+		cases = append(cases, struct {
+			name string
+			body string
+		}{
+			name: "extra field " + field,
+			body: fmt.Sprintf(`{"url":"https://www.youtube.com/watch?v=_mVb1D8wHxg","title":"demo","mediaType":"platform","quality":"best",%q:true}`, field),
+		})
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv, service, _, _, _ := newTestServer(t, nil)
+			rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", []byte(tc.body), testToken, "")
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("create status = %d, want %d: %s", rr.Code, http.StatusBadRequest, rr.Body.String())
+			}
+			if len(service.startSpecs) != 0 {
+				t.Fatalf("invalid task reached service: %#v", service.startSpecs)
+			}
+		})
 	}
 }
 

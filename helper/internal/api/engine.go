@@ -28,6 +28,7 @@ type JobSpec struct {
 	URL       string `json:"url"`
 	Title     string `json:"title"`
 	MediaType string `json:"mediaType"`
+	Quality   string `json:"quality,omitempty"`
 }
 
 type directDownloader interface {

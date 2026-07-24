@@ -29,7 +29,13 @@ test('health is unauthenticated while every v1 request uses the locally stored t
     async fetchImpl(url, options) {
       calls.push({ url, options });
       return url.endsWith('/health')
-        ? jsonResponse(200, { ready: true, version: '0.1.0', ffmpeg: true, pid: 4321 })
+        ? jsonResponse(200, {
+          ready: true,
+          version: '0.2.0',
+          ffmpeg: true,
+          pid: 4321,
+          platformDownloader: { available: true, version: '2026.07.04' },
+        })
         : jsonResponse(200, []);
     },
   });
@@ -38,10 +44,61 @@ test('health is unauthenticated while every v1 request uses the locally stored t
   await client.listTasks();
 
   assert.equal(health.pid, 4321);
+  assert.deepEqual(health.platformDownloader, { available: true, version: '2026.07.04' });
   assert.equal(calls[0].url, 'http://127.0.0.1:17432/health');
   assert.equal(calls[0].options.headers['X-Video-Helper-Token'], undefined);
   assert.equal(calls[1].url, 'http://127.0.0.1:17432/v1/tasks');
   assert.equal(calls[1].options.headers['X-Video-Helper-Token'], 'pairing-token');
+});
+
+test('health normalizes missing or malformed platform downloader status safely', async () => {
+  const unsafeCases = [
+    undefined,
+    {},
+    null,
+    'available',
+    { available: 'true', version: '/Users/person/private-parser' },
+    { available: true, version: '2026.07.04\n/private-parser', path: '/Users/person/private-parser' },
+  ];
+
+  for (const platformDownloader of unsafeCases) {
+    const client = helper.createHelperClient({
+      storageLocal: localStorage(),
+      async fetchImpl() {
+        return jsonResponse(200, {
+          ready: true,
+          version: '0.2.0',
+          ffmpeg: true,
+          pid: 4321,
+          path: '/Users/person/helper',
+          ...(platformDownloader === undefined ? {} : { platformDownloader }),
+        });
+      },
+    });
+
+    const health = await client.health();
+    assert.deepEqual(health.platformDownloader, { available: false, version: '' });
+    assert.equal(Object.hasOwn(health, 'path'), false);
+    assert.doesNotMatch(JSON.stringify(health), /Users|private-parser/);
+  }
+});
+
+test('health rejects unbounded platform downloader versions without throwing', async () => {
+  const client = helper.createHelperClient({
+    storageLocal: localStorage(),
+    async fetchImpl() {
+      return jsonResponse(200, {
+        ready: true,
+        version: '0.2.0',
+        ffmpeg: true,
+        pid: 4321,
+        platformDownloader: { available: true, version: '1'.repeat(65) },
+      });
+    },
+  });
+
+  const health = await client.health();
+  assert.deepEqual(health.platformDownloader, { available: false, version: '' });
 });
 
 test('helper address stays fixed even if a caller supplies a different base URL', async () => {
@@ -197,6 +254,10 @@ test('health summary distinguishes a connected helper without FFmpeg', () => {
     tone: 'error',
   });
   assert.deepEqual(helper.describeHealth({ ready: true, version: '0.1.0', ffmpeg: true }), {
+    message: '连接成功，本地助手可以使用。',
+    tone: 'success',
+  });
+  assert.deepEqual(helper.describeHealth({ ready: true }), {
     message: '连接成功，本地助手可以使用。',
     tone: 'success',
   });

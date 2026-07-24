@@ -26,12 +26,14 @@ import (
 )
 
 const (
-	maxJSONBody   = 64 * 1024
-	maxTitleRunes = 200
-	maxURLBytes   = 8192
+	maxJSONBody            = 64 * 1024
+	maxTitleRunes          = 200
+	maxURLBytes            = 8192
+	maxHealthVersionLength = 64
 )
 
 var extensionOriginPattern = regexp.MustCompile(`^chrome-extension://[a-p]{32}$`)
+var healthVersionPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$`)
 
 // Inspection is the safe media metadata returned to the extension.
 type Inspection struct {
@@ -103,26 +105,34 @@ func (f FinderRevealer) Reveal(ctx context.Context, path string) error {
 
 // Options configures an API handler.
 type Options struct {
-	Token           string
-	Version         string
-	FFmpegAvailable bool
-	DownloadDir     string
-	Inspector       MediaInspector
-	Tasks           TaskService
-	Revealer        Revealer
+	Token                       string
+	Version                     string
+	FFmpegAvailable             bool
+	PlatformDownloaderAvailable bool
+	PlatformDownloaderVersion   string
+	DownloadDir                 string
+	Inspector                   MediaInspector
+	Tasks                       TaskService
+	Revealer                    Revealer
+}
+
+type platformDownloaderStatus struct {
+	Available bool   `json:"available"`
+	Version   string `json:"version"`
 }
 
 // Server owns the immutable API configuration.
 type Server struct {
-	tokenHash       [32]byte
-	version         string
-	processID       int
-	ffmpegAvailable bool
-	downloadDir     string
-	inspector       MediaInspector
-	tasks           TaskService
-	revealer        Revealer
-	handler         http.Handler
+	tokenHash          [32]byte
+	version            string
+	processID          int
+	ffmpegAvailable    bool
+	platformDownloader platformDownloaderStatus
+	downloadDir        string
+	inspector          MediaInspector
+	tasks              TaskService
+	revealer           Revealer
+	handler            http.Handler
 }
 
 // New validates dependencies and constructs the API handler.
@@ -151,11 +161,22 @@ func New(options Options) (*Server, error) {
 		return nil, errors.New("download directory must be a real directory")
 	}
 
+	platformVersion := safeHealthVersion(options.PlatformDownloaderVersion)
+	platformAvailable := options.PlatformDownloaderAvailable && platformVersion != ""
+	if !platformAvailable {
+		platformVersion = ""
+	}
+
 	s := &Server{
 		tokenHash: sha256.Sum256([]byte(options.Token)), version: options.Version,
-		processID: os.Getpid(),
-		ffmpegAvailable: options.FFmpegAvailable, downloadDir: filepath.Clean(absDir),
-		inspector: options.Inspector, tasks: options.Tasks, revealer: options.Revealer,
+		processID:       os.Getpid(),
+		ffmpegAvailable: options.FFmpegAvailable,
+		platformDownloader: platformDownloaderStatus{
+			Available: platformAvailable,
+			Version:   platformVersion,
+		},
+		downloadDir: filepath.Clean(absDir),
+		inspector:   options.Inspector, tasks: options.Tasks, revealer: options.Revealer,
 	}
 	s.handler = http.HandlerFunc(s.serveHTTP)
 	return s, nil
@@ -195,7 +216,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			methodNotAllowed(w, http.MethodGet)
 			return
 		}
-		writeJSON(w, http.StatusOK, map[string]any{"ready": true, "version": s.version, "ffmpeg": s.ffmpegAvailable, "pid": s.processID})
+		writeJSON(w, http.StatusOK, map[string]any{
+			"ready":              true,
+			"version":            s.version,
+			"ffmpeg":             s.ffmpegAvailable,
+			"platformDownloader": s.platformDownloader,
+			"pid":                s.processID,
+		})
 		return
 	}
 	if !strings.HasPrefix(r.URL.Path, "/v1/") {
@@ -207,6 +234,13 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.routeV1(w, r)
+}
+
+func safeHealthVersion(version string) string {
+	if len(version) == 0 || len(version) > maxHealthVersionLength || !healthVersionPattern.MatchString(version) {
+		return ""
+	}
+	return version
 }
 
 func setSecurityHeaders(w http.ResponseWriter) {
@@ -329,7 +363,15 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	spec.URL = strings.TrimSpace(spec.URL)
 	spec.Title = strings.TrimSpace(spec.Title)
 	spec.MediaType = strings.ToLower(strings.TrimSpace(spec.MediaType))
-	if !validInputURL(spec.URL) || spec.Title == "" || !utf8.ValidString(spec.Title) || utf8.RuneCountInString(spec.Title) > maxTitleRunes || (spec.MediaType != "mp4" && spec.MediaType != "hls") {
+	spec.Quality = strings.ToLower(strings.TrimSpace(spec.Quality))
+	validMediaQuality := false
+	switch spec.MediaType {
+	case "mp4", "hls":
+		validMediaQuality = spec.Quality == ""
+	case "platform":
+		validMediaQuality = spec.Quality == "best" || spec.Quality == "1080" || spec.Quality == "720"
+	}
+	if !validInputURL(spec.URL) || spec.Title == "" || !utf8.ValidString(spec.Title) || utf8.RuneCountInString(spec.Title) > maxTitleRunes || !validMediaQuality {
 		writeError(w, http.StatusBadRequest, "invalid_request", "下载任务参数无效")
 		return
 	}
