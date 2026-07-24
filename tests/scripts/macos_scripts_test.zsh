@@ -359,7 +359,7 @@ if [[ -f \"$fixture_root/work/platform-unavailable\" ]]; then
 else
   platform_status='\"available\":true,\"version\":\"2026.07.04\",\"path\":\"/must/not/leak/yt-dlp_macos\"'
 fi
-print -r -- \"{\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"platformDownloader\\\":{\$platform_status},\\\"pid\\\":\$health_pid}\"" \
+print -r -- \"{\\\"platformDownloader\\\":{\$platform_status},\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"" \
   >"$fixture_fake_bin/curl"
 chmod 0755 "$fixture_fake_bin/curl"
 
@@ -779,6 +779,10 @@ env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
 rg -q '助手状态：健康' "$status_output" || fail "状态脚本未报告健康"
 rg -q 'FFmpeg：可用' "$status_output" || fail "状态脚本未报告 FFmpeg"
 rg -Fq '平台解析器: 可用（2026.07.04）' "$status_output" || fail "状态脚本未报告平台解析器版本"
+rg -Fq '版本：test-version' "$status_output" || fail "状态脚本未严格读取助手顶层版本"
+if rg -Fq '版本：2026.07.04' "$status_output"; then
+  fail "状态脚本把嵌套平台解析器版本误当成助手版本"
+fi
 if rg -Fq '/must/not/leak/yt-dlp_macos' "$status_output"; then
   fail "状态脚本泄露了平台解析器路径"
 fi

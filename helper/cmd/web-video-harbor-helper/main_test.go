@@ -3,8 +3,10 @@ package main
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
+	"net/http"
 	"os"
 	"path/filepath"
 	"strings"
@@ -238,6 +240,98 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	}
 	if !listener.isClosed() {
 		t.Fatal("listener remained open")
+	}
+}
+
+func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *testing.T) {
+	dir := privateTempDir(t)
+	cfg := appconfig.Config{Address: "127.0.0.1:0", Token: "serve-helper-test-token", DownloadDir: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	address := make(chan string, 1)
+	done := make(chan error, 1)
+	go func() {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", ytdlp.ProbeResult{}, func(network, requested string) (net.Listener, error) {
+			listener, err := net.Listen(network, requested)
+			if err == nil {
+				address <- listener.Addr().String()
+			}
+			return listener, err
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serveHelper() shutdown error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("serveHelper() did not shut down")
+		}
+	})
+
+	var baseURL string
+	select {
+	case bound := <-address:
+		baseURL = "http://" + bound
+	case err := <-done:
+		t.Fatalf("serveHelper() exited before listening: %v", err)
+	case <-time.After(time.Second):
+		t.Fatal("serveHelper() did not listen")
+	}
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Get(baseURL + "/health")
+	if err != nil {
+		t.Fatalf("GET /health: %v", err)
+	}
+	var health struct {
+		Version            string `json:"version"`
+		PlatformDownloader struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		} `json:"platformDownloader"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		response.Body.Close()
+		t.Fatalf("decode health: %v", err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || health.Version != "test-helper-version" || health.PlatformDownloader.Available || health.PlatformDownloader.Version != "" {
+		t.Fatalf("health status=%d body=%#v", response.StatusCode, health)
+	}
+
+	postTask := func(spec string) (int, map[string]any) {
+		t.Helper()
+		request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/tasks", strings.NewReader(spec))
+		if err != nil {
+			t.Fatal(err)
+		}
+		request.Header.Set("Content-Type", "application/json")
+		request.Header.Set("X-Video-Helper-Token", cfg.Token)
+		response, err := client.Do(request)
+		if err != nil {
+			t.Fatalf("POST /v1/tasks: %v", err)
+		}
+		defer response.Body.Close()
+		var body map[string]any
+		if err := json.NewDecoder(response.Body).Decode(&body); err != nil {
+			t.Fatalf("decode task response: %v", err)
+		}
+		return response.StatusCode, body
+	}
+
+	status, body := postTask(`{"url":"https://youtu.be/_mVb1D8wHxg","title":"platform","mediaType":"platform","quality":"best"}`)
+	if status != http.StatusConflict || body["code"] != "task_error" || body["message"] != "安装包缺少平台解析器" {
+		t.Fatalf("platform create status=%d body=%#v", status, body)
+	}
+	for _, spec := range []string{
+		`{"url":"https://127.0.0.1/video.mp4","title":"MP4","mediaType":"mp4"}`,
+		`{"url":"https://127.0.0.1/video.m3u8","title":"HLS","mediaType":"hls"}`,
+	} {
+		status, body := postTask(spec)
+		if status != http.StatusCreated || body["id"] == "" {
+			t.Fatalf("non-platform create status=%d body=%#v", status, body)
+		}
 	}
 }
 

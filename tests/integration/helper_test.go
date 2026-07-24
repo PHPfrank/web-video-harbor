@@ -58,7 +58,7 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	resolver := exactFixtureResolver{hostPort: parsed.Host}
 	downloadDir := t.TempDir()
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg")
+	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", "")
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -132,7 +132,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	resolver := exactFixtureResolver{hostPort: parsedFixture.Host}
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath)
+	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, "")
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}

@@ -50,27 +50,38 @@ if ! helper_health_response; then
   exit 1
 fi
 health_json="$REPLY"
-if [[ "$helper_health_pid" != "$recorded_pid" ]]; then
+health_extract() {
+  /usr/bin/plutil -extract "$1" raw -expect "$2" -o - - <<<"$health_json" 2>/dev/null
+}
+health_ready="$(health_extract ready bool)" || health_ready=""
+health_pid="$(health_extract pid integer)" || health_pid=""
+health_version="$(health_extract version string)" || health_version=""
+health_ffmpeg="$(health_extract ffmpeg bool)" || health_ffmpeg=""
+platform_available="$(health_extract platformDownloader.available bool)" || platform_available=""
+platform_version="$(health_extract platformDownloader.version string)" || platform_version=""
+if [[ "$health_ready" != "true" || "$health_pid" != <-> || -z "$health_version" ]]; then
+  print -u2 -- "助手状态：健康响应格式无效"
+  exit 1
+fi
+if [[ "$health_pid" != "$recorded_pid" ]]; then
   print -u2 -- "助手状态：PID 存在，但健康端点不属于该实例"
   exit 1
 fi
 
 print -- "助手状态：健康"
 print -- "PID：$recorded_pid"
-if [[ "$health_json" == *'"ffmpeg":true'* ]]; then
+if [[ "$health_ffmpeg" == "true" ]]; then
   print -- "FFmpeg：可用"
 else
   print -- "FFmpeg：未安装"
 fi
-if [[ "$health_json" == *'"platformDownloader":{"available":true'* ]] && \
-  [[ "$health_json" =~ '"version":"([0-9]{4}\.[0-9]{2}\.[0-9]{2})"' ]]; then
-  print -- "平台解析器: 可用（${match[1]}）"
+if [[ "$platform_available" == "true" ]] && \
+  [[ "$platform_version" =~ '^[0-9]{4}\.[0-9]{2}\.[0-9]{2}$' ]]; then
+  print -- "平台解析器: 可用（$platform_version）"
 else
   print -- "平台解析器: 不可用"
 fi
-if [[ "$health_json" =~ '"version":"([^"\\]*)"' ]]; then
-  print -- "版本：${match[1]}"
-fi
+print -- "版本：$health_version"
 helper_config_download_dir
 print -- "下载目录：$REPLY"
 print -- "状态目录：$helper_state_dir"
