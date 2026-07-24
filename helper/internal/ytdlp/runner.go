@@ -5,6 +5,9 @@ package ytdlp
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"io"
 	"math"
@@ -25,13 +28,14 @@ import (
 )
 
 const (
-	maxProgressLineBytes   = 1024
-	maxDiagnosticLineBytes = 4 * 1024
-	maxDiagnosticTailBytes = 16 * 1024
-	maxTitleBytes          = 1024
-	progressPrefix         = "WVH_PROGRESS:"
-	progressTemplate       = "download:WVH_PROGRESS:%(progress._percent_str)s"
-	terminationGrace       = 200 * time.Millisecond
+	maxProgressLineBytes    = 1024
+	maxDiagnosticLineBytes  = 4 * 1024
+	maxDiagnosticTailBytes  = 16 * 1024
+	maxTitleBytes           = 1024
+	progressPrefix          = "WVH_PROGRESS:"
+	progressTemplate        = "download:WVH_PROGRESS:%(info.format_id)#j\t%(progress._percent_str)s"
+	terminationGrace        = 200 * time.Millisecond
+	terminationConfirmGrace = 200 * time.Millisecond
 )
 
 var (
@@ -67,7 +71,7 @@ type commandFactory func(path string, args []string, env []string) *exec.Cmd
 type outputReservation interface {
 	Path() string
 	File() *os.File
-	Publish() error
+	PublishExpected(int64) error
 	Release() error
 }
 
@@ -116,12 +120,13 @@ type Runner struct {
 	binaryPath          string
 	ffmpegPath          string
 	outputDir           string
+	outputInfo          os.FileInfo
 	onProgress          ProgressFunc
 	commandFactory      commandFactory
 	removeTree          func(*os.File) error
 	beforeOpenStaged    func(string)
 	copyOutput          func(context.Context, io.Writer, io.Reader) error
-	reserveOutput       func(string, string, string) (outputReservation, error)
+	reserveOutput       func(*os.File, string, string, string) (outputReservation, error)
 	beforeCleanupRename func(string)
 	beforeCleanupRemove func(string)
 }
@@ -136,21 +141,23 @@ func New(config Config) (*Runner, error) {
 	if !validConfiguredPathSyntax(config.OutputDir) {
 		return nil, errInvalidConfig
 	}
-	info, err := os.Lstat(config.OutputDir)
-	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+	outputRoot, info, err := openConfiguredOutputRoot(config.OutputDir, nil)
+	if err != nil {
 		return nil, errInvalidConfig
 	}
+	_ = outputRoot.Close()
 
 	return &Runner{
 		binaryPath:     config.BinaryPath,
 		ffmpegPath:     config.FFmpegPath,
 		outputDir:      config.OutputDir,
+		outputInfo:     info,
 		onProgress:     config.OnProgress,
 		commandFactory: defaultCommandFactory,
 		removeTree:     removeDirectoryContents,
 		copyOutput:     copyWithContext,
-		reserveOutput: func(dir, base, extension string) (outputReservation, error) {
-			return output.ReserveAvailablePath(dir, base, extension)
+		reserveOutput: func(root *os.File, dir, base, extension string) (outputReservation, error) {
+			return output.ReserveAvailablePathAt(root, dir, base, extension)
 		},
 	}, nil
 }
@@ -171,38 +178,43 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", err
 	}
 
-	stagingDir, err := os.MkdirTemp(r.outputDir, ".web-video-platform-")
+	outputRoot, _, err := openConfiguredOutputRoot(r.outputDir, r.outputInfo)
 	if err != nil {
 		return "", outputError()
 	}
-	if err := os.Chmod(stagingDir, 0o700); err != nil {
-		_ = os.Remove(stagingDir)
-		return "", outputError()
-	}
-	stagingInfo, err := os.Lstat(stagingDir)
-	if err != nil || !validOwnedDirectory(stagingInfo) {
-		_ = os.Remove(stagingDir)
-		return "", outputError()
-	}
-	stagingRoot, err := os.OpenFile(stagingDir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	defer outputRoot.Close()
+	stagingName, stagingRoot, stagingInfo, err := createPrivateDirectoryAt(outputRoot, ".web-video-platform-")
 	if err != nil {
-		_ = os.Remove(stagingDir)
 		return "", outputError()
 	}
-	openedStagingInfo, err := stagingRoot.Stat()
-	if err != nil || !validOwnedDirectory(openedStagingInfo) || !os.SameFile(stagingInfo, openedStagingInfo) {
-		_ = stagingRoot.Close()
-		_ = os.Remove(stagingDir)
-		return "", outputError()
-	}
+	stagingDir := filepath.Join(r.outputDir, stagingName)
 	defer stagingRoot.Close()
 	defer func() {
-		if cleanupErr := r.cleanupOwnedStaging(stagingDir, stagingInfo); cleanupErr != nil && returnErr == nil {
-			if path != "" {
-				returnErr = output.NewPublishedError(path, outputError())
-			} else {
+		cleanupErr := r.cleanupOwnedStaging(outputRoot, stagingName, stagingInfo)
+		if verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo) != nil {
+			hadPublishedPath := path != ""
+			path = ""
+			if publishedErr, ok := returnErr.(*output.PublishedError); hadPublishedPath && ok {
+				returnErr = errors.Join(publishedErr.Unwrap(), outputError())
+			} else if hadPublishedPath || returnErr == nil {
 				returnErr = outputError()
+			} else {
+				returnErr = errors.Join(returnErr, outputError())
 			}
+			return
+		}
+		if cleanupErr == nil {
+			return
+		}
+		cleanupWarning := outputError()
+		if returnErr != nil {
+			returnErr = errors.Join(returnErr, cleanupWarning)
+			return
+		}
+		if path != "" {
+			returnErr = output.NewPublishedError(path, cleanupWarning)
+		} else {
+			returnErr = cleanupWarning
 		}
 	}()
 
@@ -212,6 +224,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	}
 	if ctx.Err() != nil {
 		return "", canceledError()
+	}
+	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
+		return "", outputError()
 	}
 	command := r.commandFactory(r.binaryPath, args, minimalEnvironment())
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -263,8 +278,11 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if waitErr != nil {
 		return "", classifyDiagnostic(diagnostic)
 	}
+	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
+		return "", outputError()
+	}
 
-	stagedPath, stagedInfo, err := validateStagedOutput(stagingRoot, stagingDir, stagingInfo)
+	stagedPath, stagedInfo, err := validateStagedOutput(outputRoot, stagingName, stagingRoot, stagingDir, stagingInfo)
 	if err != nil {
 		return "", outputError()
 	}
@@ -290,22 +308,25 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if err != nil || !openedInfo.Mode().IsRegular() || openedInfo.Size() == 0 || !os.SameFile(stagedInfo, openedInfo) {
 		return "", outputError()
 	}
-	if err := verifyOwnedStaging(stagingDir, stagingInfo); err != nil {
+	if err := verifyOwnedDirectoryAt(outputRoot, stagingName, stagingInfo); err != nil {
 		return "", outputError()
 	}
 
 	extension := strings.ToLower(filepath.Ext(stagedPath))
-	reservation, err := r.reserveOutput(r.outputDir, request.Title, extension)
+	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
+		return "", outputError()
+	}
+	reservation, err := r.reserveOutput(outputRoot, r.outputDir, request.Title, extension)
 	if err != nil {
 		return "", outputError()
 	}
 	reservedInfo, err := reservation.File().Stat()
-	if err != nil || !reservedInfo.Mode().IsRegular() {
-		_ = rollbackReservation(reservation, reservedInfo)
+	if err != nil || !reservedInfo.Mode().IsRegular() || reservedInfo.Mode().Perm() != 0o600 {
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
 		return "", outputError()
 	}
 	if err := r.copyOutput(ctx, reservation.File(), staged); err != nil {
-		rollbackOK := rollbackReservation(reservation, reservedInfo)
+		rollbackOK := rollbackReservation(outputRoot, reservation, reservedInfo)
 		if !rollbackOK {
 			return "", outputError()
 		}
@@ -315,20 +336,36 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", outputError()
 	}
 	if ctx.Err() != nil {
-		if !rollbackReservation(reservation, reservedInfo) {
+		if !rollbackReservation(outputRoot, reservation, reservedInfo) {
 			return "", outputError()
 		}
 		return "", canceledError()
 	}
-	if err := reservation.Publish(); err != nil {
+	copiedInfo, err := reservation.File().Stat()
+	if err != nil || !copiedInfo.Mode().IsRegular() || copiedInfo.Mode().Perm() != 0o600 ||
+		!os.SameFile(reservedInfo, copiedInfo) || copiedInfo.Size() != openedInfo.Size() {
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		return "", outputError()
+	}
+	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		return "", outputError()
+	}
+	if err := reservation.PublishExpected(openedInfo.Size()); err != nil {
 		if releaseErr := reservation.Release(); releaseErr == nil {
 			return "", outputError()
 		}
-		if completeOwnedReservation(reservation.Path(), reservedInfo, openedInfo.Size()) {
+		if completeOwnedReservationAt(outputRoot, filepath.Base(reservation.Path()), reservedInfo, openedInfo.Size()) &&
+			verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo) == nil {
 			path = reservation.Path()
 			return path, output.NewPublishedError(path, outputError())
 		}
-		_ = rollbackReservation(reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		return "", outputError()
+	}
+	if !completeOwnedReservationAt(outputRoot, filepath.Base(reservation.Path()), reservedInfo, openedInfo.Size()) ||
+		verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo) != nil {
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
 		return "", outputError()
 	}
 	path = reservation.Path()
@@ -338,7 +375,7 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	return path, nil
 }
 
-func rollbackReservation(reservation outputReservation, owned os.FileInfo) bool {
+func rollbackReservation(root *os.File, reservation outputReservation, owned os.FileInfo) bool {
 	if reservation == nil {
 		return true
 	}
@@ -348,7 +385,8 @@ func rollbackReservation(reservation outputReservation, owned os.FileInfo) bool 
 	if owned == nil {
 		return false
 	}
-	pathInfo, err := os.Lstat(reservation.Path())
+	name := filepath.Base(reservation.Path())
+	pathInfo, err := fileInfoAt(root, name)
 	if errors.Is(err, os.ErrNotExist) {
 		_ = reservation.File().Close()
 		return true
@@ -356,21 +394,21 @@ func rollbackReservation(reservation outputReservation, owned os.FileInfo) bool 
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(owned, pathInfo) {
 		return false
 	}
-	if err := os.Remove(reservation.Path()); err != nil {
+	if err := unix.Unlinkat(int(root.Fd()), name, 0); err != nil {
 		return false
 	}
 	_ = reservation.File().Close()
-	_, err = os.Lstat(reservation.Path())
+	_, err = fileInfoAt(root, name)
 	return errors.Is(err, os.ErrNotExist)
 }
 
-func completeOwnedReservation(path string, owned os.FileInfo, expectedSize int64) bool {
+func completeOwnedReservationAt(root *os.File, name string, owned os.FileInfo, expectedSize int64) bool {
 	if owned == nil || expectedSize <= 0 {
 		return false
 	}
-	info, err := os.Lstat(path)
+	info, err := fileInfoAt(root, name)
 	return err == nil && info.Mode().IsRegular() && info.Mode()&os.ModeSymlink == 0 &&
-		os.SameFile(owned, info) && info.Size() == expectedSize
+		info.Mode().Perm() == 0o600 && os.SameFile(owned, info) && info.Size() == expectedSize
 }
 
 type contextReader struct {
@@ -473,13 +511,43 @@ func terminateProcessGroup(pid int, waitResult <-chan error) error {
 			waited = true
 		case <-ticker.C:
 		case <-deadline.C:
-			if processGroupExists(pid) {
+			killed := processGroupExists(pid)
+			if killed {
 				_ = syscall.Kill(-pid, syscall.SIGKILL)
 			}
 			if !waited {
 				waitErr = <-waitResult
 			}
+			if killed {
+				_ = confirmProcessGroupExit(pid, terminationConfirmGrace, processGroupExists)
+			}
 			return waitErr
+		}
+	}
+}
+
+func confirmProcessGroupExit(pid int, timeout time.Duration, exists func(int) bool) bool {
+	if exists == nil {
+		return false
+	}
+	if !exists(pid) {
+		return true
+	}
+	if timeout <= 0 {
+		return false
+	}
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	ticker := time.NewTicker(10 * time.Millisecond)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			if !exists(pid) {
+				return true
+			}
+		case <-timer.C:
+			return !exists(pid)
 		}
 	}
 }
@@ -585,8 +653,8 @@ var stagedVideoExtensions = map[string]struct{}{
 	".webm": {},
 }
 
-func validateStagedOutput(stagingRoot *os.File, stagingDir string, owned os.FileInfo) (string, os.FileInfo, error) {
-	if err := verifyOwnedStaging(stagingDir, owned); err != nil {
+func validateStagedOutput(outputRoot *os.File, stagingName string, stagingRoot *os.File, stagingDir string, owned os.FileInfo) (string, os.FileInfo, error) {
+	if err := verifyOwnedDirectoryAt(outputRoot, stagingName, owned); err != nil {
 		return "", nil, err
 	}
 	rootInfo, err := stagingRoot.Stat()
@@ -602,7 +670,7 @@ func validateStagedOutput(stagingRoot *os.File, stagingDir string, owned os.File
 		return "", nil, outputError()
 	}
 	path := filepath.Join(stagingDir, name)
-	info, err := entries[0].Info()
+	info, err := fileInfoAt(stagingRoot, name)
 	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Size() == 0 {
 		return "", nil, outputError()
 	}
@@ -616,46 +684,122 @@ func validOwnedDirectory(info os.FileInfo) bool {
 	return info != nil && info.IsDir() && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o077 == 0
 }
 
-func verifyOwnedStaging(path string, owned os.FileInfo) error {
-	info, err := os.Lstat(path)
+func openConfiguredOutputRoot(path string, expected os.FileInfo) (*os.File, os.FileInfo, error) {
+	pathInfo, err := os.Lstat(path)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 {
+		return nil, nil, outputError()
+	}
+	root, err := os.OpenFile(path, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, nil, outputError()
+	}
+	openedInfo, err := root.Stat()
+	if err != nil || !openedInfo.IsDir() || !os.SameFile(pathInfo, openedInfo) ||
+		(expected != nil && !os.SameFile(expected, openedInfo)) {
+		_ = root.Close()
+		return nil, nil, outputError()
+	}
+	return root, openedInfo, nil
+}
+
+func verifyConfiguredOutputRoot(path string, root *os.File, expected os.FileInfo) error {
+	if root == nil || expected == nil {
+		return outputError()
+	}
+	pathInfo, err := os.Lstat(path)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 {
+		return outputError()
+	}
+	openedInfo, err := root.Stat()
+	if err != nil || !openedInfo.IsDir() || !os.SameFile(expected, openedInfo) || !os.SameFile(openedInfo, pathInfo) {
+		return outputError()
+	}
+	return nil
+}
+
+func createPrivateDirectoryAt(root *os.File, prefix string) (string, *os.File, os.FileInfo, error) {
+	if root == nil || prefix == "" || filepath.Base(prefix) != prefix {
+		return "", nil, nil, outputError()
+	}
+	for range 100 {
+		random := make([]byte, 16)
+		if _, err := rand.Read(random); err != nil {
+			return "", nil, nil, outputError()
+		}
+		name := prefix + hex.EncodeToString(random)
+		if err := unix.Mkdirat(int(root.Fd()), name, 0o700); err != nil {
+			if errors.Is(err, syscall.EEXIST) {
+				continue
+			}
+			return "", nil, nil, outputError()
+		}
+		fd, err := unix.Openat(int(root.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
+			return "", nil, nil, outputError()
+		}
+		directory := os.NewFile(uintptr(fd), name)
+		if directory == nil {
+			_ = unix.Close(fd)
+			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
+			return "", nil, nil, outputError()
+		}
+		if err := unix.Fchmod(fd, 0o700); err != nil {
+			_ = directory.Close()
+			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
+			return "", nil, nil, outputError()
+		}
+		info, err := directory.Stat()
+		if err != nil || !validOwnedDirectory(info) || info.Mode().Perm() != 0o700 {
+			_ = directory.Close()
+			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
+			return "", nil, nil, outputError()
+		}
+		return name, directory, info, nil
+	}
+	return "", nil, nil, outputError()
+}
+
+func fileInfoAt(root *os.File, name string) (os.FileInfo, error) {
+	if root == nil || name == "" || filepath.Base(name) != name {
+		return nil, outputError()
+	}
+	fd, err := unix.Openat(int(root.Fd()), name, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC, 0)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, outputError()
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+func verifyOwnedDirectoryAt(root *os.File, name string, owned os.FileInfo) error {
+	info, err := fileInfoAt(root, name)
 	if err != nil || !validOwnedDirectory(info) || !os.SameFile(owned, info) {
 		return outputError()
 	}
 	return nil
 }
 
-func (r *Runner) cleanupOwnedStaging(path string, owned os.FileInfo) error {
-	if err := verifyOwnedStaging(path, owned); err != nil {
+func (r *Runner) cleanupOwnedStaging(outputRoot *os.File, stagingName string, owned os.FileInfo) error {
+	if err := verifyOwnedDirectoryAt(outputRoot, stagingName, owned); err != nil {
 		return err
 	}
-	quarantineRoot, err := os.MkdirTemp(r.outputDir, ".web-video-platform-cleanup-")
+	quarantineName, quarantineDirectory, _, err := createPrivateDirectoryAt(outputRoot, ".web-video-platform-cleanup-")
 	if err != nil {
-		return outputError()
-	}
-	if err := os.Chmod(quarantineRoot, 0o700); err != nil {
-		_ = os.Remove(quarantineRoot)
-		return outputError()
-	}
-	quarantineInfo, err := os.Lstat(quarantineRoot)
-	if err != nil || !validOwnedDirectory(quarantineInfo) {
-		_ = os.Remove(quarantineRoot)
-		return outputError()
-	}
-	quarantineDirectory, err := os.OpenFile(quarantineRoot, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		_ = os.Remove(quarantineRoot)
 		return outputError()
 	}
 	defer quarantineDirectory.Close()
-	openedQuarantineInfo, err := quarantineDirectory.Stat()
-	if err != nil || !validOwnedDirectory(openedQuarantineInfo) || !os.SameFile(quarantineInfo, openedQuarantineInfo) {
-		return outputError()
-	}
+	stagingPath := filepath.Join(r.outputDir, stagingName)
+	quarantineRoot := filepath.Join(r.outputDir, quarantineName)
 	if r.beforeCleanupRename != nil {
-		r.beforeCleanupRename(path)
+		r.beforeCleanupRename(stagingPath)
 	}
-	quarantinedStaging := filepath.Join(quarantineRoot, "owned-staging")
-	if err := os.Rename(path, quarantinedStaging); err != nil {
+	if err := unix.Renameat(int(outputRoot.Fd()), stagingName, int(quarantineDirectory.Fd()), "owned-staging"); err != nil {
 		return outputError()
 	}
 	movedFD, err := unix.Openat(
@@ -692,7 +836,7 @@ func (r *Runner) cleanupOwnedStaging(path string, owned os.FileInfo) error {
 	if err := quarantineDirectory.Close(); err != nil {
 		return outputError()
 	}
-	if err := os.Remove(quarantineRoot); err != nil {
+	if err := unix.Unlinkat(int(outputRoot.Fd()), quarantineName, unix.AT_REMOVEDIR); err != nil {
 		return outputError()
 	}
 	return nil
@@ -830,8 +974,11 @@ func (r *Runner) validStagingDir(stagingDir string) bool {
 }
 
 type progressState struct {
-	percent     float64
-	hasPrevious bool
+	percent        float64
+	hasPrevious    bool
+	streamIDs      [2]string
+	streamPercents [2]float64
+	streamSeen     [2]bool
 }
 
 // parseProgressLine accepts only the dedicated progress marker, returns a
@@ -844,7 +991,16 @@ func parseProgressLine(line string, previous progressState) (progressState, bool
 		return previous, false
 	}
 
-	value := strings.TrimSpace(strings.TrimPrefix(line, progressPrefix))
+	payload := strings.TrimPrefix(line, progressPrefix)
+	fields := strings.Split(payload, "\t")
+	if len(fields) != 2 {
+		return previous, false
+	}
+	var streamID string
+	if err := json.Unmarshal([]byte(fields[0]), &streamID); err != nil || !validProgressStreamID(streamID) {
+		return previous, false
+	}
+	value := strings.TrimSpace(fields[1])
 	if strings.HasSuffix(value, "%") {
 		value = strings.TrimSpace(strings.TrimSuffix(value, "%"))
 	}
@@ -855,9 +1011,42 @@ func parseProgressLine(line string, previous progressState) (progressState, bool
 	if err != nil || math.IsNaN(percent) || math.IsInf(percent, 0) {
 		return previous, false
 	}
-	percent = math.Max(0, math.Min(99, percent))
-	if previous.hasPrevious && percent <= previous.percent {
+	percent = math.Max(0, math.Min(100, percent))
+	streamIndex := -1
+	for index, knownID := range previous.streamIDs {
+		if knownID == streamID {
+			streamIndex = index
+			break
+		}
+		if streamIndex == -1 && knownID == "" {
+			streamIndex = index
+		}
+	}
+	if streamIndex < 0 || previous.streamSeen[streamIndex] && percent <= previous.streamPercents[streamIndex] {
 		return previous, false
 	}
-	return progressState{percent: percent, hasPrevious: true}, true
+	next := previous
+	next.streamIDs[streamIndex] = streamID
+	next.streamPercents[streamIndex] = percent
+	next.streamSeen[streamIndex] = true
+	next.percent = (float64(streamIndex) + percent/100) * (99.0 / float64(len(next.streamIDs)))
+	if previous.hasPrevious && next.percent <= previous.percent {
+		return previous, false
+	}
+	next.hasPrevious = true
+	return next, true
+}
+
+func validProgressStreamID(value string) bool {
+	if value == "" || len(value) > 64 {
+		return false
+	}
+	for _, character := range value {
+		if character >= 'a' && character <= 'z' || character >= 'A' && character <= 'Z' ||
+			character >= '0' && character <= '9' || strings.ContainsRune("._+-", character) {
+			continue
+		}
+		return false
+	}
+	return true
 }

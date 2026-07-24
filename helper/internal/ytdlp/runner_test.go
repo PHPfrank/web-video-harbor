@@ -40,10 +40,12 @@ func TestYTDLPHelperProcess(t *testing.T) {
 
 	switch os.Getenv("WVH_FAKE_MODE") {
 	case "success":
-		fmt.Println("WVH_PROGRESS:10%")
+		fmt.Println("WVH_PROGRESS:\"video-137\"\t10%")
 		fmt.Println("untrusted output https://signed.example.invalid/video?token=secret")
-		fmt.Println("WVH_PROGRESS:8%")
-		fmt.Println("WVH_PROGRESS:77.5%")
+		fmt.Println("WVH_PROGRESS:\"video-137\"\t100%")
+		fmt.Println("WVH_PROGRESS:\"audio-140\"\t5%")
+		fmt.Println("WVH_PROGRESS:\"audio-140\"\t60%")
+		fmt.Println("WVH_PROGRESS:\"audio-140\"\t100%")
 		if err := os.WriteFile(filepath.Join(stagingDir, "media.mp4"), []byte("video bytes"), 0o600); err != nil {
 			fmt.Fprintln(os.Stderr, "fake helper failed")
 			os.Exit(2)
@@ -51,7 +53,7 @@ func TestYTDLPHelperProcess(t *testing.T) {
 		os.Exit(0)
 	case "success-long-stdout":
 		fmt.Println(strings.Repeat("x", maxProgressLineBytes*128))
-		fmt.Println("WVH_PROGRESS:55%")
+		fmt.Println("WVH_PROGRESS:\"combined-18\"\t55%")
 		_ = os.WriteFile(filepath.Join(stagingDir, "media.mp4"), []byte("video bytes"), 0o600)
 		os.Exit(0)
 	case "failure":
@@ -179,11 +181,31 @@ func TestRunnerCancellationTerminatesProcessGroupAndCleansStaging(t *testing.T) 
 		t.Fatal("Run() did not return after cancellation")
 	}
 
-	waitForProcessGone(t, parentPID)
-	waitForProcessGone(t, childPID)
+	assertProcessGone(t, parentPID)
+	assertProcessGone(t, childPID)
 	assertFileContents(t, filepath.Join(markerDir, "parent.term"), "term")
 	assertFileContents(t, filepath.Join(markerDir, "leaf.term"), "term")
 	assertNoPlatformStaging(t, config.OutputDir)
+}
+
+func TestConfirmProcessGroupExitPollsUntilGoneAndStaysBounded(t *testing.T) {
+	checks := 0
+	exited := confirmProcessGroupExit(123, 100*time.Millisecond, func(int) bool {
+		checks++
+		return checks < 3
+	})
+	if !exited || checks != 3 {
+		t.Fatalf("confirmProcessGroupExit() = %t after %d checks, want true after 3", exited, checks)
+	}
+
+	started := time.Now()
+	exited = confirmProcessGroupExit(123, 20*time.Millisecond, func(int) bool { return true })
+	if exited {
+		t.Fatal("confirmProcessGroupExit() reported a persistent group gone")
+	}
+	if elapsed := time.Since(started); elapsed > 200*time.Millisecond {
+		t.Fatalf("confirmation exceeded its bound: %v", elapsed)
+	}
 }
 
 func TestRunnerClassifiesBoundedDiagnosticsIntoStableSafeErrors(t *testing.T) {
@@ -291,7 +313,7 @@ func TestRunnerDrainsOverlongStdoutAndContinuesParsingProgress(t *testing.T) {
 	if _, err := runner.Run(context.Background(), validRequest("超长输出")); err != nil {
 		t.Fatalf("Run() error = %v", err)
 	}
-	if want := []float64{55}; !reflect.DeepEqual(progress, want) {
+	if want := []float64{27.225}; !reflect.DeepEqual(progress, want) {
 		t.Fatalf("progress = %#v, want %#v", progress, want)
 	}
 	assertNoPlatformStaging(t, config.OutputDir)
@@ -368,6 +390,68 @@ func TestRunnerReturnsPublishedErrorWhenCleanupFailsAfterPublication(t *testing.
 		t.Fatalf("published warning leaked internal data: %v", err)
 	}
 	assertFileContents(t, path, "video bytes")
+}
+
+func TestRunnerPreservesProcessFailureAndCleanupFailureInSafeErrorChain(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=generic failure"})
+	runner.removeTree = func(*os.File) error { return errors.New("private cleanup detail") }
+
+	path, err := runner.Run(context.Background(), validRequest("失败清理"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want process and cleanup errors", path, err)
+	}
+	assertRunnerCode(t, err, CodeProcess)
+	assertRunnerErrorChainContainsCode(t, err, CodeOutput)
+	if strings.Contains(err.Error(), "private cleanup detail") {
+		t.Fatalf("cleanup detail leaked through safe error chain: %v", err)
+	}
+}
+
+func TestRunnerPreservesCancellationAndCleanupFailureInSafeErrorChain(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.removeTree = func(*os.File) error { return errors.New("private cleanup detail") }
+	copyStarted := make(chan struct{})
+	runner.copyOutput = func(ctx context.Context, _ io.Writer, _ io.Reader) error {
+		close(copyStarted)
+		<-ctx.Done()
+		return ctx.Err()
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, runErr := runner.Run(ctx, validRequest("取消清理"))
+		result <- runErr
+	}()
+	select {
+	case <-copyStarted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not begin output copy")
+	}
+	cancel()
+
+	select {
+	case err := <-result:
+		assertRunnerCode(t, err, CodeCanceled)
+		assertRunnerErrorChainContainsCode(t, err, CodeOutput)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation chain lost context.Canceled: %v", err)
+		}
+		if strings.Contains(err.Error(), "private cleanup detail") {
+			t.Fatalf("cleanup detail leaked through safe error chain: %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("runner did not return after cancellation")
+	}
 }
 
 func TestRunnerQuarantinesAndRechecksStagingBeforeRecursiveCleanup(t *testing.T) {
@@ -596,6 +680,229 @@ func TestRunnerUsesFixedBinaryMinimalEnvironmentAndPrivateDirectChildStaging(t *
 	assertNoPlatformStaging(t, config.OutputDir)
 }
 
+func TestRunnerRejectsOutputRootReplacedWithSymlinkAfterNew(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "downloads")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(t)
+	config.OutputDir = outputDir
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	baseFactory := fakeCommandFactory("success", nil)
+	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+		started = true
+		return baseFactory(path, args, env)
+	}
+	if err := os.Rename(outputDir, filepath.Join(root, "owned-downloads")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(attackerDir, outputDir); err != nil {
+		t.Fatal(err)
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("根目录替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if started {
+		t.Fatal("runner started the platform process after output root replacement")
+	}
+	assertDirectoryEmpty(t, attackerDir)
+}
+
+func TestRunnerRejectsOutputRootReplacementDuringCopy(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "downloads")
+	ownedDir := filepath.Join(root, "owned-downloads")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(t)
+	config.OutputDir = outputDir
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.copyOutput = func(ctx context.Context, destination io.Writer, source io.Reader) error {
+		if err := copyWithContext(ctx, destination, source); err != nil {
+			return err
+		}
+		if err := os.Rename(outputDir, ownedDir); err != nil {
+			t.Fatalf("move output root during copy: %v", err)
+		}
+		if err := os.Symlink(attackerDir, outputDir); err != nil {
+			t.Fatalf("replace output root with symlink: %v", err)
+		}
+		return nil
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("复制根替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error without published path", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		t.Fatalf("replaced root produced published path %q", publishedPath)
+	}
+	assertDirectoryEmpty(t, attackerDir)
+	assertNoPublishedVideo(t, ownedDir)
+}
+
+func TestRunnerRejectsOutputRootReplacementDuringDeferredCleanup(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "downloads")
+	ownedDir := filepath.Join(root, "owned-downloads")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(t)
+	config.OutputDir = outputDir
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.beforeCleanupRemove = func(string) {
+		if err := os.Rename(outputDir, ownedDir); err != nil {
+			t.Fatalf("move output root during deferred cleanup: %v", err)
+		}
+		if err := os.Symlink(attackerDir, outputDir); err != nil {
+			t.Fatalf("replace output root during deferred cleanup: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("清理根替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error without a published path", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		t.Fatalf("replaced root produced published path %q", publishedPath)
+	}
+	assertDirectoryEmpty(t, attackerDir)
+	entries, readErr := os.ReadDir(ownedDir)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var published int
+	for _, entry := range entries {
+		if !strings.HasPrefix(entry.Name(), ".web-video-platform-") {
+			published++
+		}
+	}
+	if published != 1 {
+		t.Fatalf("published videos in moved owned root = %d, want 1", published)
+	}
+}
+
+func TestRunnerPreservesProcessFailureWhenOutputRootChangesDuringCleanup(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "downloads")
+	ownedDir := filepath.Join(root, "owned-downloads")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(t)
+	config.OutputDir = outputDir
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=generic failure"})
+	runner.beforeCleanupRemove = func(string) {
+		if err := os.Rename(outputDir, ownedDir); err != nil {
+			t.Fatalf("move output root during failure cleanup: %v", err)
+		}
+		if err := os.Symlink(attackerDir, outputDir); err != nil {
+			t.Fatalf("replace output root during failure cleanup: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("失败根替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want process and output errors", path, err)
+	}
+	assertRunnerCode(t, err, CodeProcess)
+	assertRunnerErrorChainContainsCode(t, err, CodeOutput)
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		t.Fatalf("failure after root replacement produced published path %q", publishedPath)
+	}
+	assertDirectoryEmpty(t, attackerDir)
+}
+
+func TestRunnerPreservesCancellationWithoutStalePublicationWhenRootChangesDuringCleanup(t *testing.T) {
+	root := t.TempDir()
+	outputDir := filepath.Join(root, "downloads")
+	ownedDir := filepath.Join(root, "owned-downloads")
+	attackerDir := filepath.Join(root, "attacker")
+	if err := os.Mkdir(outputDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(attackerDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	config := testConfig(t)
+	config.OutputDir = outputDir
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, reserveErr := output.ReserveAvailablePathAt(root, dir, base, extension)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		return &failingReservation{inner: reservation, onPublish: cancel}, nil
+	}
+	runner.beforeCleanupRemove = func(string) {
+		if err := os.Rename(outputDir, ownedDir); err != nil {
+			t.Fatalf("move output root during canceled cleanup: %v", err)
+		}
+		if err := os.Symlink(attackerDir, outputDir); err != nil {
+			t.Fatalf("replace output root during canceled cleanup: %v", err)
+		}
+	}
+
+	path, err := runner.Run(ctx, validRequest("取消根替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want canceled and output errors without a published path", path, err)
+	}
+	assertRunnerCode(t, err, CodeCanceled)
+	assertRunnerErrorChainContainsCode(t, err, CodeOutput)
+	if !errors.Is(err, context.Canceled) {
+		t.Fatalf("root replacement lost context.Canceled: %v", err)
+	}
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		t.Fatalf("root replacement retained stale published path %q", publishedPath)
+	}
+	assertDirectoryEmpty(t, attackerDir)
+}
+
 func TestRunnerReturnsCanceledWithoutStartingWhenContextAlreadyCanceled(t *testing.T) {
 	config := testConfig(t)
 	runner, err := New(config)
@@ -690,8 +997,8 @@ func (r *failingReservation) Release() error {
 	}
 	return r.inner.Release()
 }
-func (r *failingReservation) Publish() error {
-	if err := r.inner.Publish(); err != nil {
+func (r *failingReservation) PublishExpected(expectedSize int64) error {
+	if err := r.inner.PublishExpected(expectedSize); err != nil {
 		return err
 	}
 	if r.onPublish != nil {
@@ -708,8 +1015,8 @@ func TestRunnerReturnsPublishedCancellationWhenContextCancelsAfterPublish(t *tes
 	}
 	runner.commandFactory = fakeCommandFactory("success", nil)
 	ctx, cancel := context.WithCancel(context.Background())
-	runner.reserveOutput = func(dir, base, extension string) (outputReservation, error) {
-		reservation, err := output.ReserveAvailablePath(dir, base, extension)
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, err := output.ReserveAvailablePathAt(root, dir, base, extension)
 		if err != nil {
 			return nil, err
 		}
@@ -732,6 +1039,64 @@ func TestRunnerReturnsPublishedCancellationWhenContextCancelsAfterPublish(t *tes
 	assertNoPlatformStaging(t, config.OutputDir)
 }
 
+func TestRunnerRejectsSameSizeReplacementDuringPublish(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	var replacementPath string
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, err := output.ReserveAvailablePathAt(root, dir, base, extension)
+		if err != nil {
+			return nil, err
+		}
+		replacementPath = reservation.Path()
+		return &failingReservation{
+			inner: reservation,
+			onPublish: func() {
+				if err := os.Rename(replacementPath, replacementPath+".owned"); err != nil {
+					t.Fatalf("move owned published path: %v", err)
+				}
+				if err := os.WriteFile(replacementPath, []byte("video bytes"), 0o600); err != nil {
+					t.Fatalf("create same-size replacement: %v", err)
+				}
+			},
+		}, nil
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("发布替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error without a published path", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if publishedPath, ok := output.PublishedPath(err); ok {
+		t.Fatalf("unsafe replacement was reported as published: %q", publishedPath)
+	}
+	assertFileContents(t, replacementPath, "video bytes")
+}
+
+func TestRunnerRejectsShortSuccessfulCopy(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.copyOutput = func(_ context.Context, destination io.Writer, _ io.Reader) error {
+		_, err := destination.Write([]byte("short"))
+		return err
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("短复制"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	assertNoPublishedVideo(t, config.OutputDir)
+}
+
 func TestRunnerRemovesPartialReservationWhenReleaseReportsFailure(t *testing.T) {
 	config := testConfig(t)
 	runner, err := New(config)
@@ -740,8 +1105,8 @@ func TestRunnerRemovesPartialReservationWhenReleaseReportsFailure(t *testing.T) 
 	}
 	runner.commandFactory = fakeCommandFactory("success", nil)
 	var reservedPath string
-	runner.reserveOutput = func(dir, base, extension string) (outputReservation, error) {
-		reservation, err := output.ReserveAvailablePath(dir, base, extension)
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, err := output.ReserveAvailablePathAt(root, dir, base, extension)
 		if err != nil {
 			return nil, err
 		}
@@ -771,8 +1136,8 @@ func TestRunnerMarksCompletePathPublishedWhenPublishAndReleaseReportFailure(t *t
 		t.Fatal(err)
 	}
 	runner.commandFactory = fakeCommandFactory("success", nil)
-	runner.reserveOutput = func(dir, base, extension string) (outputReservation, error) {
-		reservation, err := output.ReserveAvailablePath(dir, base, extension)
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, err := output.ReserveAvailablePathAt(root, dir, base, extension)
 		if err != nil {
 			return nil, err
 		}
@@ -947,7 +1312,7 @@ func TestRunnerPublishesSingleVideoAndReportsMonotonicProgress(t *testing.T) {
 	if !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
 		t.Fatalf("published mode = %v, want regular 0600", info.Mode())
 	}
-	if want := []float64{10, 77.5}; !reflect.DeepEqual(progress, want) {
+	if want := []float64{4.95, 49.5, 51.975, 79.2, 99}; !reflect.DeepEqual(progress, want) {
 		t.Fatalf("progress = %#v, want %#v", progress, want)
 	}
 	assertNoPlatformStaging(t, config.OutputDir)
@@ -995,6 +1360,34 @@ func assertRunnerCode(t *testing.T, err error, want Code) {
 	}
 }
 
+func assertRunnerErrorChainContainsCode(t *testing.T, err error, want Code) {
+	t.Helper()
+	var walk func(error) bool
+	walk = func(current error) bool {
+		if current == nil {
+			return false
+		}
+		if runnerError, ok := current.(*Error); ok && runnerError.Code == want {
+			return true
+		}
+		if joined, ok := current.(interface{ Unwrap() []error }); ok {
+			for _, child := range joined.Unwrap() {
+				if walk(child) {
+					return true
+				}
+			}
+			return false
+		}
+		if wrapped, ok := current.(interface{ Unwrap() error }); ok {
+			return walk(wrapped.Unwrap())
+		}
+		return false
+	}
+	if !walk(err) {
+		t.Fatalf("error chain %v does not contain code %q", err, want)
+	}
+}
+
 func assertNoPublishedVideo(t *testing.T, outputDir string) {
 	t.Helper()
 	entries, err := os.ReadDir(outputDir)
@@ -1019,6 +1412,17 @@ func assertFileContents(t *testing.T, path, want string) {
 	}
 }
 
+func assertDirectoryEmpty(t *testing.T, path string) {
+	t.Helper()
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(entries) != 0 {
+		t.Fatalf("directory %q is not empty: %#v", path, entries)
+	}
+}
+
 func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
@@ -1037,17 +1441,11 @@ func waitForPIDFile(t *testing.T, path string) int {
 	return 0
 }
 
-func waitForProcessGone(t *testing.T, pid int) {
+func assertProcessGone(t *testing.T, pid int) {
 	t.Helper()
-	deadline := time.Now().Add(2 * time.Second)
-	for time.Now().Before(deadline) {
-		err := syscall.Kill(pid, 0)
-		if errors.Is(err, syscall.ESRCH) {
-			return
-		}
-		time.Sleep(10 * time.Millisecond)
+	if err := syscall.Kill(pid, 0); !errors.Is(err, syscall.ESRCH) {
+		t.Fatalf("process %d still exists after Run returned: %v", pid, err)
 	}
-	t.Fatalf("process %d still exists after cancellation", pid)
 }
 
 func TestBuildArgsUsesExactQualitySelectors(t *testing.T) {
@@ -1116,7 +1514,7 @@ func TestBuildArgsUsesOnlyFixedSafeArgumentArray(t *testing.T) {
 		"--newline",
 		"--no-colors",
 		"--progress",
-		"--progress-template", "download:WVH_PROGRESS:%(progress._percent_str)s",
+		"--progress-template", "download:WVH_PROGRESS:%(info.format_id)#j\t%(progress._percent_str)s",
 		"--merge-output-format", "mp4/mkv",
 		"--ffmpeg-location", runner.ffmpegPath,
 		"--paths", "home:" + stagingDir,
@@ -1210,18 +1608,18 @@ func TestParseProgressAcceptsPrefixWhitespaceDecimalsAndPercentSign(t *testing.T
 		line string
 		want float64
 	}{
-		{line: "WVH_PROGRESS:42", want: 42},
-		{line: "WVH_PROGRESS: 42.5%", want: 42.5},
-		{line: "WVH_PROGRESS:\t 7.25 % \t", want: 7.25},
-		{line: "WVH_PROGRESS:-10%", want: 0},
-		{line: "WVH_PROGRESS:100%", want: 99},
-		{line: "WVH_PROGRESS:999.5%", want: 99},
+		{line: "WVH_PROGRESS:\"format-1\"\t42", want: 20.79},
+		{line: "WVH_PROGRESS:\"format-1\"\t 42.5%", want: 21.0375},
+		{line: "WVH_PROGRESS:\"format-1\"\t 7.25 % ", want: 3.58875},
+		{line: "WVH_PROGRESS:\"format-1\"\t-10%", want: 0},
+		{line: "WVH_PROGRESS:\"format-1\"\t100%", want: 49.5},
+		{line: "WVH_PROGRESS:\"format-1\"\t999.5%", want: 49.5},
 	}
 
 	for _, test := range tests {
 		t.Run(test.line, func(t *testing.T) {
 			got, ok := parseProgressLine(test.line, progressState{})
-			if !ok || !got.hasPrevious || got.percent != test.want {
+			if !ok || !got.hasPrevious || math.Abs(got.percent-test.want) > 1e-9 {
 				t.Fatalf("parseProgressLine(%q) = (%#v, %v), want percent %v", test.line, got, ok, test.want)
 			}
 		})
@@ -1232,12 +1630,12 @@ func TestProgressParsingIsMonotonic(t *testing.T) {
 	state := progressState{}
 	var reported []float64
 	for _, line := range []string{
-		"WVH_PROGRESS:10%",
-		"WVH_PROGRESS:8%",
-		"WVH_PROGRESS:10%",
-		"WVH_PROGRESS:63.4%",
-		"WVH_PROGRESS:101%",
-		"WVH_PROGRESS:80%",
+		"WVH_PROGRESS:\"format-1\"\t10%",
+		"WVH_PROGRESS:\"format-1\"\t8%",
+		"WVH_PROGRESS:\"format-1\"\t10%",
+		"WVH_PROGRESS:\"format-1\"\t63.4%",
+		"WVH_PROGRESS:\"format-1\"\t101%",
+		"WVH_PROGRESS:\"format-1\"\t80%",
 	} {
 		next, ok := parseProgressLine(line, state)
 		if !ok {
@@ -1247,20 +1645,61 @@ func TestProgressParsingIsMonotonic(t *testing.T) {
 		reported = append(reported, next.percent)
 	}
 
-	want := []float64{10, 63.4, 99}
+	want := []float64{4.95, 31.383, 49.5}
 	if !reflect.DeepEqual(reported, want) {
 		t.Fatalf("reported progress = %#v, want %#v", reported, want)
+	}
+}
+
+func TestProgressParsingMapsTwoControlledStreamsMonotonically(t *testing.T) {
+	lines := []string{
+		"WVH_PROGRESS:\"video-137\"\t10%",
+		"WVH_PROGRESS:\"video-137\"\t100%",
+		"WVH_PROGRESS:\"audio-140\"\t5%",
+		"WVH_PROGRESS:\"audio-140\"\t60%",
+		"WVH_PROGRESS:\"audio-140\"\t100%",
+	}
+	want := []float64{4.95, 49.5, 51.975, 79.2, 99}
+	state := progressState{}
+	var reported []float64
+	for _, line := range lines {
+		next, ok := parseProgressLine(line, state)
+		if !ok {
+			t.Fatalf("parseProgressLine(%q) was ignored", line)
+		}
+		state = next
+		reported = append(reported, next.percent)
+	}
+	if !reflect.DeepEqual(reported, want) {
+		t.Fatalf("two-stream progress = %#v, want %#v", reported, want)
+	}
+	for index, percent := range reported {
+		if percent > 99 || index > 0 && percent < reported[index-1] {
+			t.Fatalf("progress is not monotonic and bounded: %#v", reported)
+		}
+	}
+}
+
+func TestBuildArgsUsesJSONEscapedControlledStreamProgressTemplate(t *testing.T) {
+	runner, stagingDir := newTestRunner(t)
+	args, err := runner.buildArgs(validRequest("双流进度"), stagingDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "download:WVH_PROGRESS:%(info.format_id)#j\t%(progress._percent_str)s"
+	if got := helperValueAfter(args, "--progress-template"); got != want {
+		t.Fatalf("progress template = %q, want %q", got, want)
 	}
 }
 
 func TestProgressParsingReportsInitialZeroOnlyOnce(t *testing.T) {
 	state := progressState{}
 
-	first, ok := parseProgressLine("WVH_PROGRESS:0%", state)
+	first, ok := parseProgressLine("WVH_PROGRESS:\"format-1\"\t0%", state)
 	if !ok || !first.hasPrevious || first.percent != 0 {
 		t.Fatalf("first zero progress = (%#v, %v), want reported zero", first, ok)
 	}
-	second, ok := parseProgressLine("WVH_PROGRESS:0.0%", first)
+	second, ok := parseProgressLine("WVH_PROGRESS:\"format-1\"\t0.0%", first)
 	if ok || second != first {
 		t.Fatalf("repeated zero progress = (%#v, %v), want unchanged and ignored", second, ok)
 	}
@@ -1280,6 +1719,9 @@ func TestParseProgressIgnoresUntrustedMalformedAndNonFiniteLines(t *testing.T) {
 		"WVH_PROGRESS:12%%",
 		"WVH_PROGRESS:1 2%",
 		"WVH_PROGRESS:42% trailing",
+		"WVH_PROGRESS:\"video\"\tNaN%",
+		"WVH_PROGRESS:\"bad\\nid\"\t42%",
+		"WVH_PROGRESS:\"../../../\"\t42%",
 	}
 
 	for _, line := range tests {
@@ -1295,15 +1737,16 @@ func TestParseProgressIgnoresUntrustedMalformedAndNonFiniteLines(t *testing.T) {
 
 func TestParseProgressEnforcesMaximumLineLengthBoundary(t *testing.T) {
 	prefix := "WVH_PROGRESS:"
+	stream := "\"format-1\"\t"
 	value := "42%"
-	atLimit := prefix + strings.Repeat(" ", maxProgressLineBytes-len(prefix)-len(value)) + value
+	atLimit := prefix + stream + strings.Repeat(" ", maxProgressLineBytes-len(prefix)-len(stream)-len(value)) + value
 	overLimit := atLimit + " "
 
 	if len(atLimit) != maxProgressLineBytes {
 		t.Fatalf("test line length = %d, want %d", len(atLimit), maxProgressLineBytes)
 	}
-	if got, ok := parseProgressLine(atLimit, progressState{}); !ok || !got.hasPrevious || got.percent != 42 {
-		t.Fatalf("at-limit progress = (%#v, %v), want reported 42", got, ok)
+	if got, ok := parseProgressLine(atLimit, progressState{}); !ok || !got.hasPrevious || got.percent != 20.79 {
+		t.Fatalf("at-limit progress = (%#v, %v), want reported 20.79", got, ok)
 	}
 	previous := progressState{percent: 17, hasPrevious: true}
 	if got, ok := parseProgressLine(overLimit, previous); ok || got != previous {
@@ -1314,7 +1757,7 @@ func TestParseProgressEnforcesMaximumLineLengthBoundary(t *testing.T) {
 func TestParseProgressRejectsNonFinitePreviousValue(t *testing.T) {
 	for _, previous := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
 		state := progressState{percent: previous, hasPrevious: true}
-		got, ok := parseProgressLine("WVH_PROGRESS:50%", state)
+		got, ok := parseProgressLine("WVH_PROGRESS:\"format-1\"\t50%", state)
 		if ok || !math.IsNaN(got.percent) && !math.IsInf(got.percent, 0) {
 			t.Fatalf("non-finite previous value was accepted: (%#v, %v)", got, ok)
 		}

@@ -177,6 +177,87 @@ func TestReservationPublishAndRelease(t *testing.T) {
 	}
 }
 
+func TestReservationPublishRejectsUnsafeFinalPathState(t *testing.T) {
+	tests := []struct {
+		name    string
+		replace func(*testing.T, *Reservation)
+	}{
+		{
+			name: "same-size regular replacement",
+			replace: func(t *testing.T, reservation *Reservation) {
+				moved := reservation.Path() + ".owned"
+				if err := os.Rename(reservation.Path(), moved); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.WriteFile(reservation.Path(), []byte("video"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "symbolic link replacement",
+			replace: func(t *testing.T, reservation *Reservation) {
+				target := filepath.Join(filepath.Dir(reservation.Path()), "target.txt")
+				if err := os.WriteFile(target, []byte("video"), 0o600); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(reservation.Path()); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Symlink(target, reservation.Path()); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "world-readable owned file",
+			replace: func(t *testing.T, reservation *Reservation) {
+				if err := os.Chmod(reservation.Path(), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			reservation, err := ReserveAvailablePath(t.TempDir(), "发布复核", ".mp4")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := reservation.File().Write([]byte("video")); err != nil {
+				t.Fatal(err)
+			}
+			test.replace(t, reservation)
+
+			if err := reservation.Publish(); err == nil {
+				t.Fatal("Publish() accepted an unsafe final path state")
+			}
+		})
+	}
+}
+
+func TestReservationReleaseClosesDirectoryWhenOwnedFileIsAlreadyClosed(t *testing.T) {
+	reservation, err := ReserveAvailablePath(t.TempDir(), "关闭失败", ".mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	directory := reservation.directory
+	if err := reservation.File().Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := reservation.Release(); err == nil {
+		t.Fatal("Release() succeeded after the owned file was already closed")
+	}
+	if _, err := directory.Stat(); !errors.Is(err, os.ErrClosed) {
+		t.Fatalf("reservation directory remains open after Release() failure: %v", err)
+	}
+	if !reservation.finalized {
+		t.Fatal("Release() failure did not finalize the reservation")
+	}
+}
+
 func TestPublishedErrorCarriesOwnershipWithoutLeakingPathInMessage(t *testing.T) {
 	path := "/Users/example/Downloads/private-title.mp4"
 	cause := errors.New("cleanup failed")

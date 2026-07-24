@@ -8,6 +8,8 @@ import (
 	"strings"
 	"sync"
 	"unicode"
+
+	"golang.org/x/sys/unix"
 )
 
 // Eighty CJK runes plus an extension and collision suffix remain below the
@@ -33,8 +35,10 @@ var errReservationFinalized = errors.New("output reservation is already finalize
 // or released. Write through File so no path lookup can replace the reserved
 // file before publication.
 type Reservation struct {
-	path string
-	file *os.File
+	path      string
+	name      string
+	file      *os.File
+	directory *os.File
 
 	mu        sync.Mutex
 	finalized bool
@@ -50,6 +54,19 @@ func (r *Reservation) File() *os.File {
 
 // Publish synchronizes and closes the reserved file, leaving it at Path.
 func (r *Reservation) Publish() error {
+	return r.publishExpected(-1)
+}
+
+// PublishExpected publishes only when the private owned file has exactly the
+// expected size and still occupies its fd-relative reserved directory entry.
+func (r *Reservation) PublishExpected(expectedSize int64) error {
+	if expectedSize < 0 {
+		return errors.New("expected published size is invalid")
+	}
+	return r.publishExpected(expectedSize)
+}
+
+func (r *Reservation) publishExpected(expectedSize int64) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if r.finalized {
@@ -58,12 +75,41 @@ func (r *Reservation) Publish() error {
 	if err := r.file.Sync(); err != nil {
 		return fmt.Errorf("sync reserved output: %w", err)
 	}
-	err := r.file.Close()
+	openedInfo, err := r.file.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect open reservation: %w", err)
+	}
+	pathInfo, err := r.inspectPath()
+	if err != nil {
+		return fmt.Errorf("inspect reserved output path: %w", err)
+	}
+	if !validPublishedReservation(openedInfo, pathInfo, expectedSize) {
+		return errors.New("reserved output path is not the private owned file")
+	}
+	err = r.file.Close()
 	r.finalized = true
 	if err != nil {
-		return fmt.Errorf("close reserved output: %w", err)
+		return errors.Join(fmt.Errorf("close reserved output: %w", err), r.closeDirectory())
 	}
-	return nil
+	pathInfo, err = r.inspectPath()
+	if err != nil {
+		return errors.Join(fmt.Errorf("reinspect published output path: %w", err), r.closeDirectory())
+	}
+	if !validPublishedReservation(openedInfo, pathInfo, expectedSize) {
+		return errors.Join(errors.New("published output path no longer names the private owned file"), r.closeDirectory())
+	}
+	return r.closeDirectory()
+}
+
+func validPublishedReservation(openedInfo, pathInfo os.FileInfo, expectedSize int64) bool {
+	sizeMatches := openedInfo != nil && pathInfo != nil && openedInfo.Size() == pathInfo.Size()
+	if expectedSize >= 0 {
+		sizeMatches = sizeMatches && openedInfo.Size() == expectedSize
+	}
+	return openedInfo != nil && pathInfo != nil &&
+		openedInfo.Mode().IsRegular() && pathInfo.Mode().IsRegular() &&
+		openedInfo.Mode().Perm() == 0o600 && pathInfo.Mode().Perm() == 0o600 &&
+		sizeMatches && os.SameFile(openedInfo, pathInfo)
 }
 
 // Release closes and removes an unpublished reservation. It refuses to remove
@@ -77,25 +123,31 @@ func (r *Reservation) Release() error {
 
 	openedInfo, err := r.file.Stat()
 	if err != nil {
-		return fmt.Errorf("inspect open reservation: %w", err)
+		closeErr := r.file.Close()
+		directoryErr := r.closeDirectory()
+		r.finalized = true
+		return errors.Join(fmt.Errorf("inspect open reservation: %w", err), closeErr, directoryErr)
 	}
-	pathInfo, err := os.Lstat(r.path)
+	pathInfo, err := r.inspectPath()
 	if err != nil {
 		closeErr := r.file.Close()
+		directoryErr := r.closeDirectory()
 		r.finalized = true
 		if errors.Is(err, os.ErrNotExist) {
-			return closeErr
+			return errors.Join(closeErr, directoryErr)
 		}
-		return errors.Join(fmt.Errorf("inspect reserved output path: %w", err), closeErr)
+		return errors.Join(fmt.Errorf("inspect reserved output path: %w", err), closeErr, directoryErr)
 	}
 	if !os.SameFile(openedInfo, pathInfo) {
 		closeErr := r.file.Close()
+		directoryErr := r.closeDirectory()
 		r.finalized = true
-		return errors.Join(errors.New("reserved output path no longer names the owned file"), closeErr)
+		return errors.Join(errors.New("reserved output path no longer names the owned file"), closeErr, directoryErr)
 	}
 
-	removeErr := os.Remove(r.path)
+	removeErr := r.removePath()
 	closeErr := r.file.Close()
+	directoryErr := r.closeDirectory()
 	r.finalized = true
 	if removeErr != nil {
 		removeErr = fmt.Errorf("remove reserved output: %w", removeErr)
@@ -103,7 +155,45 @@ func (r *Reservation) Release() error {
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close reserved output: %w", closeErr)
 	}
-	return errors.Join(removeErr, closeErr)
+	return errors.Join(removeErr, closeErr, directoryErr)
+}
+
+func (r *Reservation) inspectPath() (os.FileInfo, error) {
+	if r.directory == nil {
+		return os.Lstat(r.path)
+	}
+	fd, err := unix.Openat(
+		int(r.directory.Fd()),
+		r.name,
+		unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), r.name)
+	if file == nil {
+		_ = unix.Close(fd)
+		return nil, errors.New("open reserved output path")
+	}
+	defer file.Close()
+	return file.Stat()
+}
+
+func (r *Reservation) removePath() error {
+	if r.directory == nil {
+		return os.Remove(r.path)
+	}
+	return unix.Unlinkat(int(r.directory.Fd()), r.name, 0)
+}
+
+func (r *Reservation) closeDirectory() error {
+	if r.directory == nil {
+		return nil
+	}
+	err := r.directory.Close()
+	r.directory = nil
+	return err
 }
 
 // SanitizeBaseName produces a readable single path component while preserving
@@ -172,12 +262,46 @@ func ReserveAvailablePath(dir, base, ext string) (*Reservation, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolve output directory: %w", err)
 	}
-	info, err := os.Stat(absDir)
+	directory, err := os.OpenFile(absDir, os.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW, 0)
 	if err != nil {
-		return nil, fmt.Errorf("inspect output directory: %w", err)
+		return nil, fmt.Errorf("open output directory: %w", err)
 	}
-	if !info.IsDir() {
-		return nil, errors.New("output path is not a directory")
+	defer directory.Close()
+	return ReserveAvailablePathAt(directory, absDir, base, cleanExt)
+}
+
+// ReserveAvailablePathAt atomically reserves a unique 0600 output below a
+// pinned directory handle. dir is used only as the display path returned by
+// Reservation.Path and must still name directory when the reservation starts.
+func ReserveAvailablePathAt(directory *os.File, dir, base, ext string) (*Reservation, error) {
+	cleanExt, err := normalizeExtension(ext)
+	if err != nil {
+		return nil, err
+	}
+	if directory == nil {
+		return nil, errors.New("output directory handle is missing")
+	}
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return nil, fmt.Errorf("resolve output directory: %w", err)
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil || !openedInfo.IsDir() {
+		return nil, errors.New("output directory handle is invalid")
+	}
+	pathInfo, err := os.Lstat(absDir)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(openedInfo, pathInfo) {
+		return nil, errors.New("output path no longer names the pinned directory")
+	}
+	ownedDirectoryFD, err := unix.Dup(int(directory.Fd()))
+	if err != nil {
+		return nil, fmt.Errorf("duplicate output directory handle: %w", err)
+	}
+	unix.CloseOnExec(ownedDirectoryFD)
+	ownedDirectory := os.NewFile(uintptr(ownedDirectoryFD), filepath.Base(absDir))
+	if ownedDirectory == nil {
+		_ = unix.Close(ownedDirectoryFD)
+		return nil, errors.New("duplicate output directory handle")
 	}
 
 	cleanBase := SanitizeBaseName(base)
@@ -196,13 +320,26 @@ func ReserveAvailablePath(dir, base, ext string) (*Reservation, error) {
 			return nil, errors.New("output path escapes output directory")
 		}
 
-		file, err := os.OpenFile(candidate, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+		candidateName := filepath.Base(candidate)
+		fd, err := unix.Openat(
+			int(ownedDirectory.Fd()),
+			candidateName,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+			0o600,
+		)
 		switch {
 		case err == nil:
-			return &Reservation{path: candidate, file: file}, nil
+			file := os.NewFile(uintptr(fd), candidateName)
+			if file == nil {
+				_ = unix.Close(fd)
+				_ = ownedDirectory.Close()
+				return nil, errors.New("open reserved output")
+			}
+			return &Reservation{path: candidate, name: candidateName, file: file, directory: ownedDirectory}, nil
 		case errors.Is(err, os.ErrExist):
 			continue
 		default:
+			_ = ownedDirectory.Close()
 			return nil, fmt.Errorf("reserve output path: %w", err)
 		}
 	}
