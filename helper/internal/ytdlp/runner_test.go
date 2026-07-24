@@ -18,6 +18,8 @@ import (
 	"testing"
 	"time"
 
+	"golang.org/x/sys/unix"
+
 	"web-video-harbor/helper/internal/output"
 )
 
@@ -61,16 +63,55 @@ func TestYTDLPHelperProcess(t *testing.T) {
 		os.Exit(1)
 	case "late-diagnostic-parent":
 		fmt.Fprintln(os.Stderr, "generic parent failure")
+		exitReader, exitWriter, err := os.Pipe()
+		if err != nil {
+			os.Exit(3)
+		}
+		readyReader, readyWriter, err := os.Pipe()
+		if err != nil {
+			_ = exitReader.Close()
+			_ = exitWriter.Close()
+			os.Exit(3)
+		}
 		child := exec.Command(os.Args[0], "-test.run=^TestYTDLPHelperProcess$")
 		child.Env = append(os.Environ(), "WVH_FAKE_YTDLP=1", "WVH_FAKE_MODE=late-diagnostic-leaf")
 		child.Stdout = os.Stdout
 		child.Stderr = os.Stderr
+		child.ExtraFiles = []*os.File{exitReader, readyWriter}
 		if err := child.Start(); err != nil {
+			_ = exitReader.Close()
+			_ = exitWriter.Close()
+			_ = readyReader.Close()
+			_ = readyWriter.Close()
 			os.Exit(3)
 		}
+		_ = exitReader.Close()
+		_ = readyWriter.Close()
+		defer exitWriter.Close()
+		var ready [1]byte
+		if _, err := io.ReadFull(readyReader, ready[:]); err != nil {
+			_ = readyReader.Close()
+			os.Exit(3)
+		}
+		_ = readyReader.Close()
 		os.Exit(1)
 	case "late-diagnostic-leaf":
-		time.Sleep(150 * time.Millisecond)
+		exitReader := os.NewFile(3, "parent-exit")
+		readyWriter := os.NewFile(4, "child-ready")
+		if exitReader == nil || readyWriter == nil {
+			os.Exit(3)
+		}
+		if _, err := readyWriter.Write([]byte{1}); err != nil {
+			os.Exit(3)
+		}
+		if err := readyWriter.Close(); err != nil {
+			os.Exit(3)
+		}
+		var signal [1]byte
+		if _, err := exitReader.Read(signal[:]); !errors.Is(err, io.EOF) {
+			os.Exit(3)
+		}
+		_ = exitReader.Close()
 		fmt.Fprintln(os.Stderr, "ERROR: Sign in to continue")
 		os.Exit(0)
 	case "tail-eviction":
@@ -132,8 +173,12 @@ func TestYTDLPHelperProcess(t *testing.T) {
 			}
 			time.Sleep(5 * time.Millisecond)
 		}
-		_ = os.WriteFile(filepath.Join(markerDir, "parent.pid"), []byte(fmt.Sprint(os.Getpid())), 0o600)
-		_ = os.WriteFile(filepath.Join(markerDir, "child.pid"), []byte(fmt.Sprint(child.Process.Pid)), 0o600)
+		if err := writePIDMarker(filepath.Join(markerDir, "parent.pid"), os.Getpid()); err != nil {
+			os.Exit(4)
+		}
+		if err := writePIDMarker(filepath.Join(markerDir, "child.pid"), child.Process.Pid); err != nil {
+			os.Exit(4)
+		}
 		_ = child.Wait()
 		os.Exit(0)
 	case "cancel-leaf":
@@ -147,10 +192,45 @@ func TestYTDLPHelperProcess(t *testing.T) {
 			_ = os.WriteFile(filepath.Join(markerDir, "leaf.term"), []byte("term"), 0o600)
 		}()
 		select {}
+	case "escaped-pipe-holder-parent":
+		markerDir := os.Getenv("WVH_FAKE_MARKER_DIR")
+		child := exec.Command(os.Args[0], "-test.run=^TestYTDLPHelperProcess$")
+		child.Env = append(os.Environ(), "WVH_FAKE_YTDLP=1", "WVH_FAKE_MODE=escaped-pipe-holder-leaf")
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		child.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if err := writePIDMarker(filepath.Join(markerDir, "escaped.pid"), child.Process.Pid); err != nil {
+			os.Exit(4)
+		}
+		select {}
+	case "escaped-pipe-holder-leaf":
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
 	default:
 		fmt.Fprintln(os.Stderr, "fake helper mode is invalid")
 		os.Exit(2)
 	}
+}
+
+func writePIDMarker(path string, pid int) error {
+	if pid <= 0 {
+		return errors.New("pid marker value is invalid")
+	}
+	temporary, err := os.CreateTemp(filepath.Dir(path), "."+filepath.Base(path)+".tmp-")
+	if err != nil {
+		return err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	_, writeErr := temporary.WriteString(strconv.Itoa(pid))
+	closeErr := temporary.Close()
+	if writeErr != nil || closeErr != nil {
+		return errors.Join(writeErr, closeErr)
+	}
+	return os.Rename(temporaryPath, path)
 }
 
 func TestRunnerCancellationTerminatesProcessGroupAndCleansStaging(t *testing.T) {
@@ -185,6 +265,41 @@ func TestRunnerCancellationTerminatesProcessGroupAndCleansStaging(t *testing.T) 
 	assertProcessGone(t, childPID)
 	assertFileContents(t, filepath.Join(markerDir, "parent.term"), "term")
 	assertFileContents(t, filepath.Join(markerDir, "leaf.term"), "term")
+	assertNoPlatformStaging(t, config.OutputDir)
+}
+
+func TestRunnerCancellationBoundsDrainFromEscapedDescendant(t *testing.T) {
+	config := testConfig(t)
+	markerDir := t.TempDir()
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("escaped-pipe-holder-parent", []string{"WVH_FAKE_MARKER_DIR=" + markerDir})
+	ctx, cancel := context.WithCancel(context.Background())
+	result := make(chan error, 1)
+	go func() {
+		_, runErr := runner.Run(ctx, validRequest("逃逸后代取消"))
+		result <- runErr
+	}()
+
+	escapedPID := waitForPIDFile(t, filepath.Join(markerDir, "escaped.pid"))
+	t.Cleanup(func() { _ = syscall.Kill(escapedPID, syscall.SIGKILL) })
+	cancel()
+	select {
+	case err := <-result:
+		assertRunnerCode(t, err, CodeCanceled)
+		if !errors.Is(err, context.Canceled) {
+			t.Fatalf("cancellation error does not wrap context.Canceled: %v", err)
+		}
+	case <-time.After(1 * time.Second):
+		_ = syscall.Kill(escapedPID, syscall.SIGKILL)
+		select {
+		case <-result:
+		case <-time.After(3 * time.Second):
+		}
+		t.Fatal("Run() waited without bound for an escaped descendant to close inherited output pipes")
+	}
 	assertNoPlatformStaging(t, config.OutputDir)
 }
 
@@ -326,16 +441,10 @@ func TestRunnerWaitsForLateDiagnosticWriterBeforeClassifying(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.commandFactory = fakeCommandFactory("late-diagnostic-parent", nil)
-	started := time.Now()
 	_, err = runner.Run(context.Background(), validRequest("等待诊断"))
-	elapsed := time.Since(started)
 	var runnerError *Error
 	if !errors.As(err, &runnerError) || runnerError.Code != CodeLoginRequired {
-		time.Sleep(250 * time.Millisecond)
-		t.Fatalf("error = %#v after %v, want late login diagnostic", err, elapsed)
-	}
-	if elapsed < 100*time.Millisecond {
-		t.Fatalf("Run() returned before late diagnostic writer finished: %v", elapsed)
+		t.Fatalf("error = %#v, want diagnostic written only after parent exit", err)
 	}
 	assertNoPlatformStaging(t, config.OutputDir)
 }
@@ -510,7 +619,6 @@ func TestRunnerDoesNotRecursivelyDeleteReplacedQuarantineRoot(t *testing.T) {
 		t.Fatal(err)
 	}
 	runner.commandFactory = fakeCommandFactory("success", nil)
-	var replacementMarker string
 	runner.beforeCleanupRemove = func(path string) {
 		moved := path + ".owned-moved"
 		if err := os.Rename(path, moved); err != nil {
@@ -519,8 +627,7 @@ func TestRunnerDoesNotRecursivelyDeleteReplacedQuarantineRoot(t *testing.T) {
 		if err := os.Mkdir(path, 0o700); err != nil {
 			t.Fatalf("create replacement quarantine root: %v", err)
 		}
-		replacementMarker = filepath.Join(path, "must-survive.txt")
-		if err := os.WriteFile(replacementMarker, []byte("replacement"), 0o600); err != nil {
+		if err := os.WriteFile(filepath.Join(path, "must-survive.txt"), []byte("replacement"), 0o600); err != nil {
 			t.Fatalf("write quarantine replacement marker: %v", err)
 		}
 	}
@@ -532,7 +639,473 @@ func TestRunnerDoesNotRecursivelyDeleteReplacedQuarantineRoot(t *testing.T) {
 	if publishedPath, ok := output.PublishedPath(err); !ok || publishedPath != path {
 		t.Fatalf("PublishedPath() = (%q, %t), want %q, true", publishedPath, ok, path)
 	}
-	assertFileContents(t, replacementMarker, "replacement")
+	if !treeContainsFileContents(t, config.OutputDir, "replacement") {
+		t.Fatal("cleanup lost the replacement quarantine contents while isolating it")
+	}
+}
+
+func TestRunnerPreservesEmptyReplacementOfQuarantineRootBeforeFinalRemoval(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	var replacementInfo os.FileInfo
+	runner.beforeCleanupRemove = func(path string) {
+		if err := os.Rename(path, path+".owned-moved"); err != nil {
+			t.Fatalf("move quarantine root before final removal: %v", err)
+		}
+		if err := os.Mkdir(path, 0o700); err != nil {
+			t.Fatalf("create empty quarantine replacement: %v", err)
+		}
+		replacementInfo, err = os.Lstat(path)
+		if err != nil {
+			t.Fatalf("inspect empty quarantine replacement: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("空根替换"))
+	if path == "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want published path plus cleanup warning", path, err)
+	}
+	if publishedPath, ok := output.PublishedPath(err); !ok || publishedPath != path {
+		t.Fatalf("PublishedPath() = (%q, %t), want %q, true", publishedPath, ok, path)
+	}
+	if !treeContainsSameFile(t, config.OutputDir, replacementInfo) {
+		t.Fatal("final cleanup deleted the empty replacement quarantine inode")
+	}
+}
+
+func TestRunnerPreservesReplacementOfFinalRootCleanupGuard(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	var replacementInfo os.FileInfo
+	runner.beforeCleanupGuardRemove = func(parent *os.File, name string) {
+		if replacementInfo != nil || !strings.HasPrefix(name, ".web-video-platform-root-cleanup-") {
+			return
+		}
+		if err := unix.Renameat(int(parent.Fd()), name, int(parent.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move final root cleanup guard: %v", err)
+		}
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			t.Fatalf("create final root cleanup replacement: %v", err)
+		}
+		fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatalf("open final root cleanup replacement: %v", err)
+		}
+		replacement := os.NewFile(uintptr(fd), name)
+		if replacement == nil {
+			_ = unix.Close(fd)
+			t.Fatal("wrap final root cleanup replacement")
+		}
+		replacementInfo, err = replacement.Stat()
+		if closeErr := replacement.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("inspect final root cleanup replacement: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("最终根隔离"))
+	if path == "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want published path plus cleanup warning", path, err)
+	}
+	if publishedPath, ok := output.PublishedPath(err); !ok || publishedPath != path {
+		t.Fatalf("PublishedPath() = (%q, %t), want %q, true", publishedPath, ok, path)
+	}
+	if !treeContainsSameFile(t, config.OutputDir, replacementInfo) {
+		t.Fatal("cleanup deleted the replacement final root guard inode")
+	}
+}
+
+func TestRunnerPreservesReplacementOfRecursiveCleanupGuard(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	var replacementInfo os.FileInfo
+	runner.beforeCleanupGuardRemove = func(parent *os.File, name string) {
+		if replacementInfo != nil || parent.Name() != "owned-staging" ||
+			!strings.HasPrefix(name, ".web-video-platform-entry-cleanup-") {
+			return
+		}
+		if err := unix.Renameat(int(parent.Fd()), name, int(parent.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move recursive cleanup guard: %v", err)
+		}
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			t.Fatalf("create recursive cleanup guard replacement: %v", err)
+		}
+		fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatalf("open recursive cleanup guard replacement: %v", err)
+		}
+		replacement := os.NewFile(uintptr(fd), name)
+		if replacement == nil {
+			_ = unix.Close(fd)
+			t.Fatal("wrap recursive cleanup guard replacement")
+		}
+		replacementInfo, err = replacement.Stat()
+		if closeErr := replacement.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("inspect recursive cleanup guard replacement: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("递归隔离目录"))
+	if path == "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want published path plus cleanup warning", path, err)
+	}
+	if publishedPath, ok := output.PublishedPath(err); !ok || publishedPath != path {
+		t.Fatalf("PublishedPath() = (%q, %t), want %q, true", publishedPath, ok, path)
+	}
+	if !treeContainsSameFile(t, config.OutputDir, replacementInfo) {
+		t.Fatal("cleanup deleted the replacement recursive guard inode")
+	}
+}
+
+func TestRunnerPreservesReplacementRacedBeforeRecursiveEntryIsolation(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	replaced := false
+	runner.beforeCleanupEntryIsolation = func(directory *os.File, name string) {
+		if replaced || filepath.Ext(name) != ".mp4" {
+			return
+		}
+		replaced = true
+		if err := unix.Renameat(int(directory.Fd()), name, int(directory.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move validated cleanup entry: %v", err)
+		}
+		fd, err := unix.Openat(
+			int(directory.Fd()),
+			name,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+			0o600,
+		)
+		if err != nil {
+			t.Fatalf("create cleanup replacement: %v", err)
+		}
+		replacement := os.NewFile(uintptr(fd), name)
+		if replacement == nil {
+			_ = unix.Close(fd)
+			t.Fatal("wrap cleanup replacement")
+		}
+		if _, err := replacement.Write([]byte("recursive replacement")); err != nil {
+			t.Fatal(err)
+		}
+		if err := replacement.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("递归项替换"))
+	if path == "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want published path plus cleanup warning", path, err)
+	}
+	if !treeContainsFileContents(t, config.OutputDir, "recursive replacement") {
+		t.Fatal("recursive cleanup deleted the replacement raced in before entry isolation")
+	}
+}
+
+func TestRecursiveCleanupPreservesReplacementAfterEntryIsolation(t *testing.T) {
+	rootPath := t.TempDir()
+	ownedPath := filepath.Join(rootPath, "owned-dir")
+	if err := os.Mkdir(ownedPath, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(ownedPath, "owned.txt"), []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var replacementInfo os.FileInfo
+	afterIsolation := func(parent *os.File, name string) {
+		if replacementInfo != nil || name != "isolated-entry" {
+			return
+		}
+		replacementInfo = replaceIsolatedDirectoryEntry(t, parent, name, "replacement-after-isolation")
+	}
+
+	err = removeDirectoryContentsWithHook(root, nil, afterIsolation, nil)
+	if err == nil {
+		t.Fatal("recursive cleanup reported success after the isolated directory was replaced")
+	}
+	if replacementInfo == nil {
+		t.Fatal("recursive cleanup did not exercise the post-isolation replacement")
+	}
+	if !treeContainsSameFile(t, rootPath, replacementInfo) {
+		t.Fatal("recursive cleanup deleted the replacement directory opened after isolation")
+	}
+	if !treeContainsFileContents(t, rootPath, "replacement-after-isolation") {
+		t.Fatal("recursive cleanup deleted contents of the replacement opened after isolation")
+	}
+}
+
+func TestRecursiveCleanupPreservesReplacementBeforeFinalDirectoryRemove(t *testing.T) {
+	rootPath := t.TempDir()
+	if err := os.Mkdir(filepath.Join(rootPath, "owned-dir"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	var replacementInfo os.FileInfo
+	beforeGuardRemove := func(parent *os.File, name string) {
+		if replacementInfo != nil || name != "isolated-entry" {
+			return
+		}
+		replacementInfo = replaceIsolatedDirectoryEntry(t, parent, name, "")
+	}
+
+	err = removeDirectoryContentsWithHook(root, nil, nil, beforeGuardRemove)
+	if err == nil {
+		t.Fatal("recursive cleanup reported success after final directory replacement")
+	}
+	if replacementInfo == nil {
+		t.Fatal("recursive cleanup bypassed the pinned final directory guard")
+	}
+	if !treeContainsSameFile(t, rootPath, replacementInfo) {
+		t.Fatal("recursive cleanup deleted the replacement before final directory removal")
+	}
+}
+
+func replaceIsolatedDirectoryEntry(t *testing.T, parent *os.File, name, contents string) os.FileInfo {
+	t.Helper()
+	if err := unix.Renameat(int(parent.Fd()), name, int(parent.Fd()), name+".owned"); err != nil {
+		t.Fatalf("move isolated directory entry: %v", err)
+	}
+	if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+		t.Fatalf("create isolated directory replacement: %v", err)
+	}
+	fd, err := unix.Openat(
+		int(parent.Fd()),
+		name,
+		unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+		0,
+	)
+	if err != nil {
+		t.Fatalf("open isolated directory replacement: %v", err)
+	}
+	replacement := os.NewFile(uintptr(fd), name)
+	if replacement == nil {
+		_ = unix.Close(fd)
+		t.Fatal("wrap isolated directory replacement")
+	}
+	if contents != "" {
+		markerFD, openErr := unix.Openat(
+			int(replacement.Fd()),
+			"must-survive.txt",
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+			0o600,
+		)
+		if openErr != nil {
+			_ = replacement.Close()
+			t.Fatalf("create isolated replacement marker: %v", openErr)
+		}
+		marker := os.NewFile(uintptr(markerFD), "must-survive.txt")
+		if marker == nil {
+			_ = unix.Close(markerFD)
+			_ = replacement.Close()
+			t.Fatal("wrap isolated replacement marker")
+		}
+		_, writeErr := marker.WriteString(contents)
+		closeErr := marker.Close()
+		if writeErr != nil || closeErr != nil {
+			_ = replacement.Close()
+			t.Fatalf("write isolated replacement marker: %v", errors.Join(writeErr, closeErr))
+		}
+	}
+	info, statErr := replacement.Stat()
+	closeErr := replacement.Close()
+	if statErr != nil || closeErr != nil {
+		t.Fatalf("inspect isolated directory replacement: %v", errors.Join(statErr, closeErr))
+	}
+	return info
+}
+
+func TestIsolateOwnedEntryPreservesReplacementWhenRenameFails(t *testing.T) {
+	rootPath := t.TempDir()
+	root, err := os.Open(rootPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer root.Close()
+	if err := os.WriteFile(filepath.Join(rootPath, "owned.mp4"), []byte("owned"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	expectedInfo, err := fileInfoAt(root, "owned.mp4")
+	if err != nil {
+		t.Fatal(err)
+	}
+	expected, err := identityFromFileInfo(expectedInfo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(filepath.Join(rootPath, "owned.mp4"), filepath.Join(rootPath, "owned.mp4.moved")); err != nil {
+		t.Fatal(err)
+	}
+	var replacementInfo os.FileInfo
+	beforeGuardRemove := func(parent *os.File, name string) {
+		if err := unix.Renameat(int(parent.Fd()), name, int(parent.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move failed-isolation guard: %v", err)
+		}
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			t.Fatalf("create failed-isolation guard replacement: %v", err)
+		}
+		replacementInfo, err = fileInfoAt(parent, name)
+		if err != nil {
+			t.Fatalf("inspect failed-isolation guard replacement: %v", err)
+		}
+	}
+
+	_, _, matched, err := isolateOwnedEntryAt(
+		root,
+		"owned.mp4",
+		expected,
+		".web-video-platform-entry-cleanup-",
+		beforeGuardRemove,
+	)
+	if err == nil || matched {
+		t.Fatalf("isolateOwnedEntryAt() = matched %t, err %v; want failed rename", matched, err)
+	}
+	if replacementInfo == nil {
+		t.Fatal("isolateOwnedEntryAt() bypassed final guard validation after rename failure")
+	}
+	if !treeContainsSameFile(t, rootPath, replacementInfo) {
+		t.Fatal("isolateOwnedEntryAt() deleted the replacement guard after rename failure")
+	}
+}
+
+func TestCreatePrivateDirectoryPreservesReplacementOnFailure(t *testing.T) {
+	tests := []struct {
+		name string
+		ops  func(*testing.T, *os.File, *os.FileInfo) privateDirectoryOps
+	}{
+		{
+			name: "open",
+			ops: func(t *testing.T, root *os.File, replacementInfo *os.FileInfo) privateDirectoryOps {
+				return privateDirectoryOps{
+					open: func(parentFD int, name string, _ int, _ uint32) (int, error) {
+						*replacementInfo = replacePrivateDirectoryEntry(t, parentFD, name)
+						return -1, syscall.EIO
+					},
+				}
+			},
+		},
+		{
+			name: "wrap",
+			ops: func(t *testing.T, root *os.File, replacementInfo *os.FileInfo) privateDirectoryOps {
+				return privateDirectoryOps{
+					wrap: func(_ uintptr, name string) *os.File {
+						*replacementInfo = replacePrivateDirectoryEntry(t, int(root.Fd()), name)
+						return nil
+					},
+				}
+			},
+		},
+		{
+			name: "fchmod",
+			ops: func(t *testing.T, root *os.File, replacementInfo *os.FileInfo) privateDirectoryOps {
+				var createdName string
+				return privateDirectoryOps{
+					open: func(parentFD int, name string, flags int, mode uint32) (int, error) {
+						createdName = name
+						return unix.Openat(parentFD, name, flags, mode)
+					},
+					fchmod: func(_ int, _ uint32) error {
+						*replacementInfo = replacePrivateDirectoryEntry(t, int(root.Fd()), createdName)
+						return syscall.EIO
+					},
+				}
+			},
+		},
+		{
+			name: "stat",
+			ops: func(t *testing.T, root *os.File, replacementInfo *os.FileInfo) privateDirectoryOps {
+				return privateDirectoryOps{
+					stat: func(directory *os.File) (os.FileInfo, error) {
+						*replacementInfo = replacePrivateDirectoryEntry(t, int(root.Fd()), directory.Name())
+						return nil, syscall.EIO
+					},
+				}
+			},
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			rootPath := t.TempDir()
+			root, err := os.Open(rootPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer root.Close()
+			var replacementInfo os.FileInfo
+
+			if _, directory, _, err := createPrivateDirectoryAt(
+				root,
+				".create-failure-",
+				test.ops(t, root, &replacementInfo),
+			); err == nil || directory != nil {
+				t.Fatalf("createPrivateDirectoryAt() = directory %v, err %v; want %s failure", directory, err, test.name)
+			}
+			if replacementInfo == nil {
+				t.Fatalf("%s failure injection did not create a replacement", test.name)
+			}
+			if !treeContainsSameFile(t, rootPath, replacementInfo) {
+				t.Fatalf("%s failure cleanup deleted the replacement private directory", test.name)
+			}
+		})
+	}
+}
+
+func replacePrivateDirectoryEntry(t *testing.T, parentFD int, name string) os.FileInfo {
+	t.Helper()
+	if err := unix.Renameat(parentFD, name, parentFD, name+".owned"); err != nil {
+		t.Fatalf("move private directory before failure cleanup: %v", err)
+	}
+	if err := unix.Mkdirat(parentFD, name, 0o700); err != nil {
+		t.Fatalf("create private directory replacement: %v", err)
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(parentFD, name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		t.Fatalf("inspect private directory replacement: %v", err)
+	}
+	fd, err := unix.Openat(parentFD, name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if err != nil {
+		t.Fatalf("open private directory replacement: %v", err)
+	}
+	replacement := os.NewFile(uintptr(fd), name)
+	if replacement == nil {
+		_ = unix.Close(fd)
+		t.Fatal("wrap private directory replacement")
+	}
+	info, err := replacement.Stat()
+	if closeErr := replacement.Close(); err == nil {
+		err = closeErr
+	}
+	if err != nil {
+		t.Fatalf("stat private directory replacement: %v", err)
+	}
+	return info
 }
 
 func TestRunnerRejectsStagedFileReplacementBetweenLstatAndOpen(t *testing.T) {
@@ -927,6 +1500,36 @@ func TestRunnerReturnsCanceledWithoutStartingWhenContextAlreadyCanceled(t *testi
 	assertNoPlatformStaging(t, config.OutputDir)
 }
 
+func TestRunnerPreservesDeadlineExceededWithoutStarting(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	started := false
+	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+		started = true
+		return fakeCommandFactory("success", nil)(path, args, env)
+	}
+	ctx, cancel := context.WithDeadline(context.Background(), time.Now().Add(-time.Second))
+	defer cancel()
+	path, err := runner.Run(ctx, validRequest("截止时间"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want deadline error", path, err)
+	}
+	assertRunnerCode(t, err, CodeCanceled)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("deadline error does not wrap context.DeadlineExceeded: %v", err)
+	}
+	if errors.Is(err, context.Canceled) {
+		t.Fatalf("deadline error incorrectly wraps context.Canceled: %v", err)
+	}
+	if started {
+		t.Fatal("runner started process for an expired deadline")
+	}
+	assertNoPlatformStaging(t, config.OutputDir)
+}
+
 func TestRunnerMapsProcessStartFailureWithoutLeakingBinaryPath(t *testing.T) {
 	config := testConfig(t)
 	runner, err := New(config)
@@ -1127,6 +1730,114 @@ func TestRunnerRemovesPartialReservationWhenReleaseReportsFailure(t *testing.T) 
 		t.Fatalf("partial reservation remains after fallback cleanup: %v", statErr)
 	}
 	assertNoPlatformStaging(t, config.OutputDir)
+}
+
+func TestRunnerRollbackPreservesReplacementRacedAfterFallbackValidation(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, reserveErr := output.ReserveAvailablePathAt(root, dir, base, extension)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		return &failingReservation{inner: reservation, releaseErr: errors.New("simulated release failure")}, nil
+	}
+	runner.copyOutput = func(_ context.Context, destination io.Writer, _ io.Reader) error {
+		_, _ = destination.Write([]byte("partial"))
+		return errors.New("simulated copy failure")
+	}
+	runner.beforeRollbackIsolation = func(root *os.File, name string) {
+		if err := unix.Renameat(int(root.Fd()), name, int(root.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move validated fallback reservation: %v", err)
+		}
+		fd, err := unix.Openat(
+			int(root.Fd()),
+			name,
+			unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC,
+			0o600,
+		)
+		if err != nil {
+			t.Fatalf("create fallback replacement: %v", err)
+		}
+		replacement := os.NewFile(uintptr(fd), name)
+		if replacement == nil {
+			_ = unix.Close(fd)
+			t.Fatal("wrap fallback replacement")
+		}
+		if _, err := replacement.Write([]byte("rollback replacement")); err != nil {
+			t.Fatal(err)
+		}
+		if err := replacement.Close(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("回滚替换"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if !treeContainsFileContents(t, config.OutputDir, "rollback replacement") {
+		t.Fatal("fallback rollback deleted the replacement raced in after validation")
+	}
+}
+
+func TestRunnerRollbackPreservesReplacementOfFinalGuard(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("success", nil)
+	runner.reserveOutput = func(root *os.File, dir, base, extension string) (outputReservation, error) {
+		reservation, reserveErr := output.ReserveAvailablePathAt(root, dir, base, extension)
+		if reserveErr != nil {
+			return nil, reserveErr
+		}
+		return &failingReservation{inner: reservation, releaseErr: errors.New("simulated release failure")}, nil
+	}
+	runner.copyOutput = func(_ context.Context, destination io.Writer, _ io.Reader) error {
+		_, _ = destination.Write([]byte("partial"))
+		return errors.New("simulated copy failure")
+	}
+	var replacementInfo os.FileInfo
+	runner.beforeRollbackGuardRemove = func(parent *os.File, name string) {
+		if err := unix.Renameat(int(parent.Fd()), name, int(parent.Fd()), name+".owned"); err != nil {
+			t.Fatalf("move rollback final guard: %v", err)
+		}
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			t.Fatalf("create rollback final guard replacement: %v", err)
+		}
+		fd, err := unix.Openat(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			t.Fatalf("open rollback final guard replacement: %v", err)
+		}
+		replacement := os.NewFile(uintptr(fd), name)
+		if replacement == nil {
+			_ = unix.Close(fd)
+			t.Fatal("wrap rollback final guard replacement")
+		}
+		replacementInfo, err = replacement.Stat()
+		if closeErr := replacement.Close(); err == nil {
+			err = closeErr
+		}
+		if err != nil {
+			t.Fatalf("inspect rollback final guard replacement: %v", err)
+		}
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("回滚最终隔离"))
+	if path != "" || err == nil {
+		t.Fatalf("Run() = (%q, %v), want output error", path, err)
+	}
+	assertRunnerCode(t, err, CodeOutput)
+	if !treeContainsSameFile(t, config.OutputDir, replacementInfo) {
+		t.Fatal("rollback deleted the replacement final guard inode")
+	}
 }
 
 func TestRunnerMarksCompletePathPublishedWhenPublishAndReleaseReportFailure(t *testing.T) {
@@ -1401,6 +2112,49 @@ func assertNoPublishedVideo(t *testing.T, outputDir string) {
 	}
 }
 
+func treeContainsSameFile(t *testing.T, root string, want os.FileInfo) bool {
+	t.Helper()
+	found := false
+	err := filepath.Walk(root, func(_ string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if want != nil && os.SameFile(want, info) {
+			found = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
+func treeContainsFileContents(t *testing.T, root, want string) bool {
+	t.Helper()
+	found := false
+	err := filepath.Walk(root, func(path string, info os.FileInfo, walkErr error) error {
+		if walkErr != nil {
+			return walkErr
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		contents, readErr := os.ReadFile(path)
+		if readErr != nil {
+			return readErr
+		}
+		if string(contents) == want {
+			found = true
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	return found
+}
+
 func assertFileContents(t *testing.T, path, want string) {
 	t.Helper()
 	contents, err := os.ReadFile(path)
@@ -1426,19 +2180,47 @@ func assertDirectoryEmpty(t *testing.T, path string) {
 func waitForPIDFile(t *testing.T, path string) int {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
+	var lastErr error
+	var lastContents []byte
 	for time.Now().Before(deadline) {
 		contents, err := os.ReadFile(path)
 		if err == nil {
-			pid, err := strconv.Atoi(string(contents))
-			if err != nil {
-				t.Fatalf("invalid pid marker %q: %v", contents, err)
+			lastContents = contents
+			pid, parseErr := strconv.Atoi(string(contents))
+			if parseErr == nil && pid > 0 {
+				return pid
 			}
-			return pid
+			if parseErr != nil {
+				lastErr = parseErr
+			} else {
+				lastErr = errors.New("pid marker is not positive")
+			}
+		} else {
+			lastErr = err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	t.Fatalf("pid marker was not written: %q", path)
+	t.Fatalf("pid marker was not valid before timeout: path %q, contents %q, error %v", path, lastContents, lastErr)
 	return 0
+}
+
+func TestWaitForPIDFileRetriesIncompleteMarker(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pid.marker")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	writeDone := make(chan error, 1)
+	go func() {
+		time.Sleep(30 * time.Millisecond)
+		writeDone <- os.WriteFile(path, []byte("12345"), 0o600)
+	}()
+
+	if pid := waitForPIDFile(t, path); pid != 12345 {
+		t.Fatalf("waitForPIDFile() = %d, want 12345", pid)
+	}
+	if err := <-writeDone; err != nil {
+		t.Fatal(err)
+	}
 }
 
 func assertProcessGone(t *testing.T, pid int) {

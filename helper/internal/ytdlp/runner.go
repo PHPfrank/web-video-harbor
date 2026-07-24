@@ -36,6 +36,7 @@ const (
 	progressTemplate        = "download:WVH_PROGRESS:%(info.format_id)#j\t%(progress._percent_str)s"
 	terminationGrace        = 200 * time.Millisecond
 	terminationConfirmGrace = 200 * time.Millisecond
+	outputDrainGrace        = 200 * time.Millisecond
 )
 
 var (
@@ -117,18 +118,30 @@ type Request struct {
 
 // Runner holds the validated inputs needed to build one fixed argument array.
 type Runner struct {
-	binaryPath          string
-	ffmpegPath          string
-	outputDir           string
-	outputInfo          os.FileInfo
-	onProgress          ProgressFunc
-	commandFactory      commandFactory
-	removeTree          func(*os.File) error
-	beforeOpenStaged    func(string)
-	copyOutput          func(context.Context, io.Writer, io.Reader) error
-	reserveOutput       func(*os.File, string, string, string) (outputReservation, error)
-	beforeCleanupRename func(string)
-	beforeCleanupRemove func(string)
+	binaryPath                  string
+	ffmpegPath                  string
+	outputDir                   string
+	outputInfo                  os.FileInfo
+	onProgress                  ProgressFunc
+	commandFactory              commandFactory
+	removeTree                  func(*os.File) error
+	beforeOpenStaged            func(string)
+	copyOutput                  func(context.Context, io.Writer, io.Reader) error
+	reserveOutput               func(*os.File, string, string, string) (outputReservation, error)
+	beforeCleanupRename         func(string)
+	beforeCleanupRemove         func(string)
+	beforeCleanupEntryIsolation func(*os.File, string)
+	afterCleanupEntryIsolation  func(*os.File, string)
+	beforeCleanupGuardRemove    func(*os.File, string)
+	beforeRollbackIsolation     func(*os.File, string)
+	beforeRollbackGuardRemove   func(*os.File, string)
+}
+
+type privateDirectoryOps struct {
+	open   func(int, string, int, uint32) (int, error)
+	wrap   func(uintptr, string) *os.File
+	fchmod func(int, uint32) error
+	stat   func(*os.File) (os.FileInfo, error)
 }
 
 // New validates configured path syntax and the existing output directory
@@ -169,10 +182,10 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", errInvalidRequest
 	}
 	if ctx == nil {
-		return "", canceledError()
+		return "", canceledError(context.Canceled)
 	}
 	if err := ctx.Err(); err != nil {
-		return "", canceledError()
+		return "", canceledError(err)
 	}
 	if err := validateRequest(request); err != nil {
 		return "", err
@@ -183,7 +196,11 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", outputError()
 	}
 	defer outputRoot.Close()
-	stagingName, stagingRoot, stagingInfo, err := createPrivateDirectoryAt(outputRoot, ".web-video-platform-")
+	stagingName, stagingRoot, stagingInfo, err := createPrivateDirectoryAt(
+		outputRoot,
+		".web-video-platform-",
+		privateDirectoryOps{},
+	)
 	if err != nil {
 		return "", outputError()
 	}
@@ -223,13 +240,14 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", err
 	}
 	if ctx.Err() != nil {
-		return "", canceledError()
+		return "", canceledError(ctx.Err())
 	}
 	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
 		return "", outputError()
 	}
 	command := r.commandFactory(r.binaryPath, args, minimalEnvironment())
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.WaitDelay = outputDrainGrace
 	progressState := progressState{}
 	progressWriter := newBoundedLineWriter(maxProgressLineBytes, func(line []byte, overlong bool) {
 		if overlong {
@@ -253,7 +271,7 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	command.Stderr = diagnosticWriter
 	if err := command.Start(); err != nil {
 		if ctx.Err() != nil {
-			return "", canceledError()
+			return "", canceledError(ctx.Err())
 		}
 		return "", runError(CodeProcess)
 	}
@@ -273,7 +291,7 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	progressWriter.finish()
 	diagnosticWriter.finish()
 	if canceled || ctx.Err() != nil {
-		return "", canceledError()
+		return "", canceledError(ctx.Err())
 	}
 	if waitErr != nil {
 		return "", classifyDiagnostic(diagnostic)
@@ -322,33 +340,36 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	}
 	reservedInfo, err := reservation.File().Stat()
 	if err != nil || !reservedInfo.Mode().IsRegular() || reservedInfo.Mode().Perm() != 0o600 {
-		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		return "", outputError()
 	}
 	if err := r.copyOutput(ctx, reservation.File(), staged); err != nil {
-		rollbackOK := rollbackReservation(outputRoot, reservation, reservedInfo)
+		rollbackOK := rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		if !rollbackOK {
 			return "", outputError()
 		}
-		if ctx.Err() != nil || errors.Is(err, context.Canceled) {
-			return "", canceledError()
+		if ctx.Err() != nil {
+			return "", canceledError(ctx.Err())
+		}
+		if errors.Is(err, context.Canceled) {
+			return "", canceledError(context.Canceled)
 		}
 		return "", outputError()
 	}
 	if ctx.Err() != nil {
-		if !rollbackReservation(outputRoot, reservation, reservedInfo) {
+		if !rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove) {
 			return "", outputError()
 		}
-		return "", canceledError()
+		return "", canceledError(ctx.Err())
 	}
 	copiedInfo, err := reservation.File().Stat()
 	if err != nil || !copiedInfo.Mode().IsRegular() || copiedInfo.Mode().Perm() != 0o600 ||
 		!os.SameFile(reservedInfo, copiedInfo) || copiedInfo.Size() != openedInfo.Size() {
-		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		return "", outputError()
 	}
 	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
-		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		return "", outputError()
 	}
 	if err := reservation.PublishExpected(openedInfo.Size()); err != nil {
@@ -360,22 +381,28 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 			path = reservation.Path()
 			return path, output.NewPublishedError(path, outputError())
 		}
-		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		return "", outputError()
 	}
 	if !completeOwnedReservationAt(outputRoot, filepath.Base(reservation.Path()), reservedInfo, openedInfo.Size()) ||
 		verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo) != nil {
-		_ = rollbackReservation(outputRoot, reservation, reservedInfo)
+		_ = rollbackReservation(outputRoot, reservation, reservedInfo, r.beforeRollbackIsolation, r.beforeRollbackGuardRemove)
 		return "", outputError()
 	}
 	path = reservation.Path()
 	if ctx.Err() != nil {
-		return path, output.NewPublishedError(path, canceledError())
+		return path, output.NewPublishedError(path, canceledError(ctx.Err()))
 	}
 	return path, nil
 }
 
-func rollbackReservation(root *os.File, reservation outputReservation, owned os.FileInfo) bool {
+func rollbackReservation(
+	root *os.File,
+	reservation outputReservation,
+	owned os.FileInfo,
+	beforeIsolation func(*os.File, string),
+	beforeGuardRemove func(*os.File, string),
+) bool {
 	if reservation == nil {
 		return true
 	}
@@ -394,12 +421,34 @@ func rollbackReservation(root *os.File, reservation outputReservation, owned os.
 	if err != nil || pathInfo.Mode()&os.ModeSymlink != 0 || !os.SameFile(owned, pathInfo) {
 		return false
 	}
-	if err := unix.Unlinkat(int(root.Fd()), name, 0); err != nil {
+	if beforeIsolation != nil {
+		beforeIsolation(root, name)
+	}
+	expected, err := identityFromFileInfo(owned)
+	if err != nil {
+		return false
+	}
+	cleanupName, cleanupDirectory, matched, err := isolateOwnedEntryAt(
+		root,
+		name,
+		expected,
+		".web-video-rollback-guard-",
+		beforeGuardRemove,
+	)
+	if err != nil || !matched {
+		if cleanupDirectory != nil {
+			_ = cleanupDirectory.Close()
+		}
+		_ = reservation.File().Close()
+		return false
+	}
+	if err := unix.Unlinkat(int(cleanupDirectory.Fd()), "isolated-entry", 0); err != nil {
+		_ = cleanupDirectory.Close()
+		_ = reservation.File().Close()
 		return false
 	}
 	_ = reservation.File().Close()
-	_, err = fileInfoAt(root, name)
-	return errors.Is(err, os.ErrNotExist)
+	return removeEmptyPinnedDirectoryAt(root, cleanupName, cleanupDirectory, beforeGuardRemove) == nil
 }
 
 func completeOwnedReservationAt(root *os.File, name string, owned os.FileInfo, expectedSize int64) bool {
@@ -438,9 +487,12 @@ func outputError() error {
 	return runError(CodeOutput)
 }
 
-func canceledError() error {
+func canceledError(cause error) error {
+	if cause == nil {
+		cause = context.Canceled
+	}
 	errorValue := runError(CodeCanceled)
-	errorValue.cause = context.Canceled
+	errorValue.cause = cause
 	return errorValue
 }
 
@@ -717,7 +769,7 @@ func verifyConfiguredOutputRoot(path string, root *os.File, expected os.FileInfo
 	return nil
 }
 
-func createPrivateDirectoryAt(root *os.File, prefix string) (string, *os.File, os.FileInfo, error) {
+func createPrivateDirectoryAt(root *os.File, prefix string, ops privateDirectoryOps) (string, *os.File, os.FileInfo, error) {
 	if root == nil || prefix == "" || filepath.Base(prefix) != prefix {
 		return "", nil, nil, outputError()
 	}
@@ -733,27 +785,44 @@ func createPrivateDirectoryAt(root *os.File, prefix string) (string, *os.File, o
 			}
 			return "", nil, nil, outputError()
 		}
-		fd, err := unix.Openat(int(root.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		openDirectory := ops.open
+		if openDirectory == nil {
+			openDirectory = unix.Openat
+		}
+		fd, err := openDirectory(int(root.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 		if err != nil {
-			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
 			return "", nil, nil, outputError()
 		}
-		directory := os.NewFile(uintptr(fd), name)
+		wrapDirectory := ops.wrap
+		if wrapDirectory == nil {
+			wrapDirectory = os.NewFile
+		}
+		directory := wrapDirectory(uintptr(fd), name)
 		if directory == nil {
-			_ = unix.Close(fd)
-			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
-			return "", nil, nil, outputError()
+			pinnedDirectory := os.NewFile(uintptr(fd), name)
+			if pinnedDirectory == nil {
+				_ = unix.Close(fd)
+				return "", nil, nil, outputError()
+			}
+			cleanupErr := removeEmptyPinnedDirectoryAt(root, name, pinnedDirectory, nil)
+			return "", nil, nil, errors.Join(outputError(), cleanupErr)
 		}
-		if err := unix.Fchmod(fd, 0o700); err != nil {
-			_ = directory.Close()
-			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
-			return "", nil, nil, outputError()
+		chmodDirectory := ops.fchmod
+		if chmodDirectory == nil {
+			chmodDirectory = unix.Fchmod
 		}
-		info, err := directory.Stat()
+		if err := chmodDirectory(fd, 0o700); err != nil {
+			cleanupErr := removeEmptyPinnedDirectoryAt(root, name, directory, nil)
+			return "", nil, nil, errors.Join(outputError(), cleanupErr)
+		}
+		statDirectory := ops.stat
+		if statDirectory == nil {
+			statDirectory = func(file *os.File) (os.FileInfo, error) { return file.Stat() }
+		}
+		info, err := statDirectory(directory)
 		if err != nil || !validOwnedDirectory(info) || info.Mode().Perm() != 0o700 {
-			_ = directory.Close()
-			_ = unix.Unlinkat(int(root.Fd()), name, unix.AT_REMOVEDIR)
-			return "", nil, nil, outputError()
+			cleanupErr := removeEmptyPinnedDirectoryAt(root, name, directory, nil)
+			return "", nil, nil, errors.Join(outputError(), cleanupErr)
 		}
 		return name, directory, info, nil
 	}
@@ -789,7 +858,11 @@ func (r *Runner) cleanupOwnedStaging(outputRoot *os.File, stagingName string, ow
 	if err := verifyOwnedDirectoryAt(outputRoot, stagingName, owned); err != nil {
 		return err
 	}
-	quarantineName, quarantineDirectory, _, err := createPrivateDirectoryAt(outputRoot, ".web-video-platform-cleanup-")
+	quarantineName, quarantineDirectory, quarantineInfo, err := createPrivateDirectoryAt(
+		outputRoot,
+		".web-video-platform-cleanup-",
+		privateDirectoryOps{},
+	)
 	if err != nil {
 		return outputError()
 	}
@@ -824,25 +897,97 @@ func (r *Runner) cleanupOwnedStaging(outputRoot *os.File, stagingName string, ow
 	if r.beforeCleanupRemove != nil {
 		r.beforeCleanupRemove(quarantineRoot)
 	}
-	if err := r.removeTree(movedDirectory); err != nil {
+	removeTree := r.removeTree
+	if r.beforeCleanupEntryIsolation != nil || r.afterCleanupEntryIsolation != nil || r.beforeCleanupGuardRemove != nil {
+		removeTree = func(directory *os.File) error {
+			return removeDirectoryContentsWithHook(
+				directory,
+				r.beforeCleanupEntryIsolation,
+				r.afterCleanupEntryIsolation,
+				r.beforeCleanupGuardRemove,
+			)
+		}
+	}
+	if err := removeTree(movedDirectory); err != nil {
 		return outputError()
 	}
 	if err := movedDirectory.Close(); err != nil {
 		return outputError()
 	}
-	if err := unix.Unlinkat(int(quarantineDirectory.Fd()), "owned-staging", unix.AT_REMOVEDIR); err != nil {
+	movedIdentity, err := identityFromFileInfo(movedInfo)
+	if err != nil {
+		return outputError()
+	}
+	stagingCleanupName, stagingCleanupDirectory, matched, err := isolateOwnedEntryAt(
+		quarantineDirectory,
+		"owned-staging",
+		movedIdentity,
+		".web-video-platform-entry-cleanup-",
+		r.beforeCleanupGuardRemove,
+	)
+	if err != nil || !matched {
+		if stagingCleanupDirectory != nil {
+			_ = stagingCleanupDirectory.Close()
+		}
+		return outputError()
+	}
+	if err := unix.Unlinkat(int(stagingCleanupDirectory.Fd()), "isolated-entry", unix.AT_REMOVEDIR); err != nil {
+		_ = stagingCleanupDirectory.Close()
+		return outputError()
+	}
+	if err := removeEmptyPinnedDirectoryAt(
+		quarantineDirectory,
+		stagingCleanupName,
+		stagingCleanupDirectory,
+		r.beforeCleanupGuardRemove,
+	); err != nil {
 		return outputError()
 	}
 	if err := quarantineDirectory.Close(); err != nil {
 		return outputError()
 	}
-	if err := unix.Unlinkat(int(outputRoot.Fd()), quarantineName, unix.AT_REMOVEDIR); err != nil {
+	quarantineIdentity, err := identityFromFileInfo(quarantineInfo)
+	if err != nil {
+		return outputError()
+	}
+	rootCleanupName, rootCleanupDirectory, matched, err := isolateOwnedEntryAt(
+		outputRoot,
+		quarantineName,
+		quarantineIdentity,
+		".web-video-platform-root-cleanup-",
+		r.beforeCleanupGuardRemove,
+	)
+	if err != nil || !matched {
+		if rootCleanupDirectory != nil {
+			_ = rootCleanupDirectory.Close()
+		}
+		return outputError()
+	}
+	if err := unix.Unlinkat(int(rootCleanupDirectory.Fd()), "isolated-entry", unix.AT_REMOVEDIR); err != nil {
+		_ = rootCleanupDirectory.Close()
+		return outputError()
+	}
+	if err := removeEmptyPinnedDirectoryAt(
+		outputRoot,
+		rootCleanupName,
+		rootCleanupDirectory,
+		r.beforeCleanupGuardRemove,
+	); err != nil {
 		return outputError()
 	}
 	return nil
 }
 
 func removeDirectoryContents(directory *os.File) error {
+	return removeDirectoryContentsWithHook(directory, nil, nil, nil)
+}
+
+func removeDirectoryContentsWithHook(
+	directory *os.File,
+	beforeIsolation func(*os.File, string),
+	afterIsolation func(*os.File, string),
+	beforeGuardRemove func(*os.File, string),
+) error {
 	entries, err := directory.ReadDir(-1)
 	if err != nil {
 		return err
@@ -852,9 +997,32 @@ func removeDirectoryContents(directory *os.File) error {
 		if name == "" || filepath.Base(name) != name {
 			return outputError()
 		}
-		childFD, openErr := unix.Openat(
-			int(directory.Fd()),
+		expected, err := entryIdentityAt(directory, name)
+		if err != nil {
+			return err
+		}
+		if beforeIsolation != nil {
+			beforeIsolation(directory, name)
+		}
+		cleanupName, cleanupDirectory, matched, err := isolateOwnedEntryAt(
+			directory,
 			name,
+			expected,
+			".web-video-platform-entry-cleanup-",
+			beforeGuardRemove,
+		)
+		if err != nil || !matched {
+			if cleanupDirectory != nil {
+				_ = cleanupDirectory.Close()
+			}
+			return outputError()
+		}
+		if afterIsolation != nil {
+			afterIsolation(cleanupDirectory, "isolated-entry")
+		}
+		childFD, openErr := unix.Openat(
+			int(cleanupDirectory.Fd()),
+			"isolated-entry",
 			unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC,
 			0,
 		)
@@ -862,26 +1030,190 @@ func removeDirectoryContents(directory *os.File) error {
 			child := os.NewFile(uintptr(childFD), name)
 			if child == nil {
 				_ = unix.Close(childFD)
+				_ = cleanupDirectory.Close()
 				return outputError()
 			}
-			removeErr := removeDirectoryContents(child)
-			closeErr := child.Close()
-			if removeErr != nil || closeErr != nil {
+			childInfo, statErr := child.Stat()
+			childIdentity, identityErr := identityFromFileInfo(childInfo)
+			if statErr != nil || identityErr != nil || !validOwnedDirectory(childInfo) || childIdentity != expected {
+				_ = child.Close()
+				_ = cleanupDirectory.Close()
 				return outputError()
 			}
-			if err := unix.Unlinkat(int(directory.Fd()), name, unix.AT_REMOVEDIR); err != nil {
+			removeErr := removeDirectoryContentsWithHook(child, beforeIsolation, afterIsolation, beforeGuardRemove)
+			if removeErr != nil {
+				_ = child.Close()
+				_ = cleanupDirectory.Close()
+				return outputError()
+			}
+			if err := removeEmptyPinnedOwnedDirectoryAt(
+				cleanupDirectory,
+				"isolated-entry",
+				child,
+				expected,
+				beforeGuardRemove,
+			); err != nil {
+				_ = cleanupDirectory.Close()
+				return outputError()
+			}
+		} else if !errors.Is(openErr, syscall.ENOTDIR) && !errors.Is(openErr, syscall.ELOOP) {
+			_ = cleanupDirectory.Close()
+			return openErr
+		} else {
+			currentIdentity, identityErr := entryIdentityAt(cleanupDirectory, "isolated-entry")
+			if identityErr != nil || currentIdentity != expected {
+				_ = cleanupDirectory.Close()
+				return outputError()
+			}
+			if err := unix.Unlinkat(int(cleanupDirectory.Fd()), "isolated-entry", 0); err != nil {
+				_ = cleanupDirectory.Close()
 				return err
 			}
-			continue
 		}
-		if !errors.Is(openErr, syscall.ENOTDIR) && !errors.Is(openErr, syscall.ELOOP) {
-			return openErr
-		}
-		if err := unix.Unlinkat(int(directory.Fd()), name, 0); err != nil {
+		if err := removeEmptyPinnedDirectoryAt(
+			directory,
+			cleanupName,
+			cleanupDirectory,
+			beforeGuardRemove,
+		); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+func removeEmptyPinnedOwnedDirectoryAt(
+	parent *os.File,
+	name string,
+	directory *os.File,
+	expected entryIdentity,
+	beforeVerify func(*os.File, string),
+) error {
+	if parent == nil || directory == nil || name == "" || filepath.Base(name) != name {
+		return outputError()
+	}
+	if beforeVerify != nil {
+		beforeVerify(parent, name)
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil || !validOwnedDirectory(openedInfo) {
+		_ = directory.Close()
+		return outputError()
+	}
+	openedIdentity, err := identityFromFileInfo(openedInfo)
+	if err != nil || openedIdentity != expected {
+		_ = directory.Close()
+		return outputError()
+	}
+	pathIdentity, err := entryIdentityAt(parent, name)
+	if err != nil || pathIdentity != expected {
+		_ = directory.Close()
+		return outputError()
+	}
+	entries, readErr := directory.ReadDir(1)
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		_ = directory.Close()
+		return outputError()
+	}
+	// The owned directory FD remains pinned and the expected identity check is
+	// immediately adjacent to this single rmdir. POSIX has no inode-conditional
+	// unlink; replacement after this check is outside the supported threat model.
+	removeErr := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+	closeErr := directory.Close()
+	return errors.Join(removeErr, closeErr)
+}
+
+type entryIdentity struct {
+	device uint64
+	inode  uint64
+}
+
+func identityFromFileInfo(info os.FileInfo) (entryIdentity, error) {
+	if info == nil {
+		return entryIdentity{}, outputError()
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat == nil {
+		return entryIdentity{}, outputError()
+	}
+	return entryIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+}
+
+func entryIdentityAt(parent *os.File, name string) (entryIdentity, error) {
+	if parent == nil || name == "" || filepath.Base(name) != name {
+		return entryIdentity{}, outputError()
+	}
+	var stat unix.Stat_t
+	if err := unix.Fstatat(int(parent.Fd()), name, &stat, unix.AT_SYMLINK_NOFOLLOW); err != nil {
+		return entryIdentity{}, err
+	}
+	return entryIdentity{device: uint64(stat.Dev), inode: stat.Ino}, nil
+}
+
+func isolateOwnedEntryAt(
+	parent *os.File,
+	name string,
+	expected entryIdentity,
+	prefix string,
+	beforeGuardRemove func(*os.File, string),
+) (string, *os.File, bool, error) {
+	if parent == nil || name == "" || filepath.Base(name) != name {
+		return "", nil, false, outputError()
+	}
+	cleanupName, cleanupDirectory, _, err := createPrivateDirectoryAt(parent, prefix, privateDirectoryOps{})
+	if err != nil {
+		return "", nil, false, err
+	}
+	if err := unix.Renameat(int(parent.Fd()), name, int(cleanupDirectory.Fd()), "isolated-entry"); err != nil {
+		cleanupErr := removeEmptyPinnedDirectoryAt(parent, cleanupName, cleanupDirectory, beforeGuardRemove)
+		return "", nil, false, errors.Join(err, cleanupErr)
+	}
+	isolatedIdentity, err := entryIdentityAt(cleanupDirectory, "isolated-entry")
+	if err != nil || expected != isolatedIdentity {
+		return cleanupName, cleanupDirectory, false, outputError()
+	}
+	return cleanupName, cleanupDirectory, true, nil
+}
+
+func removeEmptyPinnedDirectoryAt(
+	parent *os.File,
+	name string,
+	directory *os.File,
+	beforeVerify func(*os.File, string),
+) error {
+	if parent == nil || directory == nil || name == "" || filepath.Base(name) != name {
+		return outputError()
+	}
+	if beforeVerify != nil {
+		beforeVerify(parent, name)
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil || !validOwnedDirectory(openedInfo) || openedInfo.Mode().Perm() != 0o700 {
+		_ = directory.Close()
+		return outputError()
+	}
+	openedIdentity, err := identityFromFileInfo(openedInfo)
+	if err != nil {
+		_ = directory.Close()
+		return outputError()
+	}
+	pathIdentity, err := entryIdentityAt(parent, name)
+	if err != nil || openedIdentity != pathIdentity {
+		_ = directory.Close()
+		return outputError()
+	}
+	entries, readErr := directory.ReadDir(1)
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		_ = directory.Close()
+		return outputError()
+	}
+	// The name is random and private, the directory FD remains pinned, and the
+	// identity check is immediately adjacent to this single rmdir. POSIX has no
+	// inode-conditional unlink; replacement after this check is outside the
+	// supported threat model. A replacement observed above is always preserved.
+	removeErr := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+	closeErr := directory.Close()
+	return errors.Join(removeErr, closeErr)
 }
 
 func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error) {

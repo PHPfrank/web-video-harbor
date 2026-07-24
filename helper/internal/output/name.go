@@ -1,12 +1,16 @@
 package output
 
 import (
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
+	"syscall"
 	"unicode"
 
 	"golang.org/x/sys/unix"
@@ -35,13 +39,24 @@ var errReservationFinalized = errors.New("output reservation is already finalize
 // or released. Write through File so no path lookup can replace the reserved
 // file before publication.
 type Reservation struct {
-	path      string
-	name      string
-	file      *os.File
-	directory *os.File
+	path          string
+	name          string
+	file          *os.File
+	directory     *os.File
+	directoryPath string
+	directoryInfo os.FileInfo
+
+	beforeReleaseIsolation   func()
+	afterReleaseIsolation    func(*os.File)
+	beforeReleaseGuardRemove func(*os.File, string)
 
 	mu        sync.Mutex
 	finalized bool
+}
+
+type privateDirectoryOps struct {
+	open func(int, string, int, uint32) (int, error)
+	wrap func(uintptr, string) *os.File
 }
 
 func (r *Reservation) Path() string {
@@ -72,6 +87,9 @@ func (r *Reservation) publishExpected(expectedSize int64) error {
 	if r.finalized {
 		return errReservationFinalized
 	}
+	if err := r.verifyDisplayDirectory(); err != nil {
+		return err
+	}
 	if err := r.file.Sync(); err != nil {
 		return fmt.Errorf("sync reserved output: %w", err)
 	}
@@ -90,6 +108,9 @@ func (r *Reservation) publishExpected(expectedSize int64) error {
 	r.finalized = true
 	if err != nil {
 		return errors.Join(fmt.Errorf("close reserved output: %w", err), r.closeDirectory())
+	}
+	if err := r.verifyDisplayDirectory(); err != nil {
+		return errors.Join(err, r.closeDirectory())
 	}
 	pathInfo, err = r.inspectPath()
 	if err != nil {
@@ -145,8 +166,53 @@ func (r *Reservation) Release() error {
 		return errors.Join(errors.New("reserved output path no longer names the owned file"), closeErr, directoryErr)
 	}
 
-	removeErr := r.removePath()
+	if r.beforeReleaseIsolation != nil {
+		r.beforeReleaseIsolation()
+	}
+	quarantineName, quarantineDirectory, quarantineErr := createPrivateDirectoryAt(
+		r.directory,
+		".web-video-reservation-cleanup-",
+		privateDirectoryOps{},
+	)
+	if quarantineErr != nil {
+		closeErr := r.file.Close()
+		directoryErr := r.closeDirectory()
+		r.finalized = true
+		return errors.Join(quarantineErr, closeErr, directoryErr)
+	}
+	if err := unix.Renameat(int(r.directory.Fd()), r.name, int(quarantineDirectory.Fd()), "owned-entry"); err != nil {
+		removeErr := removeEmptyPinnedDirectoryAt(
+			r.directory,
+			quarantineName,
+			quarantineDirectory,
+			r.beforeReleaseGuardRemove,
+		)
+		fileErr := r.file.Close()
+		directoryErr := r.closeDirectory()
+		r.finalized = true
+		return errors.Join(fmt.Errorf("isolate reserved output: %w", err), removeErr, fileErr, directoryErr)
+	}
+	if r.afterReleaseIsolation != nil {
+		r.afterReleaseIsolation(quarantineDirectory)
+	}
+	isolatedInfo, inspectErr := inspectEntryAt(quarantineDirectory, "owned-entry")
+	if inspectErr != nil || !os.SameFile(openedInfo, isolatedInfo) {
+		_ = unix.Linkat(int(quarantineDirectory.Fd()), "owned-entry", int(r.directory.Fd()), r.name, 0)
+		quarantineCloseErr := quarantineDirectory.Close()
+		fileErr := r.file.Close()
+		directoryErr := r.closeDirectory()
+		r.finalized = true
+		return errors.Join(errors.New("isolated reserved output no longer names the owned file"), quarantineCloseErr, fileErr, directoryErr)
+	}
+
+	removeErr := unix.Unlinkat(int(quarantineDirectory.Fd()), "owned-entry", 0)
 	closeErr := r.file.Close()
+	quarantineRemoveErr := removeEmptyPinnedDirectoryAt(
+		r.directory,
+		quarantineName,
+		quarantineDirectory,
+		r.beforeReleaseGuardRemove,
+	)
 	directoryErr := r.closeDirectory()
 	r.finalized = true
 	if removeErr != nil {
@@ -155,23 +221,30 @@ func (r *Reservation) Release() error {
 	if closeErr != nil {
 		closeErr = fmt.Errorf("close reserved output: %w", closeErr)
 	}
-	return errors.Join(removeErr, closeErr, directoryErr)
+	return errors.Join(removeErr, closeErr, quarantineRemoveErr, directoryErr)
 }
 
 func (r *Reservation) inspectPath() (os.FileInfo, error) {
 	if r.directory == nil {
 		return os.Lstat(r.path)
 	}
+	return inspectEntryAt(r.directory, r.name)
+}
+
+func inspectEntryAt(directory *os.File, name string) (os.FileInfo, error) {
+	if directory == nil || name == "" || filepath.Base(name) != name {
+		return nil, errors.New("reserved output entry is invalid")
+	}
 	fd, err := unix.Openat(
-		int(r.directory.Fd()),
-		r.name,
+		int(directory.Fd()),
+		name,
 		unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_NONBLOCK|unix.O_CLOEXEC,
 		0,
 	)
 	if err != nil {
 		return nil, err
 	}
-	file := os.NewFile(uintptr(fd), r.name)
+	file := os.NewFile(uintptr(fd), name)
 	if file == nil {
 		_ = unix.Close(fd)
 		return nil, errors.New("open reserved output path")
@@ -180,11 +253,94 @@ func (r *Reservation) inspectPath() (os.FileInfo, error) {
 	return file.Stat()
 }
 
-func (r *Reservation) removePath() error {
-	if r.directory == nil {
-		return os.Remove(r.path)
+func createPrivateDirectoryAt(parent *os.File, prefix string, ops privateDirectoryOps) (string, *os.File, error) {
+	if parent == nil || prefix == "" || filepath.Base(prefix) != prefix {
+		return "", nil, errors.New("private output quarantine configuration is invalid")
 	}
-	return unix.Unlinkat(int(r.directory.Fd()), r.name, 0)
+	for range 100 {
+		random := make([]byte, 16)
+		if _, err := rand.Read(random); err != nil {
+			return "", nil, fmt.Errorf("generate private output quarantine: %w", err)
+		}
+		name := prefix + hex.EncodeToString(random)
+		if err := unix.Mkdirat(int(parent.Fd()), name, 0o700); err != nil {
+			if errors.Is(err, syscall.EEXIST) {
+				continue
+			}
+			return "", nil, fmt.Errorf("create private output quarantine: %w", err)
+		}
+		openDirectory := ops.open
+		if openDirectory == nil {
+			openDirectory = unix.Openat
+		}
+		fd, err := openDirectory(int(parent.Fd()), name, unix.O_RDONLY|unix.O_DIRECTORY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+		if err != nil {
+			return "", nil, fmt.Errorf("open private output quarantine: %w", err)
+		}
+		wrapDirectory := ops.wrap
+		if wrapDirectory == nil {
+			wrapDirectory = os.NewFile
+		}
+		directory := wrapDirectory(uintptr(fd), name)
+		if directory == nil {
+			pinnedDirectory := os.NewFile(uintptr(fd), name)
+			if pinnedDirectory == nil {
+				_ = unix.Close(fd)
+				return "", nil, errors.New("open private output quarantine")
+			}
+			cleanupErr := removeEmptyPinnedDirectoryAt(parent, name, pinnedDirectory, nil)
+			return "", nil, errors.Join(errors.New("open private output quarantine"), cleanupErr)
+		}
+		return name, directory, nil
+	}
+	return "", nil, errors.New("create unique private output quarantine")
+}
+
+func removeEmptyPinnedDirectoryAt(parent *os.File, name string, directory *os.File, beforeVerify func(*os.File, string)) error {
+	if parent == nil || directory == nil || name == "" || filepath.Base(name) != name {
+		return errors.New("private output quarantine identity is invalid")
+	}
+	if beforeVerify != nil {
+		beforeVerify(parent, name)
+	}
+	openedInfo, err := directory.Stat()
+	if err != nil || !openedInfo.IsDir() || openedInfo.Mode().Perm() != 0o700 {
+		_ = directory.Close()
+		return errors.New("private output quarantine handle is invalid")
+	}
+	pathInfo, err := inspectEntryAt(parent, name)
+	if err != nil || !pathInfo.IsDir() || !os.SameFile(openedInfo, pathInfo) {
+		_ = directory.Close()
+		return errors.New("private output quarantine name no longer identifies the pinned directory")
+	}
+	entries, readErr := directory.ReadDir(1)
+	if len(entries) != 0 || !errors.Is(readErr, io.EOF) {
+		_ = directory.Close()
+		return errors.New("private output quarantine is not empty")
+	}
+	// The name is random and private, the directory FD remains pinned, and the
+	// identity check is immediately adjacent to this single rmdir. POSIX has no
+	// inode-conditional unlink; replacement after this check is outside the
+	// supported threat model. A replacement observed above is always preserved.
+	removeErr := unix.Unlinkat(int(parent.Fd()), name, unix.AT_REMOVEDIR)
+	closeErr := directory.Close()
+	return errors.Join(removeErr, closeErr)
+}
+
+func (r *Reservation) verifyDisplayDirectory() error {
+	if r.directory == nil || r.directoryInfo == nil || r.directoryPath == "" {
+		return errors.New("reserved output display directory identity is missing")
+	}
+	openedInfo, err := r.directory.Stat()
+	if err != nil {
+		return fmt.Errorf("inspect pinned output directory: %w", err)
+	}
+	pathInfo, err := os.Lstat(r.directoryPath)
+	if err != nil || !pathInfo.IsDir() || pathInfo.Mode()&os.ModeSymlink != 0 ||
+		!os.SameFile(r.directoryInfo, openedInfo) || !os.SameFile(openedInfo, pathInfo) {
+		return errors.New("reserved output display directory no longer names the pinned directory")
+	}
+	return nil
 }
 
 func (r *Reservation) closeDirectory() error {
@@ -335,7 +491,14 @@ func ReserveAvailablePathAt(directory *os.File, dir, base, ext string) (*Reserva
 				_ = ownedDirectory.Close()
 				return nil, errors.New("open reserved output")
 			}
-			return &Reservation{path: candidate, name: candidateName, file: file, directory: ownedDirectory}, nil
+			return &Reservation{
+				path:          candidate,
+				name:          candidateName,
+				file:          file,
+				directory:     ownedDirectory,
+				directoryPath: absDir,
+				directoryInfo: openedInfo,
+			}, nil
 		case errors.Is(err, os.ErrExist):
 			continue
 		default:
