@@ -155,6 +155,21 @@ test('platform classifier rejects raw ASCII control characters before URL parsin
   }
 });
 
+test('platform classifier enforces the URL limit in UTF-8 bytes', () => {
+  const prefix = 'https://www.youtube.com/watch?v=_mVb1D8wHxg&x=';
+  const atLimit = `${prefix}${'中'.repeat(666)}🙂`;
+  const overLimit = `${atLimit}中`;
+  const encoder = new TextEncoder();
+
+  assert.equal(encoder.encode(atLimit).byteLength, 2048);
+  assert.equal(encoder.encode(overLimit).byteLength, 2051);
+  assert.deepEqual(platform.classifyPlatformUrl(atLimit), {
+    provider: 'youtube',
+    url: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+  });
+  assert.equal(platform.classifyPlatformUrl(overLimit), null);
+});
+
 test('candidateForPage accepts only page data and normalizes the title', () => {
   assert.equal(platform.candidateForPage(null), null);
   assert.equal(platform.candidateForPage([]), null);

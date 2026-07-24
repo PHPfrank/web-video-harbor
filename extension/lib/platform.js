@@ -97,7 +97,8 @@
   }
 
   function classifyPlatformUrl(value) {
-    if (typeof value !== 'string' || value === '' || value.length > MAX_URL_LENGTH) return null;
+    if (typeof value !== 'string' || value === '') return null;
+    if (new TextEncoder().encode(value).byteLength > MAX_URL_LENGTH) return null;
     if (CONTROL_CHARACTER_PATTERN.test(value)) return null;
     if (value.includes('#')) return null;
 
