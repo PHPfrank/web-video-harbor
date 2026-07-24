@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>网页视频港</title>
+  <link rel="stylesheet" href="popup.css">
+</head>
+<body class="popup-page">
+  <main class="app-shell">
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">本地下载助手</p>
+        <h1>网页视频港</h1>
+      </div>
+      <button id="options-button" class="button button-quiet header-action" type="button">设置</button>
+    </header>
+
+    <section class="connection-panel" role="status" aria-live="polite" aria-labelledby="connection-title">
+      <span id="connection-dot" class="status-dot" aria-hidden="true"></span>
+      <div class="connection-copy">
+        <h2 id="connection-title">正在连接本地助手</h2>
+        <p id="connection-detail">正在检查服务状态…</p>
+      </div>
+    </section>
+
+    <p id="notice" class="notice" aria-live="polite"></p>
+
+    <section class="content-section" aria-labelledby="candidate-title">
+      <div class="section-heading">
+        <div>
+          <p class="section-kicker">当前页面</p>
+          <h2 id="candidate-title">可下载视频</h2>
+        </div>
+        <button id="rescan-button" class="button button-secondary" type="button">重新扫描</button>
+      </div>
+      <div id="candidate-list" class="stack" aria-live="polite"></div>
+      <div id="candidate-empty" class="empty-state">
+        <span class="empty-mark" aria-hidden="true">◎</span>
+        <p id="candidate-empty-text">尚未发现可下载的视频</p>
+      </div>
+    </section>
+
+    <section class="content-section task-section" aria-labelledby="task-title">
+      <div class="section-heading compact-heading">
+        <div>
+          <p class="section-kicker">本地队列</p>
+          <h2 id="task-title">下载任务</h2>
+        </div>
+      </div>
+      <div id="task-list" class="stack" aria-live="polite"></div>
+      <p id="task-empty" class="task-empty">尚无下载任务</p>
+    </section>
+  </main>
+
+  <script src="lib/popup-state.js"></script>
+  <script src="lib/helper-client.js"></script>
+  <script src="lib/popup-controller.js"></script>
+  <script src="popup.js"></script>
+</body>
+</html>
