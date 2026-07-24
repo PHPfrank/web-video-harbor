@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"strings"
 	"sync"
@@ -308,6 +309,9 @@ func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
 	}
 	runner, err := e.newPlatformRunner(func(progress ytdlp.Progress) {
 		percent := progress.Percent
+		if math.IsNaN(percent) || math.IsInf(percent, 0) {
+			return
+		}
 		if percent < 0 {
 			percent = 0
 		}
@@ -318,6 +322,10 @@ func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
 	})
 	if err != nil {
 		e.fail(id, err)
+		return
+	}
+	if runner == nil {
+		e.fail(id, errors.New("platform runner factory returned nil"))
 		return
 	}
 	path, err := runner.Run(ctx, ytdlp.Request{
@@ -333,6 +341,10 @@ func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
 		if ctx.Err() == nil {
 			e.fail(id, err)
 		}
+		return
+	}
+	if path == "" {
+		e.fail(id, errors.New("platform runner returned an empty output path"))
 		return
 	}
 	if _, err := e.manager.CompletePublished(id, path); err != nil {

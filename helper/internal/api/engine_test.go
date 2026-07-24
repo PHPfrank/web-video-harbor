@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"math"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"web-video-harbor/helper/internal/download"
 	"web-video-harbor/helper/internal/ffmpeg"
 	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/output"
 	"web-video-harbor/helper/internal/tasks"
 	"web-video-harbor/helper/internal/ytdlp"
 )
@@ -203,6 +205,84 @@ func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testin
 	}
 }
 
+func TestEnginePlatformNilRunnerFailsSafely(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return nil, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitStatus(t, manager, task.ID, tasks.Failed)
+	if failed.ErrorCode != "download_failed" || failed.Error != "视频下载失败，请稍后重试" {
+		t.Fatalf("failed task = %#v", failed)
+	}
+}
+
+func TestEnginePlatformFactoryErrorFailsSafelyWithoutRunning(t *testing.T) {
+	manager := tasks.NewManager()
+	runCalled := false
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				runCalled = true
+				return "/downloads/should-not-run.mp4", nil
+			}), errors.New("factory includes a secret path")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitStatus(t, manager, task.ID, tasks.Failed)
+	if failed.ErrorCode != "download_failed" || failed.Error != "视频下载失败，请稍后重试" {
+		t.Fatalf("failed task = %#v", failed)
+	}
+	if runCalled {
+		t.Fatal("runner was called despite factory error")
+	}
+}
+
+func TestEnginePlatformEmptySuccessPathFailsSafely(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				return "", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	failed := waitStatus(t, manager, task.ID, tasks.Failed)
+	if failed.ErrorCode != "download_failed" || failed.Error != "视频下载失败，请稍后重试" {
+		t.Fatalf("failed task = %#v", failed)
+	}
+}
+
 func TestEnginePlatformProgressIsMonotonicAndStopsAt99BeforeCompletion(t *testing.T) {
 	manager := tasks.NewManager()
 	progressReady := make(chan struct{})
@@ -245,6 +325,88 @@ func TestEnginePlatformProgressIsMonotonicAndStopsAt99BeforeCompletion(t *testin
 	close(release)
 	waitStatus(t, manager, task.ID, tasks.Completed)
 	wantProgress(t, manager, task.ID, 100)
+}
+
+func TestEnginePlatformProgressRejectsNonFiniteValues(t *testing.T) {
+	manager := tasks.NewManager()
+	progressReady := make(chan struct{})
+	release := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				progress(ytdlp.Progress{Percent: 25})
+				progress(ytdlp.Progress{Percent: math.Inf(1)})
+				progress(ytdlp.Progress{Percent: math.Inf(-1)})
+				progress(ytdlp.Progress{Percent: math.NaN()})
+				close(progressReady)
+				<-release
+				return "/downloads/platform.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-progressReady:
+	case <-time.After(time.Second):
+		t.Fatal("platform runner did not report progress")
+	}
+	wantProgress(t, manager, task.ID, 25)
+	close(release)
+	waitStatus(t, manager, task.ID, tasks.Completed)
+}
+
+func TestEnginePlatformProgressHandlesConcurrentOutOfOrderCallbacks(t *testing.T) {
+	manager := tasks.NewManager()
+	progressReady := make(chan struct{})
+	release := make(chan struct{})
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				start := make(chan struct{})
+				var callbacks sync.WaitGroup
+				for _, percent := range []float64{80, 10, 60, 99, 40} {
+					callbacks.Add(1)
+					go func(value float64) {
+						defer callbacks.Done()
+						<-start
+						progress(ytdlp.Progress{Percent: value})
+					}(percent)
+				}
+				close(start)
+				callbacks.Wait()
+				close(progressReady)
+				<-release
+				return "/downloads/platform.mp4", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-progressReady:
+	case <-time.After(time.Second):
+		t.Fatal("concurrent platform progress callbacks did not finish")
+	}
+	wantProgress(t, manager, task.ID, 99)
+	close(release)
+	waitStatus(t, manager, task.ID, tasks.Completed)
 }
 
 func TestEnginePlatformCancelSignalsRunnerContext(t *testing.T) {
@@ -358,6 +520,48 @@ func TestEnginePlatformPublishedPathCompletesDespiteCleanupWarning(t *testing.T)
 	completed := waitStatus(t, manager, task.ID, tasks.Completed)
 	if completed.OutputPath != "/downloads/published-platform.mp4" {
 		t.Fatalf("OutputPath = %q", completed.OutputPath)
+	}
+}
+
+func TestEnginePlatformJoinedPublishedPathWinsCancelAndReturnedPath(t *testing.T) {
+	manager := tasks.NewManager()
+	published := make(chan struct{})
+	returnResult := make(chan struct{})
+	const realPath = "/downloads/actually-published-platform.mp4"
+	engine, err := newEngine(engineDeps{
+		manager: manager,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				close(published)
+				<-returnResult
+				return "/downloads/untrusted-return-value.mp4", errors.Join(
+					errors.New("secondary cleanup warning"),
+					output.NewPublishedError(realPath, errors.New("primary cleanup warning")),
+				)
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "720",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-published:
+	case <-time.After(time.Second):
+		t.Fatal("platform runner did not publish")
+	}
+	if _, err := engine.Cancel(task.ID); err != nil {
+		t.Fatal(err)
+	}
+	close(returnResult)
+	completed := waitStatus(t, manager, task.ID, tasks.Completed)
+	if completed.OutputPath != realPath {
+		t.Fatalf("OutputPath = %q, want PublishedPath %q", completed.OutputPath, realPath)
 	}
 }
 
