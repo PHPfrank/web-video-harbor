@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "网页视频下载器",
+  "name": "网页视频港",
   "version": "0.1.0",
   "description": "发现网页中的 MP4 和 M3U8 视频，并发送给本地下载助手。",
   "permissions": [
@@ -15,7 +15,7 @@
   },
   "action": {
     "default_popup": "popup.html",
-    "default_title": "网页视频下载器"
+    "default_title": "网页视频港"
   },
   "options_ui": {
     "page": "options.html",

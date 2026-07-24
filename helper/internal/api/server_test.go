@@ -14,8 +14,8 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/tasks"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/tasks"
 )
 
 const testToken = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"

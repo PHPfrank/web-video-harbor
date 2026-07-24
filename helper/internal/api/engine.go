@@ -10,13 +10,13 @@ import (
 	"sync"
 	"time"
 
-	"web-video-downloader/helper/internal/download"
-	"web-video-downloader/helper/internal/ffmpeg"
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/media"
-	"web-video-downloader/helper/internal/output"
-	"web-video-downloader/helper/internal/safety"
-	"web-video-downloader/helper/internal/tasks"
+	"web-video-harbor/helper/internal/download"
+	"web-video-harbor/helper/internal/ffmpeg"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/media"
+	"web-video-harbor/helper/internal/output"
+	"web-video-harbor/helper/internal/safety"
+	"web-video-harbor/helper/internal/tasks"
 )
 
 const maxManifestBytes = 2 * 1024 * 1024

@@ -17,7 +17,7 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/hlsproxy"
+	"web-video-harbor/helper/internal/hlsproxy"
 )
 
 const validMediaManifest = "#EXTM3U\n#EXT-X-TARGETDURATION:4\n#EXTINF:4,\nsegment.ts\n#EXT-X-ENDLIST\n"

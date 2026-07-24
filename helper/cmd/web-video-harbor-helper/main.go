@@ -14,9 +14,9 @@ import (
 	"syscall"
 	"time"
 
-	"web-video-downloader/helper/internal/api"
-	appconfig "web-video-downloader/helper/internal/config"
-	"web-video-downloader/helper/internal/tasks"
+	"web-video-harbor/helper/internal/api"
+	appconfig "web-video-harbor/helper/internal/config"
+	"web-video-harbor/helper/internal/tasks"
 )
 
 const version = "dev"
@@ -46,7 +46,7 @@ func run(args []string, stdout io.Writer) int {
 }
 
 func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, deps appDeps) int {
-	flags := flag.NewFlagSet("web-video-helper", flag.ContinueOnError)
+	flags := flag.NewFlagSet("web-video-harbor-helper", flag.ContinueOnError)
 	flags.SetOutput(stderr)
 	showVersion := flags.Bool("version", false, "显示版本")
 	configPath := flags.String("config", "", "配置文件路径")
@@ -59,7 +59,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 		return 2
 	}
 	if *showVersion {
-		fmt.Fprintf(stdout, "web-video-helper %s\n", version)
+		fmt.Fprintf(stdout, "web-video-harbor-helper %s\n", version)
 		return 0
 	}
 	path := *configPath

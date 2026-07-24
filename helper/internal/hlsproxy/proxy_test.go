@@ -15,8 +15,8 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/safety"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/safety"
 )
 
 type publicResolver struct{}

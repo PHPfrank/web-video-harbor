@@ -1,6 +1,6 @@
-# 网页视频下载器（macOS）
+# WebVideoHarbor（网页视频港）
 
-这是一个由 Chrome 扩展和 macOS 本地助手组成的网页视频下载工具。扩展发现当前页面中浏览器实际暴露的 MP4 或 M3U8 地址，本地助手负责检查资源并保存为 MP4。M3U8 合并依赖 FFmpeg。
+WebVideoHarbor 是一个由 Chrome 扩展和 macOS 本地助手组成、重视隐私与安全边界的网页视频保存工具。扩展发现当前页面中浏览器实际暴露的 MP4 或 M3U8 地址，本地助手负责检查资源并保存为 MP4。M3U8 合并依赖 FFmpeg。
 
 ## 能做什么
 
@@ -21,7 +21,7 @@
 4. 获取配对密钥，在扩展的“设置”页面保存并测试连接。
 5. 播放目标视频几秒，打开扩展弹窗并重新扫描。
 
-默认下载目录是 `~/Downloads/网页视频下载器/`。本地状态只保存在 `~/Library/Application Support/网页视频下载器/`。
+默认下载目录是 `~/Downloads/WebVideoHarbor/`。本地状态只保存在 `~/Library/Application Support/WebVideoHarbor/`。
 
 ## 安全边界
 

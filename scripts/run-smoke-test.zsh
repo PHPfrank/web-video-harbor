@@ -61,7 +61,7 @@ rm -f -- "$fixture_root/direct.mp4" \
 find "$fixture_root/hls/720" -mindepth 1 -maxdepth 1 -type f -name 'segment*.ts' -delete
 find "$fixture_root/hls/1080" -mindepth 1 -maxdepth 1 -type f -name 'segment*.ts' -delete
 find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '集成测试-*.mp4' -delete
-find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '网页视频下载器集成测试*.mp4' -delete
+find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '网页视频港集成测试*.mp4' -delete
 
 ffmpeg -hide_banner -loglevel error -nostdin -y \
   -f lavfi -i 'color=c=0x2563eb:s=640x360:r=24' \

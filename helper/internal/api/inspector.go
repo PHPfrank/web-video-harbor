@@ -8,9 +8,9 @@ import (
 	"net/http"
 	"time"
 
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/media"
-	"web-video-downloader/helper/internal/safety"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/media"
+	"web-video-harbor/helper/internal/safety"
 )
 
 const maxInspectBody = 2 * 1024 * 1024

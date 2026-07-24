@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	appconfig "web-video-downloader/helper/internal/config"
+	appconfig "web-video-harbor/helper/internal/config"
 )
 
 func TestRunPrintsVersion(t *testing.T) {

@@ -26,11 +26,11 @@ const helper = helperApi.createHelperClient({ storageLocal, timeoutMs: 15000 });
 const pageUrl = `${fixtureURL}/wechat-like-page`;
 const candidates = media.mergeCandidates([
   {
-    url: `${fixtureURL}/direct.mp4`, contentType: 'video/mp4', title: '网页视频下载器集成测试-扩展直连',
+    url: `${fixtureURL}/direct.mp4`, contentType: 'video/mp4', title: '网页视频港集成测试-扩展直连',
     source: 'dom', pageUrl,
   },
   {
-    url: `${fixtureURL}/master.m3u8`, contentType: 'application/vnd.apple.mpegurl', title: '网页视频下载器集成测试-扩展HLS',
+    url: `${fixtureURL}/master.m3u8`, contentType: 'application/vnd.apple.mpegurl', title: '网页视频港集成测试-扩展HLS',
     source: 'dom', pageUrl,
   },
   {

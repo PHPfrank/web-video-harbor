@@ -42,7 +42,7 @@ func DefaultPath() (string, error) {
 	if home == "" {
 		return "", errors.New("find user home directory: empty path")
 	}
-	return filepath.Join(home, "Library", "Application Support", "网页视频下载器", "config.json"), nil
+	return filepath.Join(home, "Library", "Application Support", "WebVideoHarbor", "config.json"), nil
 }
 
 // Load reads path, or creates a secure configuration there on first run.
@@ -101,7 +101,7 @@ func newDefaultConfig() (Config, error) {
 	return Config{
 		Address:     DefaultAddress,
 		Token:       base64.RawURLEncoding.EncodeToString(tokenBytes),
-		DownloadDir: filepath.Join(home, "Downloads", "网页视频下载器"),
+		DownloadDir: filepath.Join(home, "Downloads", "WebVideoHarbor"),
 	}, nil
 }
 

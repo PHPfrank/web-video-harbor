@@ -12,7 +12,7 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/safety"
+	"web-video-harbor/helper/internal/safety"
 )
 
 func TestMediaInspectorClassifiesMP4AndParsesHLS(t *testing.T) {

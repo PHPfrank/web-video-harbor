@@ -16,8 +16,8 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"web-video-downloader/helper/internal/output"
-	"web-video-downloader/helper/internal/safety"
+	"web-video-harbor/helper/internal/output"
+	"web-video-harbor/helper/internal/safety"
 )
 
 const (

@@ -6,7 +6,7 @@ script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 repo_real="${repo_root:A}"
 verification_root="$repo_root/work/doc-verification"
-helper_binary="$repo_root/work/dist/web-video-helper"
+helper_binary="$repo_root/work/dist/web-video-harbor-helper"
 
 for required_command in curl ps lsof file lipo mktemp go; do
   command -v "$required_command" >/dev/null 2>&1 || {
@@ -68,7 +68,7 @@ chmod 0600 "$config_path"
 "$script_dir/build-macos.zsh" >/dev/null
 /usr/bin/lipo "$helper_binary" -verify_arch arm64 x86_64
 version_output="$("$helper_binary" --version)"
-[[ "$version_output" == 'web-video-helper dev' ]] || {
+[[ "$version_output" == 'web-video-harbor-helper dev' ]] || {
   print -u2 -- "助手版本命令输出异常"
   exit 1
 }

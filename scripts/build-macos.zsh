@@ -4,7 +4,7 @@ set -euo pipefail
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 repo_real="${repo_root:A}"
-helper_source="$repo_root/helper/cmd/web-video-helper"
+helper_source="$repo_root/helper/cmd/web-video-harbor-helper"
 dist_dir="$repo_root/work/dist"
 build_cache="$repo_root/work/build-cache/go"
 build_tmp="$repo_root/work/build-tmp"
@@ -39,10 +39,10 @@ for directory in "$dist_dir" "$build_cache" "$build_tmp"; do
   mkdir -p "$directory"
 done
 
-arm_binary="$dist_dir/web-video-helper-arm64"
-intel_binary="$dist_dir/web-video-helper-amd64"
-universal_binary="$dist_dir/web-video-helper"
-universal_temp="$dist_dir/.web-video-helper-universal-$$"
+arm_binary="$dist_dir/web-video-harbor-helper-arm64"
+intel_binary="$dist_dir/web-video-harbor-helper-amd64"
+universal_binary="$dist_dir/web-video-harbor-helper"
+universal_temp="$dist_dir/.web-video-harbor-helper-universal-$$"
 if [[ "${universal_temp:A:h}" != "${dist_dir:A}" ]]; then
   print -u2 -- "临时构建路径无效"
   exit 1

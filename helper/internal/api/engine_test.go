@@ -14,10 +14,10 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/download"
-	"web-video-downloader/helper/internal/ffmpeg"
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/tasks"
+	"web-video-harbor/helper/internal/download"
+	"web-video-harbor/helper/internal/ffmpeg"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/tasks"
 )
 
 type directDownloaderFunc func(context.Context, string, string) (string, error)

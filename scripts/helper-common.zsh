@@ -8,9 +8,9 @@ helper_initialize_paths() {
   helper_repo_root="${helper_script_dir:h}"
   helper_repo_real="${helper_repo_root:A}"
   helper_work_dir="$helper_repo_root/work"
-  helper_binary="$helper_work_dir/dist/web-video-helper"
-  helper_state_dir="$user_directory/Library/Application Support/网页视频下载器"
-  helper_download_dir="$user_directory/Downloads/网页视频下载器"
+  helper_binary="$helper_work_dir/dist/web-video-harbor-helper"
+  helper_state_dir="$user_directory/Library/Application Support/WebVideoHarbor"
+  helper_download_dir="$user_directory/Downloads/WebVideoHarbor"
 
   if [[ "${WEB_VIDEO_HELPER_TESTING:-}" == "1" ]]; then
     local requested_state="${WEB_VIDEO_HELPER_TEST_STATE_DIR:?测试状态目录不能为空}"

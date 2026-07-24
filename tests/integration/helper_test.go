@@ -20,8 +20,8 @@ import (
 	"testing"
 	"time"
 
-	"web-video-downloader/helper/internal/api"
-	"web-video-downloader/helper/internal/tasks"
+	"web-video-harbor/helper/internal/api"
+	"web-video-harbor/helper/internal/tasks"
 )
 
 const smokeToken = "integration-test-token"

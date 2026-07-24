@@ -17,10 +17,10 @@ import (
 	"time"
 	"unicode/utf8"
 
-	"web-video-downloader/helper/internal/hls"
-	"web-video-downloader/helper/internal/hlsproxy"
-	"web-video-downloader/helper/internal/output"
-	"web-video-downloader/helper/internal/safety"
+	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/hlsproxy"
+	"web-video-harbor/helper/internal/output"
+	"web-video-harbor/helper/internal/safety"
 )
 
 const (

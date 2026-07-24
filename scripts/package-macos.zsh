@@ -5,7 +5,7 @@ unsetopt BG_NICE
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 repo_real="${repo_root:A}"
-package_name="网页视频下载器-macOS"
+package_name="WebVideoHarbor-macOS"
 archive_name="$package_name.zip"
 central_output_helper="/Users/frank/.codex/scripts/ensure-central-outputs.zsh"
 
@@ -58,7 +58,7 @@ archive_path="$output_dir/$archive_name"
 [[ ! -e "$archive_path" && ! -L "$archive_path" ]] || fail "输出 ZIP 已存在，拒绝覆盖：$archive_path"
 
 "$repo_root/scripts/build-macos.zsh"
-source_binary="$repo_root/work/dist/web-video-helper"
+source_binary="$repo_root/work/dist/web-video-harbor-helper"
 [[ -x "$source_binary" && ! -L "$source_binary" ]] || fail "构建没有生成安全的 universal 助手"
 /usr/bin/lipo "$source_binary" -verify_arch arm64 x86_64 || fail "构建产物缺少 arm64 或 x86_64"
 
@@ -122,11 +122,11 @@ for packaged_script in \
   start-helper.zsh stop-helper.zsh; do
   copy_regular_file "$repo_root/scripts/$packaged_script" "$stage_root/scripts/$packaged_script"
 done
-copy_regular_file "$source_binary" "$stage_root/work/dist/web-video-helper"
+copy_regular_file "$source_binary" "$stage_root/work/dist/web-video-harbor-helper"
 
 chmod 0755 "$stage_root/scripts/build-macos.zsh" "$stage_root/scripts/helper-status.zsh" \
   "$stage_root/scripts/start-helper.zsh" "$stage_root/scripts/stop-helper.zsh" \
-  "$stage_root/work/dist/web-video-helper"
+  "$stage_root/work/dist/web-video-harbor-helper"
 chmod 0644 "$stage_root/scripts/bounded-log.zsh" "$stage_root/scripts/helper-common.zsh"
 /usr/bin/find "$stage_root" -exec /usr/bin/touch -t 202001010000.00 {} +
 
@@ -267,13 +267,13 @@ create_checksum_manifest "$unpacked_root" "$unpacked_checksums"
 
 for executable_path in \
   scripts/build-macos.zsh scripts/helper-status.zsh scripts/start-helper.zsh \
-  scripts/stop-helper.zsh work/dist/web-video-helper; do
+  scripts/stop-helper.zsh work/dist/web-video-harbor-helper; do
   [[ -x "$unpacked_root/$executable_path" ]] || fail "ZIP 未保留可执行位：$executable_path"
 done
 [[ ! -x "$unpacked_root/scripts/helper-common.zsh" ]] || fail "共享脚本权限意外变为可执行"
 
-unpacked_binary="$unpacked_root/work/dist/web-video-helper"
-[[ "$($unpacked_binary --version)" == "web-video-helper dev" ]] || fail "解包助手版本输出异常"
+unpacked_binary="$unpacked_root/work/dist/web-video-harbor-helper"
+[[ "$($unpacked_binary --version)" == "web-video-harbor-helper dev" ]] || fail "解包助手版本输出异常"
 /usr/bin/file "$unpacked_binary"
 /usr/bin/lipo -info "$unpacked_binary"
 /usr/bin/lipo "$unpacked_binary" -verify_arch arm64 x86_64 || fail "解包助手缺少 universal 架构"
@@ -282,8 +282,8 @@ unpacked_binary="$unpacked_root/work/dist/web-video-helper"
   cd "$unpacked_root"
   /bin/zsh ./scripts/build-macos.zsh
 )
-rebuilt_binary="$unpacked_root/work/dist/web-video-helper"
-[[ "$($rebuilt_binary --version)" == "web-video-helper dev" ]] || fail "解包源码重建后的版本输出异常"
+rebuilt_binary="$unpacked_root/work/dist/web-video-harbor-helper"
+[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper dev" ]] || fail "解包源码重建后的版本输出异常"
 /usr/bin/file "$rebuilt_binary"
 /usr/bin/lipo -info "$rebuilt_binary"
 /usr/bin/lipo "$rebuilt_binary" -verify_arch arm64 x86_64 || fail "解包源码无法重建 universal 助手"
