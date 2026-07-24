@@ -72,6 +72,7 @@ func TestBuildArgsUsesOnlyFixedSafeArgumentArray(t *testing.T) {
 
 	want := []string{
 		"--ignore-config",
+		"--no-plugin-dirs",
 		"--no-playlist",
 		"--max-downloads", "1",
 		"--newline",
@@ -93,7 +94,7 @@ func TestBuildArgsUsesOnlyFixedSafeArgumentArray(t *testing.T) {
 	}
 }
 
-func TestBuildArgsContainsNoCookieConfigUpdateOrPlaylistExpansionFlags(t *testing.T) {
+func TestBuildArgsContainsNoCookieConfigPluginUpdateOrPlaylistExpansionFlags(t *testing.T) {
 	runner, stagingDir := newTestRunner(t)
 	args, err := runner.buildArgs(Request{
 		URL:     testYouTubeURL,
@@ -108,6 +109,7 @@ func TestBuildArgsContainsNoCookieConfigUpdateOrPlaylistExpansionFlags(t *testin
 		"--cookies":              {},
 		"--cookies-from-browser": {},
 		"--config-locations":     {},
+		"--plugin-dirs":          {},
 		"--update":               {},
 		"-U":                     {},
 		"--yes-playlist":         {},
@@ -180,16 +182,16 @@ func TestParseProgressAcceptsPrefixWhitespaceDecimalsAndPercentSign(t *testing.T
 
 	for _, test := range tests {
 		t.Run(test.line, func(t *testing.T) {
-			got, ok := parseProgressLine(test.line, 0)
-			if !ok || got != test.want {
-				t.Fatalf("parseProgressLine(%q) = (%v, %v), want (%v, true)", test.line, got, ok, test.want)
+			got, ok := parseProgressLine(test.line, progressState{})
+			if !ok || !got.hasPrevious || got.percent != test.want {
+				t.Fatalf("parseProgressLine(%q) = (%#v, %v), want percent %v", test.line, got, ok, test.want)
 			}
 		})
 	}
 }
 
 func TestProgressParsingIsMonotonic(t *testing.T) {
-	previous := 0.0
+	state := progressState{}
 	var reported []float64
 	for _, line := range []string{
 		"WVH_PROGRESS:10%",
@@ -199,17 +201,30 @@ func TestProgressParsingIsMonotonic(t *testing.T) {
 		"WVH_PROGRESS:101%",
 		"WVH_PROGRESS:80%",
 	} {
-		next, ok := parseProgressLine(line, previous)
+		next, ok := parseProgressLine(line, state)
 		if !ok {
 			continue
 		}
-		previous = next
-		reported = append(reported, next)
+		state = next
+		reported = append(reported, next.percent)
 	}
 
 	want := []float64{10, 63.4, 99}
 	if !reflect.DeepEqual(reported, want) {
 		t.Fatalf("reported progress = %#v, want %#v", reported, want)
+	}
+}
+
+func TestProgressParsingReportsInitialZeroOnlyOnce(t *testing.T) {
+	state := progressState{}
+
+	first, ok := parseProgressLine("WVH_PROGRESS:0%", state)
+	if !ok || !first.hasPrevious || first.percent != 0 {
+		t.Fatalf("first zero progress = (%#v, %v), want reported zero", first, ok)
+	}
+	second, ok := parseProgressLine("WVH_PROGRESS:0.0%", first)
+	if ok || second != first {
+		t.Fatalf("repeated zero progress = (%#v, %v), want unchanged and ignored", second, ok)
 	}
 }
 
@@ -231,9 +246,10 @@ func TestParseProgressIgnoresUntrustedMalformedAndNonFiniteLines(t *testing.T) {
 
 	for _, line := range tests {
 		t.Run(line, func(t *testing.T) {
-			got, ok := parseProgressLine(line, 17)
-			if ok || got != 17 {
-				t.Fatalf("parseProgressLine(%q) = (%v, %v), want (17, false)", line, got, ok)
+			previous := progressState{percent: 17, hasPrevious: true}
+			got, ok := parseProgressLine(line, previous)
+			if ok || got != previous {
+				t.Fatalf("parseProgressLine(%q) = (%#v, %v), want unchanged state", line, got, ok)
 			}
 		})
 	}
@@ -248,19 +264,21 @@ func TestParseProgressEnforcesMaximumLineLengthBoundary(t *testing.T) {
 	if len(atLimit) != maxProgressLineBytes {
 		t.Fatalf("test line length = %d, want %d", len(atLimit), maxProgressLineBytes)
 	}
-	if got, ok := parseProgressLine(atLimit, 0); !ok || got != 42 {
-		t.Fatalf("at-limit progress = (%v, %v), want (42, true)", got, ok)
+	if got, ok := parseProgressLine(atLimit, progressState{}); !ok || !got.hasPrevious || got.percent != 42 {
+		t.Fatalf("at-limit progress = (%#v, %v), want reported 42", got, ok)
 	}
-	if got, ok := parseProgressLine(overLimit, 17); ok || got != 17 {
-		t.Fatalf("over-limit progress = (%v, %v), want (17, false)", got, ok)
+	previous := progressState{percent: 17, hasPrevious: true}
+	if got, ok := parseProgressLine(overLimit, previous); ok || got != previous {
+		t.Fatalf("over-limit progress = (%#v, %v), want unchanged state", got, ok)
 	}
 }
 
 func TestParseProgressRejectsNonFinitePreviousValue(t *testing.T) {
 	for _, previous := range []float64{math.NaN(), math.Inf(1), math.Inf(-1)} {
-		got, ok := parseProgressLine("WVH_PROGRESS:50%", previous)
-		if ok || !math.IsNaN(got) && !math.IsInf(got, 0) {
-			t.Fatalf("non-finite previous value was accepted: (%v, %v)", got, ok)
+		state := progressState{percent: previous, hasPrevious: true}
+		got, ok := parseProgressLine("WVH_PROGRESS:50%", state)
+		if ok || !math.IsNaN(got.percent) && !math.IsInf(got.percent, 0) {
+			t.Fatalf("non-finite previous value was accepted: (%#v, %v)", got, ok)
 		}
 	}
 }

@@ -75,12 +75,14 @@ type Runner struct {
 	onProgress ProgressFunc
 }
 
-// New validates the static local paths without executing either binary.
+// New validates configured path syntax and the existing output directory
+// without executing either binary. The caller remains responsible for
+// authenticating the binary files before construction.
 func New(config Config) (*Runner, error) {
-	if !validAbsoluteCleanPath(config.BinaryPath) || !validAbsoluteCleanPath(config.FFmpegPath) {
+	if !validConfiguredPathSyntax(config.BinaryPath) || !validConfiguredPathSyntax(config.FFmpegPath) {
 		return nil, errInvalidConfig
 	}
-	if !validAbsoluteCleanPath(config.OutputDir) {
+	if !validConfiguredPathSyntax(config.OutputDir) {
 		return nil, errInvalidConfig
 	}
 	info, err := os.Lstat(config.OutputDir)
@@ -126,6 +128,7 @@ func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error)
 	selector := selectors[request.Quality]
 	return []string{
 		"--ignore-config",
+		"--no-plugin-dirs",
 		"--no-playlist",
 		"--max-downloads", "1",
 		"--newline",
@@ -167,7 +170,7 @@ func validTitle(title string) bool {
 	return true
 }
 
-func validAbsoluteCleanPath(path string) bool {
+func validConfiguredPathSyntax(path string) bool {
 	if path == "" || !utf8.ValidString(path) || !filepath.IsAbs(path) || filepath.Clean(path) != path {
 		return false
 	}
@@ -180,7 +183,7 @@ func validAbsoluteCleanPath(path string) bool {
 }
 
 func (r *Runner) validStagingDir(stagingDir string) bool {
-	if !validAbsoluteCleanPath(stagingDir) || stagingDir == r.outputDir {
+	if !validConfiguredPathSyntax(stagingDir) || stagingDir == r.outputDir {
 		return false
 	}
 	info, err := os.Lstat(stagingDir)
@@ -200,13 +203,18 @@ func (r *Runner) validStagingDir(stagingDir string) bool {
 	return err == nil && relative != "." && relative != ".." && !strings.HasPrefix(relative, ".."+string(filepath.Separator))
 }
 
+type progressState struct {
+	percent     float64
+	hasPrevious bool
+}
+
 // parseProgressLine accepts only the dedicated progress marker, returns a
 // bounded percentage, and suppresses duplicate or decreasing reports.
-func parseProgressLine(line string, previous float64) (float64, bool) {
+func parseProgressLine(line string, previous progressState) (progressState, bool) {
 	if len(line) > maxProgressLineBytes || !strings.HasPrefix(line, progressPrefix) {
 		return previous, false
 	}
-	if math.IsNaN(previous) || math.IsInf(previous, 0) {
+	if previous.hasPrevious && (math.IsNaN(previous.percent) || math.IsInf(previous.percent, 0)) {
 		return previous, false
 	}
 
@@ -222,8 +230,8 @@ func parseProgressLine(line string, previous float64) (float64, bool) {
 		return previous, false
 	}
 	percent = math.Max(0, math.Min(99, percent))
-	if percent < previous || percent == previous && previous != 0 {
+	if previous.hasPrevious && percent <= previous.percent {
 		return previous, false
 	}
-	return percent, true
+	return progressState{percent: percent, hasPrevious: true}, true
 }
