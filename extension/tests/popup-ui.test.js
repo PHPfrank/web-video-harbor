@@ -14,7 +14,8 @@ function source(name) {
 test('manifest wires a popup and options page with existing local resources', () => {
   const manifest = JSON.parse(source('manifest.json'));
 
-  assert.deepEqual(manifest.action, { default_popup: 'popup.html', default_title: '网页视频下载器' });
+  assert.equal(manifest.name, '网页视频港');
+  assert.deepEqual(manifest.action, { default_popup: 'popup.html', default_title: '网页视频港' });
   assert.deepEqual(manifest.options_ui, { page: 'options.html', open_in_tab: true });
   assert.deepEqual(manifest.permissions, ['storage', 'webRequest']);
   for (const name of ['popup.html', 'popup.css', 'popup.js', 'options.html', 'options.js', 'lib/popup-state.js', 'lib/helper-client.js']) {

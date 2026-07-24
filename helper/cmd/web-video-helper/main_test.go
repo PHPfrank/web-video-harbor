@@ -21,7 +21,7 @@ func TestRunPrintsVersion(t *testing.T) {
 	if exitCode != 0 {
 		t.Fatalf("run() exit code = %d, want 0", exitCode)
 	}
-	if got, want := stdout.String(), "web-video-helper dev\n"; got != want {
+	if got, want := stdout.String(), "web-video-harbor-helper dev\n"; got != want {
 		t.Fatalf("run() output = %q, want %q", got, want)
 	}
 }
@@ -52,7 +52,7 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 	if strings.Contains(stderr.String(), cfg.Token) {
 		t.Fatal("stderr leaked token")
 	}
-	if _, err := os.Stat(filepath.Join(home, "Library", "Application Support", "网页视频下载器", "config.json")); !errors.Is(err, os.ErrNotExist) {
+	if _, err := os.Stat(filepath.Join(home, "Library", "Application Support", "WebVideoHarbor", "config.json")); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("default config was touched: %v", err)
 	}
 }

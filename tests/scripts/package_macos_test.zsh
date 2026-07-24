@@ -8,7 +8,7 @@ package_script="$repo_root/scripts/package-macos.zsh"
 test_output_root="$repo_root/work/package-test-output"
 mkdir -p "$test_output_root"
 run_output_dir="$(/usr/bin/mktemp -d "$test_output_root/run.XXXXXX")"
-archive_path="$run_output_dir/网页视频下载器-macOS.zip"
+archive_path="$run_output_dir/WebVideoHarbor-macOS.zip"
 unpack_root="$run_output_dir/unpacked"
 
 fail() {
@@ -31,7 +31,7 @@ env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$run_output_d
 
 mkdir -p "$unpack_root"
 /usr/bin/bsdtar -xf "$archive_path" -C "$unpack_root"
-package_root="$unpack_root/网页视频下载器-macOS"
+package_root="$unpack_root/WebVideoHarbor-macOS"
 
 for required_path in \
   README.md \
@@ -42,9 +42,9 @@ for required_path in \
   scripts/build-macos.zsh \
   scripts/start-helper.zsh \
   helper/go.mod \
-  helper/cmd/web-video-helper/main.go \
+  helper/cmd/web-video-harbor-helper/main.go \
   helper/internal/safety/exact_host_default.go \
-  work/dist/web-video-helper; do
+  work/dist/web-video-harbor-helper; do
   [[ -e "$package_root/$required_path" ]] || fail "ZIP 缺少：$required_path"
 done
 
@@ -61,15 +61,15 @@ if rg -l '^//go:build integration$' "$package_root/helper" -g '*.go' | rg -q .; 
   fail "ZIP 包含 integration build-tag 的测试专用 Go 源码"
 fi
 
-[[ -x "$package_root/work/dist/web-video-helper" ]] || fail "预构建助手不可执行"
-/usr/bin/lipo "$package_root/work/dist/web-video-helper" -verify_arch arm64 x86_64 || \
+[[ -x "$package_root/work/dist/web-video-harbor-helper" ]] || fail "预构建助手不可执行"
+/usr/bin/lipo "$package_root/work/dist/web-video-harbor-helper" -verify_arch arm64 x86_64 || \
   fail "预构建助手不是 arm64+x86_64 universal"
-[[ "$($package_root/work/dist/web-video-helper --version)" == "web-video-helper dev" ]] || \
+[[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper dev" ]] || \
   fail "预构建助手版本输出异常"
 
 archive_listing="$(/usr/bin/bsdtar -tf "$archive_path")"
 top_levels="$(print -r -- "$archive_listing" | sed '/^$/d; s#/.*##' | sort -u)"
-[[ "$top_levels" == "网页视频下载器-macOS" ]] || fail "ZIP 顶层目录不唯一：$top_levels"
+[[ "$top_levels" == "WebVideoHarbor-macOS" ]] || fail "ZIP 顶层目录不唯一：$top_levels"
 if print -r -- "$archive_listing" | rg -i \
   '(^|/)(tests?|testdata|outputs|\.git|__MACOSX|\.DS_Store|[^/]*\.(log|pid|part))(/|$)|(^|/)(config\.json|config\.local\.json|token)(/|$)|(^|/)(chrome-profile|downloads|build-cache|go-cache)(/|$)' \
   >/dev/null; then
@@ -87,7 +87,7 @@ fi
 rm -f -- "$unexpected_file"
 trap - EXIT INT TERM
 rg -Fq '非白名单' "$unexpected_output_dir/rejected.txt" || fail "非白名单扩展文件的拒绝信息不明确"
-[[ ! -e "$unexpected_output_dir/网页视频下载器-macOS.zip" ]] || fail "拒绝非白名单文件后仍发布了 ZIP"
+[[ ! -e "$unexpected_output_dir/WebVideoHarbor-macOS.zip" ]] || fail "拒绝非白名单文件后仍发布了 ZIP"
 
 [[ ! -e "$archive_path.sha256" ]] || fail "打包脚本不应发布可选摘要旁车文件"
 archive_digest_before_no_clobber="$(/usr/bin/shasum -a 256 "$archive_path" | awk '{print $1}')"
@@ -105,7 +105,7 @@ repeat_output_dir="$(/usr/bin/mktemp -d "$test_output_root/repeat.XXXXXX")"
 env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$repeat_output_dir" \
   /bin/zsh "$package_script" >/dev/null
 first_digest="$(/usr/bin/shasum -a 256 "$archive_path" | awk '{print $1}')"
-repeat_digest="$(/usr/bin/shasum -a 256 "$repeat_output_dir/网页视频下载器-macOS.zip" | awk '{print $1}')"
+repeat_digest="$(/usr/bin/shasum -a 256 "$repeat_output_dir/WebVideoHarbor-macOS.zip" | awk '{print $1}')"
 [[ "$first_digest" == "$repeat_digest" ]] || \
   fail "相同源码重复打包的 SHA256 不一致：$first_digest != $repeat_digest"
 

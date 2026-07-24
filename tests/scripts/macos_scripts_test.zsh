@@ -57,8 +57,8 @@ if case_enabled launch_signal_window; then
   fi
 fi
 
-expected_state_dir="${HOME:?}/Library/Application Support/网页视频下载器"
-expected_download_dir="${HOME:?}/Downloads/网页视频下载器"
+expected_state_dir="${HOME:?}/Library/Application Support/WebVideoHarbor"
+expected_download_dir="${HOME:?}/Downloads/WebVideoHarbor"
 path_output="$('/bin/zsh' -c '
   source "$1"
   helper_initialize_paths "$2"
@@ -78,7 +78,7 @@ test_path_output="$(env WEB_VIDEO_HELPER_TESTING=1 \
   ' -- "$common_path" "$repo_root/scripts/start-helper.zsh")"
 [[ "$test_path_output" == "$test_state_dir" ]] || fail "测试状态路径门闩未生效"
 
-outside_test_state="${TMPDIR:-/tmp}/web-video-helper-outside-state"
+outside_test_state="${TMPDIR:-/tmp}/web-video-harbor-helper-outside-state"
 if env WEB_VIDEO_HELPER_TESTING=1 WEB_VIDEO_HELPER_TEST_STATE_DIR="$outside_test_state" \
   /bin/zsh -c 'source "$1"; helper_initialize_paths "$2"' -- \
   "$common_path" "$repo_root/scripts/start-helper.zsh" >/dev/null 2>&1; then
@@ -126,9 +126,9 @@ for readonly_script in stop-helper.zsh helper-status.zsh; do
 done
 
 dist_dir="$repo_root/work/dist"
-arm_binary="$dist_dir/web-video-helper-arm64"
-intel_binary="$dist_dir/web-video-helper-amd64"
-universal_binary="$dist_dir/web-video-helper"
+arm_binary="$dist_dir/web-video-harbor-helper-arm64"
+intel_binary="$dist_dir/web-video-harbor-helper-amd64"
+universal_binary="$dist_dir/web-video-harbor-helper"
 mkdir -p "$dist_dir"
 rm -f -- "$arm_binary" "$intel_binary" "$universal_binary"
 
@@ -141,7 +141,7 @@ architecture_info="$(/usr/bin/lipo -info "$universal_binary")"
 [[ "$architecture_info" == *"arm64"* && "$architecture_info" == *"x86_64"* ]] || \
   fail "universal 助手缺少 arm64 或 x86_64：$architecture_info"
 version_output="$("$universal_binary" --version)"
-[[ "$version_output" == "web-video-helper dev" ]] || fail "助手版本输出异常：$version_output"
+[[ "$version_output" == "web-video-harbor-helper dev" ]] || fail "助手版本输出异常：$version_output"
 rg -Fq '$("$go_command" version)' "$repo_root/scripts/build-macos.zsh" || \
   fail "构建脚本执行 Homebrew Go 时没有完整引用路径"
 
@@ -155,7 +155,7 @@ for required_command in \
   './scripts/build-macos.zsh' \
   './scripts/start-helper.zsh' \
   './scripts/helper-status.zsh' \
-  './work/dist/web-video-helper --print-token' \
+  './work/dist/web-video-harbor-helper --print-token' \
   './scripts/stop-helper.zsh'; do
   rg -Fq "$required_command" "$guide_path" || fail "安装说明缺少命令：$required_command"
 done
@@ -166,7 +166,7 @@ for required_topic in \
   '未连接' 'FFmpeg' '无候选' '权限' '端口占用'; do
   rg -Fq "$required_topic" "$guide_path" || fail "安装说明缺少主题：$required_topic"
 done
-rg -Fq '~/Downloads/网页视频下载器/' "$readme_path" "$guide_path" || \
+rg -Fq '~/Downloads/WebVideoHarbor/' "$readme_path" "$guide_path" || \
   fail "文档缺少默认下载目录"
 if rg -n '保证.*(所有|任何).*下载' "$readme_path" "$guide_path" >/dev/null; then
   fail "文档包含不当的万能下载承诺"
@@ -175,7 +175,7 @@ fi
 fixture_root="$(mktemp -d "$repo_root/work/script-tests/lifecycle.XXXXXX")"
 fixture_state="$fixture_root/work/test-state"
 fixture_scripts="$fixture_root/scripts"
-fixture_binary="$fixture_root/work/dist/web-video-helper"
+fixture_binary="$fixture_root/work/dist/web-video-harbor-helper"
 fixture_fake_bin="$fixture_root/work/fake-bin"
 fixture_sleep_pid=""
 

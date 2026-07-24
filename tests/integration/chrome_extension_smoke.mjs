@@ -181,7 +181,7 @@ try {
   const extensions = (await cdp.send('Extensions.getExtensions')).extensions || [];
   const extension = extensions.find((item) => item.id === loaded.id);
   assert.ok(extension, 'loaded extension missing from Extensions.getExtensions');
-  assert.equal(extension.name, '网页视频下载器');
+  assert.equal(extension.name, '网页视频港');
   assert.equal(extension.enabled, true);
   assert.equal(path.resolve(extension.path), path.join(repoRoot, 'extension'));
 

@@ -19,7 +19,7 @@ func TestDefaultPathUsesHome(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DefaultPath() error = %v", err)
 	}
-	want := filepath.Join(home, "Library", "Application Support", "网页视频下载器", "config.json")
+	want := filepath.Join(home, "Library", "Application Support", "WebVideoHarbor", "config.json")
 	if got != want {
 		t.Fatalf("DefaultPath() = %q, want %q", got, want)
 	}
@@ -28,7 +28,7 @@ func TestDefaultPathUsesHome(t *testing.T) {
 func TestLoadFirstRunCreatesSecureDefaults(t *testing.T) {
 	home := privateTempDir(t)
 	t.Setenv("HOME", home)
-	path := filepath.Join(home, "Library", "Application Support", "网页视频下载器", "config.json")
+	path := filepath.Join(home, "Library", "Application Support", "WebVideoHarbor", "config.json")
 
 	cfg, err := Load(path)
 	if err != nil {
@@ -37,7 +37,7 @@ func TestLoadFirstRunCreatesSecureDefaults(t *testing.T) {
 	if cfg.Address != DefaultAddress {
 		t.Errorf("Address = %q, want %q", cfg.Address, DefaultAddress)
 	}
-	wantDownloadDir := filepath.Join(home, "Downloads", "网页视频下载器")
+	wantDownloadDir := filepath.Join(home, "Downloads", "WebVideoHarbor")
 	if cfg.DownloadDir != wantDownloadDir {
 		t.Errorf("DownloadDir = %q, want %q", cfg.DownloadDir, wantDownloadDir)
 	}
