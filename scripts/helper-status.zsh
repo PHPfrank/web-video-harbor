@@ -62,6 +62,12 @@ if [[ "$health_json" == *'"ffmpeg":true'* ]]; then
 else
   print -- "FFmpeg：未安装"
 fi
+if [[ "$health_json" == *'"platformDownloader":{"available":true'* ]] && \
+  [[ "$health_json" =~ '"version":"([0-9]{4}\.[0-9]{2}\.[0-9]{2})"' ]]; then
+  print -- "平台解析器: 可用（${match[1]}）"
+else
+  print -- "平台解析器: 不可用"
+fi
 if [[ "$health_json" =~ '"version":"([^"\\]*)"' ]]; then
   print -- "版本：${match[1]}"
 fi

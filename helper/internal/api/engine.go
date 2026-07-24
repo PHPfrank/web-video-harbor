@@ -59,21 +59,23 @@ type ManifestInspection struct {
 }
 
 type engineDeps struct {
-	manager           *tasks.Manager
-	inspector         manifestInspector
-	newDownloader     func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner      func(ffmpeg.ProgressFunc) (hlsRunner, error)
-	newPlatformRunner func(ytdlp.ProgressFunc) (platformRunner, error)
+	manager             *tasks.Manager
+	inspector           manifestInspector
+	newDownloader       func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner        func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner   func(ytdlp.ProgressFunc) (platformRunner, error)
+	platformUnavailable bool
 }
 
 // Engine owns asynchronous task execution while Manager remains the source of
 // truth for public task state.
 type Engine struct {
-	manager           *tasks.Manager
-	inspector         manifestInspector
-	newDownloader     func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner      func(ffmpeg.ProgressFunc) (hlsRunner, error)
-	newPlatformRunner func(ytdlp.ProgressFunc) (platformRunner, error)
+	manager             *tasks.Manager
+	inspector           manifestInspector
+	newDownloader       func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner        func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner   func(ytdlp.ProgressFunc) (platformRunner, error)
+	platformUnavailable bool
 
 	mu      sync.RWMutex
 	specs   map[string]JobSpec
@@ -89,6 +91,17 @@ type EngineClosedError struct{}
 func (*EngineClosedError) Error() string { return "task engine is shutting down" }
 func (*EngineClosedError) SafeMessage() string {
 	return "本地助手正在退出，无法创建新任务"
+}
+
+// PlatformDownloaderUnavailableError reports a damaged or incomplete helper
+// installation without exposing local bundle paths.
+type PlatformDownloaderUnavailableError struct{}
+
+func (*PlatformDownloaderUnavailableError) Error() string {
+	return "bundled platform downloader is unavailable"
+}
+func (*PlatformDownloaderUnavailableError) SafeMessage() string {
+	return "安装包缺少平台解析器"
 }
 
 // SpecNotFoundError means the task exists in Manager but was not created by
@@ -196,21 +209,22 @@ func newEngine(deps engineDeps) (*Engine, error) {
 	}
 	rootCtx, cancel := context.WithCancel(context.Background())
 	return &Engine{
-		manager:           deps.manager,
-		inspector:         deps.inspector,
-		newDownloader:     deps.newDownloader,
-		newHLSRunner:      deps.newHLSRunner,
-		newPlatformRunner: deps.newPlatformRunner,
-		specs:             make(map[string]JobSpec),
-		rootCtx:           rootCtx,
-		cancel:            cancel,
+		manager:             deps.manager,
+		inspector:           deps.inspector,
+		newDownloader:       deps.newDownloader,
+		newHLSRunner:        deps.newHLSRunner,
+		newPlatformRunner:   deps.newPlatformRunner,
+		platformUnavailable: deps.platformUnavailable,
+		specs:               make(map[string]JobSpec),
+		rootCtx:             rootCtx,
+		cancel:              cancel,
 	}, nil
 }
 
 // NewEngine constructs a production engine. A new downloader or FFmpeg runner
 // is created for every attempt.
-func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath string) (*Engine, error) {
-	return newEngine(engineDeps{
+func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath, platformDownloaderPath string) (*Engine, error) {
+	deps := engineDeps{
 		manager:   manager,
 		inspector: NewManifestInspector(resolver),
 		newDownloader: func(progress download.ProgressFunc) (directDownloader, error) {
@@ -228,7 +242,20 @@ func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolve
 				OnProgress: progress,
 			})
 		},
-	})
+	}
+	if platformDownloaderPath == "" {
+		deps.platformUnavailable = true
+	} else {
+		deps.newPlatformRunner = func(progress ytdlp.ProgressFunc) (platformRunner, error) {
+			return ytdlp.New(ytdlp.Config{
+				BinaryPath: platformDownloaderPath,
+				FFmpegPath: ffmpegPath,
+				OutputDir:  outputDir,
+				OnProgress: progress,
+			})
+		}
+	}
+	return newEngine(deps)
 }
 
 // Start records a queued attempt and starts its worker asynchronously.
@@ -253,6 +280,9 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 			return tasks.Task{}, err
 		}
 		spec.URL = video.CanonicalURL
+		if e.platformUnavailable {
+			return tasks.Task{}, &PlatformDownloaderUnavailableError{}
+		}
 	}
 	if err := ctx.Err(); err != nil {
 		return tasks.Task{}, err

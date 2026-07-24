@@ -354,7 +354,12 @@ print -r -- "#!/bin/zsh
 if [[ ! -f \"$fixture_state/helper.pid\" ]]; then exit 22; fi
 health_pid=\"\$(<\"$fixture_state/helper.pid\")\"
 if [[ -f \"$fixture_root/work/health-mismatch\" ]]; then (( health_pid += 1 )); fi
-print -r -- \"{\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"" \
+if [[ -f \"$fixture_root/work/platform-unavailable\" ]]; then
+  platform_status='\"available\":false,\"version\":\"\"'
+else
+  platform_status='\"available\":true,\"version\":\"2026.07.04\",\"path\":\"/must/not/leak/yt-dlp_macos\"'
+fi
+print -r -- \"{\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"platformDownloader\\\":{\$platform_status},\\\"pid\\\":\$health_pid}\"" \
   >"$fixture_fake_bin/curl"
 chmod 0755 "$fixture_fake_bin/curl"
 
@@ -773,10 +778,25 @@ env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
   /bin/zsh "$fixture_scripts/helper-status.zsh" >"$status_output" 2>&1
 rg -q '助手状态：健康' "$status_output" || fail "状态脚本未报告健康"
 rg -q 'FFmpeg：可用' "$status_output" || fail "状态脚本未报告 FFmpeg"
+rg -Fq '平台解析器: 可用（2026.07.04）' "$status_output" || fail "状态脚本未报告平台解析器版本"
+if rg -Fq '/must/not/leak/yt-dlp_macos' "$status_output"; then
+  fail "状态脚本泄露了平台解析器路径"
+fi
 rg -Fq "下载目录：$fixture_download" "$status_output" || fail "状态脚本未报告下载目录"
 if rg -Fq "$sentinel_token" "$status_output"; then
   fail "状态脚本泄露了配对密钥"
 fi
+print -r -- unavailable >"$fixture_root/work/platform-unavailable"
+unavailable_status_output="$fixture_root/work/status-platform-unavailable.txt"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/helper-status.zsh" >"$unavailable_status_output" 2>&1
+rg -Fq '平台解析器: 不可用' "$unavailable_status_output" || fail "状态脚本未报告平台解析器不可用"
+if rg -Fq '2026.07.04' "$unavailable_status_output"; then
+  fail "不可用状态错误显示了解析器版本"
+fi
+rm -f -- "$fixture_root/work/platform-unavailable"
 
 for identity_failure in wrong-config lsof-fails; do
   print -r -- fail >"$fixture_root/work/$identity_failure"

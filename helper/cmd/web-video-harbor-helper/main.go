@@ -17,24 +17,27 @@ import (
 	"web-video-harbor/helper/internal/api"
 	appconfig "web-video-harbor/helper/internal/config"
 	"web-video-harbor/helper/internal/tasks"
+	"web-video-harbor/helper/internal/ytdlp"
 )
 
 const version = "dev"
 
 type appDeps struct {
-	defaultConfigPath func() (string, error)
-	loadConfig        func(string) (appconfig.Config, error)
-	lookPath          func(string) (string, error)
-	serve             func(context.Context, appconfig.Config, string, string) error
+	defaultConfigPath       func() (string, error)
+	loadConfig              func(string) (appconfig.Config, error)
+	lookPath                func(string) (string, error)
+	probePlatformDownloader func(context.Context) (ytdlp.ProbeResult, error)
+	serve                   func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult) error
 }
 
 func defaultAppDeps() appDeps {
 	return appDeps{
-		defaultConfigPath: appconfig.DefaultPath,
-		loadConfig:        appconfig.Load,
-		lookPath:          exec.LookPath,
-		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string) error {
-			return serveHelper(ctx, cfg, appVersion, ffmpegPath, net.Listen)
+		defaultConfigPath:       appconfig.DefaultPath,
+		loadConfig:              appconfig.Load,
+		lookPath:                exec.LookPath,
+		probePlatformDownloader: ytdlp.Probe,
+		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult) error {
+			return serveHelper(ctx, cfg, appVersion, ffmpegPath, platform, net.Listen)
 		},
 	}
 }
@@ -87,8 +90,15 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 		ffmpegPath = ""
 		ffmpegStatus = "未安装"
 	}
-	fmt.Fprintf(stdout, "本地助手监听：%s\n下载目录：%s\nFFmpeg: %s\n", cfg.Address, cfg.DownloadDir, ffmpegStatus)
-	if err := deps.serve(ctx, cfg, version, ffmpegPath); err != nil {
+	platform, probeErr := deps.probePlatformDownloader(ctx)
+	platformStatus := "不可用"
+	if probeErr == nil {
+		platformStatus = fmt.Sprintf("可用（%s）", platform.Version)
+	} else {
+		platform = ytdlp.ProbeResult{}
+	}
+	fmt.Fprintf(stdout, "本地助手监听：%s\n下载目录：%s\nFFmpeg: %s\n平台解析器: %s\n", cfg.Address, cfg.DownloadDir, ffmpegStatus, platformStatus)
+	if err := deps.serve(ctx, cfg, version, ffmpegPath, platform); err != nil {
 		fmt.Fprintf(stderr, "本地助手运行失败：%v\n", err)
 		return 1
 	}
@@ -97,14 +107,15 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 
 type listenFunc func(network, address string) (net.Listener, error)
 
-func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, listen listenFunc) error {
+func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, listen listenFunc) error {
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath)
+	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform.Path)
 	if err != nil {
 		return fmt.Errorf("create task engine: %w", err)
 	}
 	apiServer, err := api.New(api.Options{
 		Token: cfg.Token, Version: appVersion, FFmpegAvailable: ffmpegPath != "",
+		PlatformDownloaderAvailable: platform.Path != "", PlatformDownloaderVersion: platform.Version,
 		DownloadDir: cfg.DownloadDir, Inspector: api.NewMediaInspector(nil),
 		Tasks: engine, Revealer: api.FinderRevealer{},
 	})

@@ -13,6 +13,7 @@ import (
 	"time"
 
 	appconfig "web-video-harbor/helper/internal/config"
+	"web-video-harbor/helper/internal/ytdlp"
 )
 
 func TestRunPrintsVersion(t *testing.T) {
@@ -33,7 +34,10 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	serveCalls := 0
 	deps := defaultAppDeps()
-	deps.serve = func(context.Context, appconfig.Config, string, string) error { serveCalls++; return nil }
+	deps.serve = func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult) error {
+		serveCalls++
+		return nil
+	}
 
 	exitCode := runContext(context.Background(), []string{"--config", configPath, "--print-token"}, &stdout, &stderr, deps)
 	if exitCode != 0 {
@@ -75,7 +79,7 @@ func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
 		}
 		return "/usr/local/bin/ffmpeg", nil
 	}
-	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string) error {
+	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult) error {
 		gotConfig, gotFFmpeg = got, ffmpegPath
 		return nil
 	}
@@ -103,7 +107,7 @@ func TestNormalStartContinuesWhenFFmpegMissing(t *testing.T) {
 	deps := defaultAppDeps()
 	deps.lookPath = func(string) (string, error) { return "", errors.New("not found") }
 	called := false
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult) error {
 		called = true
 		if ffmpegPath != "" {
 			t.Fatalf("ffmpeg path=%q", ffmpegPath)
@@ -115,6 +119,59 @@ func TestNormalStartContinuesWhenFFmpegMissing(t *testing.T) {
 	}
 	if !called || !strings.Contains(stdout.String(), "FFmpeg: 未安装") {
 		t.Fatalf("called=%v stdout=%q", called, stdout.String())
+	}
+}
+
+func TestNormalStartProbesAndPassesPlatformDownloader(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.json")
+	var stdout, stderr bytes.Buffer
+	deps := defaultAppDeps()
+	deps.probePlatformDownloader = func(context.Context) (ytdlp.ProbeResult, error) {
+		return ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos", Version: "2026.07.04"}, nil
+	}
+	var got ytdlp.ProbeResult
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult) error {
+		got = platform
+		return nil
+	}
+	if exit := runContext(context.Background(), []string{"--config", configPath}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	if got.Path != "/Applications/WebVideoHarbor/yt-dlp_macos" || got.Version != "2026.07.04" {
+		t.Fatalf("serve platform downloader = %#v", got)
+	}
+	if !strings.Contains(stdout.String(), "平台解析器: 可用（2026.07.04）") || strings.Contains(stdout.String(), got.Path) {
+		t.Fatalf("startup output = %q", stdout.String())
+	}
+}
+
+func TestNormalStartContinuesWhenPlatformDownloaderMissing(t *testing.T) {
+	home := privateTempDir(t)
+	t.Setenv("HOME", home)
+	configPath := filepath.Join(home, "config.json")
+	var stdout, stderr bytes.Buffer
+	deps := defaultAppDeps()
+	deps.probePlatformDownloader = func(context.Context) (ytdlp.ProbeResult, error) {
+		return ytdlp.ProbeResult{}, errors.New("missing path must stay internal")
+	}
+	called := false
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult) error {
+		called = true
+		if platform != (ytdlp.ProbeResult{}) {
+			t.Fatalf("platform downloader = %#v", platform)
+		}
+		return nil
+	}
+	if exit := runContext(context.Background(), []string{"--config", configPath}, &stdout, &stderr, deps); exit != 0 {
+		t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+	}
+	if !called || !strings.Contains(stdout.String(), "平台解析器: 不可用") {
+		t.Fatalf("called=%v stdout=%q", called, stdout.String())
+	}
+	if strings.Contains(stdout.String()+stderr.String(), "missing path") {
+		t.Fatalf("probe diagnostic leaked: stdout=%q stderr=%q", stdout.String(), stderr.String())
 	}
 }
 
@@ -158,7 +215,7 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveHelper(ctx, cfg, "test", "", func(network, address string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test", "", ytdlp.ProbeResult{}, func(network, address string) (net.Listener, error) {
 			if network != "tcp" || address != appconfig.DefaultAddress {
 				t.Errorf("listen(%q,%q)", network, address)
 			}

@@ -161,6 +161,27 @@ func TestEngineStartPlatformRejectsUnknownQualityBeforeCreatingTask(t *testing.T
 	}
 }
 
+func TestEnginePlatformDownloaderMissingRejectsSynchronously(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{manager: manager, platformUnavailable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err == nil {
+		t.Fatal("Start accepted a platform task without the bundled downloader")
+	}
+	var safe interface{ SafeMessage() string }
+	if !errors.As(err, &safe) || safe.SafeMessage() != "安装包缺少平台解析器" {
+		t.Fatalf("Start error = %v, safe = %#v", err, safe)
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("missing platform downloader created tasks: %#v", got)
+	}
+}
+
 func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testing.T) {
 	manager := tasks.NewManager()
 	requests := make(chan ytdlp.Request, 1)
