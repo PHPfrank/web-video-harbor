@@ -142,6 +142,19 @@ test('platform classifier rejects pages outside the single-video trust boundary'
   }
 });
 
+test('platform classifier rejects raw ASCII control characters before URL parsing', () => {
+  const rejected = [
+    'https://www.youtube.com/wa\ntch?v=_mVb1D8wHxg',
+    'https://www.bilibili.com/vid\teo/BV1K3Gz6pEoo',
+    'https://www.youtube.com/watch\u0000?v=_mVb1D8wHxg',
+    'https://www.bilibili.com/video\u007f/BV1K3Gz6pEoo',
+  ];
+
+  for (const url of rejected) {
+    assert.equal(platform.classifyPlatformUrl(url), null, JSON.stringify(url));
+  }
+});
+
 test('candidateForPage accepts only page data and normalizes the title', () => {
   assert.equal(platform.candidateForPage(null), null);
   assert.equal(platform.candidateForPage([]), null);

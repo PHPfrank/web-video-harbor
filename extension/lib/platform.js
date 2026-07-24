@@ -15,6 +15,7 @@
   const YOUTUBE_ID_PATTERN = /^[A-Za-z0-9_-]{11}$/;
   const BILIBILI_ID_PATTERN = /^(?:BV[A-Za-z0-9]{10}|av[1-9][0-9]*)$/;
   const PART_PATTERN = /^[0-9]+$/;
+  const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
   const SUPPORTED_AUTHORITIES = new Set([
     'www.youtube.com',
     'youtube.com',
@@ -97,6 +98,7 @@
 
   function classifyPlatformUrl(value) {
     if (typeof value !== 'string' || value === '' || value.length > MAX_URL_LENGTH) return null;
+    if (CONTROL_CHARACTER_PATTERN.test(value)) return null;
     if (value.includes('#')) return null;
 
     const authorityMatch = /^https:\/\/([^/?#]+)(?:[/?]|$)/.exec(value);
