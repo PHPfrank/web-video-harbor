@@ -133,16 +133,23 @@ func probeAdjacent(ctx context.Context, helperPath string, run versionCommand) (
 }
 
 func runVersionCommand(ctx context.Context, path string, args ...string) ([]byte, error) {
+	return runBoundedVersionCommand(ctx, path, maxVersionOutput, args...)
+}
+
+func runBoundedVersionCommand(ctx context.Context, path string, limit int, args ...string) ([]byte, error) {
 	if ctx == nil {
 		return nil, context.Canceled
 	}
-	if err := ctx.Err(); err != nil {
+	if err := ctx.Err(); err != nil || limit <= 0 {
+		if err == nil {
+			err = errors.New("version output limit is invalid")
+		}
 		return nil, err
 	}
 	command := exec.Command(path, args...)
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = outputDrainGrace
-	stdout := boundedVersionBuffer{limit: maxVersionOutput}
+	stdout := boundedVersionBuffer{limit: limit}
 	command.Stdout = &stdout
 	command.Stderr = io.Discard
 	if err := command.Start(); err != nil {
