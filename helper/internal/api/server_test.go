@@ -447,6 +447,24 @@ func TestCreateMapsMissingPlatformFFmpegToStableError(t *testing.T) {
 	}
 }
 
+func TestCreateMapsMissingJavaScriptRuntimeToStableError(t *testing.T) {
+	srv, service, _, _, _ := newTestServer(t, nil)
+	service.err = &PlatformRuntimeUnavailableError{}
+	rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", []byte(
+		`{"url":"https://youtu.be/_mVb1D8wHxg","title":"demo","mediaType":"platform","quality":"best"}`,
+	), testToken, "")
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("create status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeObject(t, rr)
+	if got["code"] != "javascript_runtime" || got["message"] != "安装包缺少 JavaScript 解析组件" {
+		t.Fatalf("create error = %#v", got)
+	}
+	if len(service.startSpecs) != 0 || len(service.items) != 0 {
+		t.Fatalf("missing runtime created task state: specs=%#v items=%#v", service.startSpecs, service.items)
+	}
+}
+
 func TestCreateRejectsInvalidMediaQualityContracts(t *testing.T) {
 	cases := []struct {
 		name string

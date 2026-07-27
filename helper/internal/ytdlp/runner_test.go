@@ -381,6 +381,49 @@ func TestRunnerRejectsPrivateExecutableSnapshotReplacementBeforeAndAfterStart(t 
 	}
 }
 
+func TestRunnerClassifiesRuntimeSnapshotReplacementAsJavaScriptRuntime(t *testing.T) {
+	for _, timing := range []string{"before start", "after preflight"} {
+		t.Run(timing, func(t *testing.T) {
+			config := testConfig(t)
+			runner, err := New(config)
+			if err != nil {
+				t.Fatal(err)
+			}
+			factoryCalled := false
+			var command *exec.Cmd
+			if timing == "before start" {
+				replaceExecutableSnapshotPath(t, config.RuntimeSnapshot.Path(), "other inode")
+				runner.commandFactory = func(string, []string, []string) *exec.Cmd {
+					factoryCalled = true
+					return fakeCommandFactory("success", nil)("", nil, minimalEnvironment())
+				}
+			} else {
+				fakeFactory := fakeCommandFactory("cancel-tree", []string{"WVH_FAKE_MARKER_DIR=" + t.TempDir()})
+				runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+					factoryCalled = true
+					replaceExecutableSnapshotPath(t, config.RuntimeSnapshot.Path(), "other inode")
+					command = fakeFactory(path, args, env)
+					return command
+				}
+			}
+
+			_, err = runner.Run(context.Background(), validRequest("运行环境快照替换"))
+			assertRunnerCode(t, err, CodeJavaScriptRuntime)
+			if timing == "before start" && factoryCalled {
+				t.Fatal("command factory ran after pre-start runtime mismatch")
+			}
+			if timing == "after preflight" {
+				if !factoryCalled || command == nil || command.Process == nil {
+					t.Fatal("post-start runtime mismatch test did not start the controlled command")
+				}
+				if processGroupExists(command.Process.Pid) {
+					t.Fatalf("process group %d survived post-start runtime mismatch", command.Process.Pid)
+				}
+			}
+		})
+	}
+}
+
 func replaceExecutableSnapshotPath(t *testing.T, path, replacement string) {
 	t.Helper()
 	target := filepath.Join(t.TempDir(), "replacement")
@@ -628,6 +671,24 @@ func TestRunnerDoesNotApplyYouTubeImpersonationFallbackToBilibili(t *testing.T) 
 	}
 }
 
+func TestRunnerDoesNotDescribeBilibiliCookieAdviceAsYouTubeVerification(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("failure", []string{
+		"WVH_FAKE_DIAGNOSTIC=ERROR: Sign in required; try --cookies-from-browser",
+	})
+	_, err = runner.Run(context.Background(), Request{
+		URL: "https://www.bilibili.com/video/BV1K3Gz6pEoo", Title: "Bilibili", Quality: QualityBest,
+	})
+	assertRunnerCode(t, err, CodeLoginRequired)
+	if strings.Contains(err.Error(), "YouTube") {
+		t.Fatalf("Bilibili login error used a YouTube-only message: %v", err)
+	}
+}
+
 func TestRunnerReportsNetworkFilteredAfterChromeFallbackAlsoResets(t *testing.T) {
 	config := testConfig(t)
 	runner, err := New(config)
@@ -637,7 +698,9 @@ func TestRunnerReportsNetworkFilteredAfterChromeFallbackAlsoResets(t *testing.T)
 	attempts := 0
 	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
 		attempts++
-		return fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=ERROR: curl: (35) Recv failure: Connection reset by peer"})(path, args, env)
+		return fakeCommandFactory("failure", []string{
+			"WVH_FAKE_DIAGNOSTIC=ERROR: Unable to download API page: curl: (35) TLS connect error",
+		})(path, args, env)
 	}
 	_, err = runner.Run(context.Background(), validRequest("网络过滤"))
 	assertRunnerCode(t, err, CodeNetworkFiltered)

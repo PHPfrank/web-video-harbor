@@ -147,6 +147,7 @@ func runBoundedVersionCommand(ctx context.Context, path string, limit int, args 
 		return nil, err
 	}
 	command := exec.Command(path, args...)
+	command.Env = minimalEnvironment()
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = outputDrainGrace
 	stdout := boundedVersionBuffer{limit: limit}

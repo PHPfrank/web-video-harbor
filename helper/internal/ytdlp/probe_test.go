@@ -77,6 +77,27 @@ func TestProbeAllowsBundledParserColdStartWindow(t *testing.T) {
 	t.Cleanup(func() { _ = result.Close() })
 }
 
+func TestVersionProbeUsesMinimalEnvironment(t *testing.T) {
+	t.Setenv("HOME", "/Users/private-home")
+	t.Setenv("HTTP_PROXY", "http://private-proxy.invalid")
+	t.Setenv("HTTPS_PROXY", "http://private-proxy.invalid")
+	scriptPath := filepath.Join(t.TempDir(), "version-probe")
+	script := "#!/bin/sh\nprintf 'HOME=%s\\nHTTP_PROXY=%s\\nHTTPS_PROXY=%s\\nPATH=%s\\nLANG=%s\\nLC_ALL=%s\\n' \"$HOME\" \"$HTTP_PROXY\" \"$HTTPS_PROXY\" \"$PATH\" \"$LANG\" \"$LC_ALL\"\n"
+	if err := os.WriteFile(scriptPath, []byte(script), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	output, err := runBoundedVersionCommand(context.Background(), scriptPath, 512)
+	if err != nil {
+		t.Fatalf("runBoundedVersionCommand() error = %v", err)
+	}
+	got := string(output)
+	want := "HOME=\nHTTP_PROXY=\nHTTPS_PROXY=\nPATH=/usr/bin:/bin:/usr/sbin:/sbin\nLANG=C.UTF-8\nLC_ALL=C.UTF-8\n"
+	if got != want {
+		t.Fatalf("version probe environment = %q, want %q", got, want)
+	}
+}
+
 func TestProbeRejectsUnsafeBundledFilesBeforeExecution(t *testing.T) {
 	tests := []struct {
 		name  string
@@ -395,14 +416,13 @@ func TestProbePropagatesCancellationWithoutReturningIdentity(t *testing.T) {
 }
 
 func TestRunVersionCommandKillsDescendantHoldingOutputPipe(t *testing.T) {
-	t.Setenv("WVH_PROBE_PROCESS_HELPER", "1")
 	pidPath := filepath.Join(t.TempDir(), "descendant.pid")
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	result := make(chan error, 1)
 	go func() {
 		_, err := runVersionCommand(ctx, os.Args[0],
-			"-test.run=^TestProbeProcessHelper$", "--", "leader", pidPath,
+			"-test.run=^TestProbeProcessHelper$", "--", "version-process-helper", "leader", pidPath,
 		)
 		result <- err
 	}()
@@ -447,12 +467,11 @@ func TestRunVersionCommandKillsDescendantHoldingOutputPipe(t *testing.T) {
 }
 
 func TestRunVersionCommandBoundsDrainFromEscapedPipeHolder(t *testing.T) {
-	t.Setenv("WVH_PROBE_PROCESS_HELPER", "1")
 	pidPath := filepath.Join(t.TempDir(), "escaped.pid")
 	result := make(chan error, 1)
 	go func() {
 		_, err := runVersionCommand(context.Background(), os.Args[0],
-			"-test.run=^TestProbeProcessHelper$", "--", "escaped-leader", pidPath,
+			"-test.run=^TestProbeProcessHelper$", "--", "version-process-helper", "escaped-leader", pidPath,
 		)
 		result <- err
 	}()
@@ -487,9 +506,6 @@ func TestRunVersionCommandBoundsDrainFromEscapedPipeHolder(t *testing.T) {
 }
 
 func TestProbeProcessHelper(t *testing.T) {
-	if os.Getenv("WVH_PROBE_PROCESS_HELPER") != "1" {
-		return
-	}
 	separator := -1
 	for index, argument := range os.Args {
 		if argument == "--" {
@@ -497,22 +513,22 @@ func TestProbeProcessHelper(t *testing.T) {
 			break
 		}
 	}
-	if separator < 0 || separator+1 >= len(os.Args) {
-		os.Exit(2)
+	if separator < 0 || separator+2 >= len(os.Args) || os.Args[separator+1] != "version-process-helper" {
+		return
 	}
-	switch os.Args[separator+1] {
+	switch os.Args[separator+2] {
 	case "leader":
-		if separator+2 >= len(os.Args) {
+		if separator+3 >= len(os.Args) {
 			os.Exit(2)
 		}
-		command := exec.Command(os.Args[0], "-test.run=^TestProbeProcessHelper$", "--", "descendant")
+		command := exec.Command(os.Args[0], "-test.run=^TestProbeProcessHelper$", "--", "version-process-helper", "descendant")
 		command.Env = os.Environ()
 		command.Stdout = os.Stdout
 		command.Stderr = os.Stderr
 		if err := command.Start(); err != nil {
 			os.Exit(3)
 		}
-		if err := os.WriteFile(os.Args[separator+2], []byte(fmt.Sprintf("%d\n", command.Process.Pid)), 0o600); err != nil {
+		if err := os.WriteFile(os.Args[separator+3], []byte(fmt.Sprintf("%d\n", command.Process.Pid)), 0o600); err != nil {
 			os.Exit(4)
 		}
 		_, _ = fmt.Fprintln(os.Stdout, "2026.07.04")
@@ -522,10 +538,10 @@ func TestProbeProcessHelper(t *testing.T) {
 		time.Sleep(3 * time.Second)
 		os.Exit(0)
 	case "escaped-leader":
-		if separator+2 >= len(os.Args) {
+		if separator+3 >= len(os.Args) {
 			os.Exit(2)
 		}
-		command := exec.Command(os.Args[0], "-test.run=^TestProbeProcessHelper$", "--", "escaped-descendant")
+		command := exec.Command(os.Args[0], "-test.run=^TestProbeProcessHelper$", "--", "version-process-helper", "escaped-descendant")
 		command.Env = os.Environ()
 		command.Stdout = os.Stdout
 		command.Stderr = os.Stderr
@@ -533,7 +549,7 @@ func TestProbeProcessHelper(t *testing.T) {
 		if err := command.Start(); err != nil {
 			os.Exit(3)
 		}
-		if err := os.WriteFile(os.Args[separator+2], []byte(fmt.Sprintf("%d\n", command.Process.Pid)), 0o600); err != nil {
+		if err := os.WriteFile(os.Args[separator+3], []byte(fmt.Sprintf("%d\n", command.Process.Pid)), 0o600); err != nil {
 			os.Exit(4)
 		}
 		_, _ = fmt.Fprintln(os.Stdout, "2026.07.04")

@@ -174,6 +174,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	helperAPI, err := api.New(api.Options{
 		Token: smokeToken, Version: "integration", FFmpegAvailable: true,
 		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: platform.Version,
+		JavaScriptRuntimeAvailable: true, JavaScriptRuntimeVersion: runtimeResult.Version,
 		DownloadDir: downloadDir, Inspector: api.NewMediaInspector(resolver),
 		Tasks: engine, Revealer: revealer,
 	})
@@ -190,11 +191,16 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 			Available bool   `json:"available"`
 			Version   string `json:"version"`
 		} `json:"platformDownloader"`
+		JavaScriptRuntime struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		} `json:"javascriptRuntime"`
 		PID int `json:"pid"`
 	}
 	getJSON(t, helperURL+"/health", false, &health)
 	if !health.Ready || !health.FFmpeg || health.Version != "integration" || health.PID <= 1 ||
-		!health.PlatformDownloader.Available || health.PlatformDownloader.Version != "2026.07.04" {
+		!health.PlatformDownloader.Available || health.PlatformDownloader.Version != "2026.07.04" ||
+		!health.JavaScriptRuntime.Available || health.JavaScriptRuntime.Version != "2.4.5" {
 		t.Fatalf("unexpected health response: %+v", health)
 	}
 

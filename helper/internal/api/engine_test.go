@@ -1144,7 +1144,7 @@ func TestSafeFailureMapsPlatformCodesToAllowlistedChineseMessages(t *testing.T) 
 		message string
 	}{
 		{code: ytdlp.CodeCanceled, message: "下载已取消"},
-		{code: ytdlp.CodeLoginRequired, message: "当前视频需要登录，v0.2.0 暂不支持"},
+		{code: ytdlp.CodeLoginRequired, message: "当前视频需要登录，v0.2.1 暂不支持"},
 		{code: ytdlp.CodeVerificationRequired, message: "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息"},
 		{code: ytdlp.CodeNetworkFiltered, message: "当前网络阻止了本地下载连接，请联系网络管理员或更换网络"},
 		{code: ytdlp.CodeJavaScriptRuntime, message: "视频解析组件不完整，请重新安装网页视频港"},

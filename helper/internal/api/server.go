@@ -534,6 +534,11 @@ func (s *Server) writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, http.StatusConflict, "ffmpeg_missing", platformFFmpegMissing.SafeMessage())
 		return
 	}
+	var platformRuntimeMissing *PlatformRuntimeUnavailableError
+	if errors.As(err, &platformRuntimeMissing) {
+		writeError(w, http.StatusConflict, "javascript_runtime", platformRuntimeMissing.SafeMessage())
+		return
+	}
 	var safe interface{ SafeMessage() string }
 	if errors.As(err, &safe) {
 		writeError(w, http.StatusConflict, "task_error", safe.SafeMessage())

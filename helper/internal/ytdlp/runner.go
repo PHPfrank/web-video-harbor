@@ -266,11 +266,11 @@ func (r *Runner) runAttempt(ctx context.Context, request Request, mode attemptMo
 	}
 	defer releaseSnapshot()
 	if r.runtimeSnapshot == nil {
-		return "", runError(CodeProcess)
+		return "", runError(CodeJavaScriptRuntime)
 	}
 	releaseRuntime, err := r.runtimeSnapshot.acquire()
 	if err != nil {
-		return "", runError(CodeProcess)
+		return "", runError(CodeJavaScriptRuntime)
 	}
 	defer releaseRuntime()
 
@@ -334,7 +334,7 @@ func (r *Runner) runAttempt(ctx context.Context, request Request, mode attemptMo
 		}
 	}
 	if r.runtimeSnapshot == nil || r.runtimeSnapshot.Verify() != nil {
-		return "", runError(CodeProcess)
+		return "", runError(CodeJavaScriptRuntime)
 	}
 	command := r.commandFactory(r.binaryPath, args, minimalEnvironment())
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -383,7 +383,7 @@ func (r *Runner) runAttempt(ctx context.Context, request Request, mode attemptMo
 		_ = terminateProcessGroup(command.Process.Pid, waitResult)
 		progressWriter.finish()
 		diagnosticWriter.finish()
-		return "", runError(CodeProcess)
+		return "", runError(CodeJavaScriptRuntime)
 	}
 	var waitErr error
 	canceled := false
@@ -402,7 +402,8 @@ func (r *Runner) runAttempt(ctx context.Context, request Request, mode attemptMo
 		return "", canceledError(ctx.Err())
 	}
 	if waitErr != nil {
-		return "", classifyDiagnostic(diagnostic)
+		video, _ := platformurl.Classify(request.URL)
+		return "", classifyDiagnostic(diagnostic, video.Provider)
 	}
 	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
 		return "", outputError()
@@ -607,7 +608,7 @@ func canceledError(cause error) error {
 func runError(code Code) *Error {
 	messages := map[Code]string{
 		CodeCanceled:             "下载已取消",
-		CodeLoginRequired:        "当前视频需要登录，v0.2.0 暂不支持",
+		CodeLoginRequired:        "当前视频需要登录，v0.2.1 暂不支持",
 		CodeVerificationRequired: "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息",
 		CodeAccessLimited:        "当前内容受会员、付费或私有访问限制",
 		CodeGeoRestricted:        "当前网络所在地区无法访问此视频",
@@ -627,7 +628,7 @@ func runError(code Code) *Error {
 	return &Error{Code: code, Message: message}
 }
 
-func classifyDiagnostic(diagnostic []byte) error {
+func classifyDiagnostic(diagnostic []byte, provider platformurl.Provider) error {
 	lower := strings.ToLower(string(diagnostic))
 	containsAny := func(patterns ...string) bool {
 		for _, pattern := range patterns {
@@ -641,7 +642,7 @@ func classifyDiagnostic(diagnostic []byte) error {
 	switch {
 	case containsAny("members-only", "members only", "private video", "video is private", "premium", "paid content", "付费", "会员"):
 		return runError(CodeAccessLimited)
-	case containsAny("confirm you are not a bot", "confirm you're not a bot", "cookies-from-browser"):
+	case provider == platformurl.YouTube && containsAny("confirm you are not a bot", "confirm you're not a bot"):
 		return runError(CodeVerificationRequired)
 	case containsAny("sign in", "login required", "log in", "cookies-from-browser", "authentication required"):
 		return runError(CodeLoginRequired)
@@ -653,7 +654,7 @@ func classifyDiagnostic(diagnostic []byte) error {
 		return runError(CodeExtractor)
 	case containsAny("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed"):
 		return runError(CodeFFmpegMissing)
-	case containsAny("network is unreachable", "unable to download webpage", "connection timed out", "connection reset", "temporary failure in name resolution", "nodename nor servname"):
+	case containsAny("network is unreachable", "unable to download webpage", "connection timed out", "connection reset", "temporary failure in name resolution", "nodename nor servname", "curl: (35)"):
 		networkError := runError(CodeNetwork)
 		networkError.retryableConnectionReset = containsAny("connection reset", "connectionreseterror", "curl: (35)")
 		return networkError

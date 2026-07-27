@@ -535,7 +535,7 @@ func safeFailure(internal error) (string, string) {
 		case ytdlp.CodeCanceled:
 			return "canceled", "下载已取消"
 		case ytdlp.CodeLoginRequired:
-			return "login_required", "当前视频需要登录，v0.2.0 暂不支持"
+			return "login_required", "当前视频需要登录，v0.2.1 暂不支持"
 		case ytdlp.CodeVerificationRequired:
 			return "verification_required", "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息"
 		case ytdlp.CodeAccessLimited:
