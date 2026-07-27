@@ -84,8 +84,8 @@ if [[ "$force_refresh" != "1" ]] && verified_file "$cache_binary" "$expected_bin
   exit 0
 fi
 
-temp_binary="$(/usr/bin/mktemp "$vendor_root/.yt-dlp-macos.XXXXXX")"
-temp_license="$(/usr/bin/mktemp "$vendor_root/.yt-dlp-license.XXXXXX")"
+temp_binary=""
+temp_license=""
 cleanup() {
   local exit_status=$?
   local temp_path
@@ -100,6 +100,8 @@ cleanup() {
 trap cleanup EXIT
 trap 'exit 130' INT
 trap 'exit 143' TERM
+temp_binary="$(/usr/bin/mktemp "$vendor_root/.yt-dlp-macos.XXXXXX")"
+temp_license="$(/usr/bin/mktemp "$vendor_root/.yt-dlp-license.XXXXXX")"
 
 if [[ "$testing" == "1" ]]; then
   fixture_binary="$fixture_real/yt-dlp_macos"

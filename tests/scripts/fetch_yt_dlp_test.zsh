@@ -40,6 +40,8 @@ done
   fail "生产下载 URL 可被环境变量覆盖"
 [[ "$fetch_text" == *'/bin/ln "$source_path" "$destination_path"'* ]] || \
   fail "缓存发布没有使用原子 no-clobber 链接"
+[[ "$fetch_text" == *'temp_binary=""'*'temp_license=""'*'trap cleanup EXIT'*'temp_binary="$(/usr/bin/mktemp'*'temp_license="$(/usr/bin/mktemp'* ]] || \
+  fail "随机临时文件创建前没有安装失败清理钩子"
 
 mkdir -p "$fixture_dir"
 print -r -- '#!/bin/zsh' >"$fixture_dir/yt-dlp_macos"
