@@ -536,6 +536,8 @@ func safeFailure(internal error) (string, string) {
 			return "canceled", "下载已取消"
 		case ytdlp.CodeLoginRequired:
 			return "login_required", "当前视频需要登录，v0.2.0 暂不支持"
+		case ytdlp.CodeVerificationRequired:
+			return "verification_required", "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息"
 		case ytdlp.CodeAccessLimited:
 			return "access_limited", "当前内容受会员、付费或私有访问限制"
 		case ytdlp.CodeGeoRestricted:
@@ -546,6 +548,10 @@ func safeFailure(internal error) (string, string) {
 			return "ffmpeg_missing", "未安装 FFmpeg，请先安装后重试"
 		case ytdlp.CodeNetwork:
 			return "network", "网络连接失败，请稍后重试"
+		case ytdlp.CodeNetworkFiltered:
+			return "network_filtered", "当前网络阻止了本地下载连接，请联系网络管理员或更换网络"
+		case ytdlp.CodeJavaScriptRuntime:
+			return "javascript_runtime", "视频解析组件不完整，请重新安装网页视频港"
 		case ytdlp.CodeOutput:
 			return "output", "无法保存视频文件"
 		case ytdlp.CodeProcess:

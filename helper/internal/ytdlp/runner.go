@@ -80,15 +80,18 @@ type outputReservation interface {
 type Code string
 
 const (
-	CodeCanceled      Code = "canceled"
-	CodeLoginRequired Code = "login_required"
-	CodeAccessLimited Code = "access_limited"
-	CodeGeoRestricted Code = "geo_restricted"
-	CodeExtractor     Code = "extractor_outdated"
-	CodeFFmpegMissing Code = "ffmpeg_missing"
-	CodeNetwork       Code = "network"
-	CodeOutput        Code = "output"
-	CodeProcess       Code = "platform_process"
+	CodeCanceled             Code = "canceled"
+	CodeLoginRequired        Code = "login_required"
+	CodeVerificationRequired Code = "verification_required"
+	CodeAccessLimited        Code = "access_limited"
+	CodeGeoRestricted        Code = "geo_restricted"
+	CodeExtractor            Code = "extractor_outdated"
+	CodeFFmpegMissing        Code = "ffmpeg_missing"
+	CodeNetwork              Code = "network"
+	CodeNetworkFiltered      Code = "network_filtered"
+	CodeJavaScriptRuntime    Code = "javascript_runtime"
+	CodeOutput               Code = "output"
+	CodeProcess              Code = "platform_process"
 )
 
 // Error exposes only a fixed, URL-free Chinese message.
@@ -212,7 +215,13 @@ func (r *Runner) Run(ctx context.Context, request Request) (string, error) {
 		!errors.As(err, &runnerError) || !runnerError.retryableConnectionReset || errorContainsCode(err, CodeOutput) {
 		return path, err
 	}
-	return r.runAttempt(ctx, request, attemptChromeMac)
+	secondPath, secondErr := r.runAttempt(ctx, request, attemptChromeMac)
+	var secondRunnerError *Error
+	if secondErr != nil && errors.As(secondErr, &secondRunnerError) && secondRunnerError.retryableConnectionReset &&
+		!errorContainsCode(secondErr, CodeOutput) {
+		return secondPath, runError(CodeNetworkFiltered)
+	}
+	return secondPath, secondErr
 }
 
 func errorContainsCode(err error, code Code) bool {
@@ -597,15 +606,18 @@ func canceledError(cause error) error {
 
 func runError(code Code) *Error {
 	messages := map[Code]string{
-		CodeCanceled:      "下载已取消",
-		CodeLoginRequired: "当前视频需要登录，v0.2.0 暂不支持",
-		CodeAccessLimited: "当前内容受会员、付费或私有访问限制",
-		CodeGeoRestricted: "当前网络所在地区无法访问此视频",
-		CodeExtractor:     "平台解析规则已变化，请升级网页视频港",
-		CodeFFmpegMissing: "未找到可用的 FFmpeg，请安装或修复后重试",
-		CodeNetwork:       "网络连接失败，请检查网络后重试",
-		CodeOutput:        "无法安全保存平台视频",
-		CodeProcess:       "平台暂时拒绝了下载，请稍后重试",
+		CodeCanceled:             "下载已取消",
+		CodeLoginRequired:        "当前视频需要登录，v0.2.0 暂不支持",
+		CodeVerificationRequired: "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息",
+		CodeAccessLimited:        "当前内容受会员、付费或私有访问限制",
+		CodeGeoRestricted:        "当前网络所在地区无法访问此视频",
+		CodeExtractor:            "平台解析规则已变化，请升级网页视频港",
+		CodeFFmpegMissing:        "未找到可用的 FFmpeg，请安装或修复后重试",
+		CodeNetwork:              "网络连接失败，请检查网络后重试",
+		CodeNetworkFiltered:      "当前网络阻止了本地下载连接，请联系网络管理员或更换网络",
+		CodeJavaScriptRuntime:    "视频解析组件不完整，请重新安装网页视频港",
+		CodeOutput:               "无法安全保存平台视频",
+		CodeProcess:              "平台暂时拒绝了下载，请稍后重试",
 	}
 	message, ok := messages[code]
 	if !ok {
@@ -629,11 +641,15 @@ func classifyDiagnostic(diagnostic []byte) error {
 	switch {
 	case containsAny("members-only", "members only", "private video", "video is private", "premium", "paid content", "付费", "会员"):
 		return runError(CodeAccessLimited)
+	case containsAny("confirm you are not a bot", "confirm you're not a bot", "cookies-from-browser"):
+		return runError(CodeVerificationRequired)
 	case containsAny("sign in", "login required", "log in", "cookies-from-browser", "authentication required"):
 		return runError(CodeLoginRequired)
 	case containsAny("not available in your country", "not available in your region", "geo restriction", "geo-restricted", "geographic restriction"):
 		return runError(CodeGeoRestricted)
-	case containsAny("unable to extract", "extractor error", "nsig", "signature extraction", "update yt-dlp", "no supported javascript runtime", "plugin is missing"):
+	case containsAny("no supported javascript runtime", "javascript runtime could be found", "deno executable"):
+		return runError(CodeJavaScriptRuntime)
+	case containsAny("unable to extract", "extractor error", "nsig", "signature extraction", "update yt-dlp", "plugin is missing"):
 		return runError(CodeExtractor)
 	case containsAny("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed"):
 		return runError(CodeFFmpegMissing)

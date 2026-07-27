@@ -502,10 +502,10 @@ func TestRunnerClassifiesBoundedDiagnosticsIntoStableSafeErrors(t *testing.T) {
 		wantMessage string
 	}{
 		{
-			name:        "login required",
+			name:        "verification required",
 			diagnostic:  "ERROR: Sign in to confirm you are not a bot; use --cookies-from-browser",
-			wantCode:    CodeLoginRequired,
-			wantMessage: "当前视频需要登录，v0.2.0 暂不支持",
+			wantCode:    CodeVerificationRequired,
+			wantMessage: "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息",
 		},
 		{
 			name:        "private member or paid",
@@ -524,6 +524,12 @@ func TestRunnerClassifiesBoundedDiagnosticsIntoStableSafeErrors(t *testing.T) {
 			diagnostic:  "ERROR: Unable to extract nsig function; please update yt-dlp",
 			wantCode:    CodeExtractor,
 			wantMessage: "平台解析规则已变化，请升级网页视频港",
+		},
+		{
+			name:        "JavaScript runtime missing",
+			diagnostic:  "ERROR: No supported JavaScript runtime could be found",
+			wantCode:    CodeJavaScriptRuntime,
+			wantMessage: "视频解析组件不完整，请重新安装网页视频港",
 		},
 		{
 			name:        "ffmpeg missing",
@@ -619,6 +625,24 @@ func TestRunnerDoesNotApplyYouTubeImpersonationFallbackToBilibili(t *testing.T) 
 	assertRunnerCode(t, err, CodeNetwork)
 	if attempts != 1 {
 		t.Fatalf("Bilibili attempts = %d, want 1", attempts)
+	}
+}
+
+func TestRunnerReportsNetworkFilteredAfterChromeFallbackAlsoResets(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+		attempts++
+		return fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=ERROR: curl: (35) Recv failure: Connection reset by peer"})(path, args, env)
+	}
+	_, err = runner.Run(context.Background(), validRequest("网络过滤"))
+	assertRunnerCode(t, err, CodeNetworkFiltered)
+	if attempts != 2 {
+		t.Fatalf("attempts = %d, want 2", attempts)
 	}
 }
 
