@@ -92,7 +92,7 @@ func probeAdjacent(ctx context.Context, helperPath string, run versionCommand) (
 		return ProbeResult{}, fmt.Errorf("resolve helper path: %w", err)
 	}
 	candidate := filepath.Join(filepath.Dir(absHelper), bundledBinaryName)
-	snapshot, err := createExecutableSnapshot(candidate)
+	snapshot, err := createExecutableSnapshot(candidate, bundledBinaryName)
 	if err != nil {
 		return ProbeResult{}, err
 	}

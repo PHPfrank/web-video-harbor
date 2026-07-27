@@ -153,11 +153,34 @@ func TestExecutableSnapshotRejectsUnsafeTempParent(t *testing.T) {
 	} {
 		t.Run(test.name, func(t *testing.T) {
 			t.Setenv("TMPDIR", test.setup(t))
-			if snapshot, err := createExecutableSnapshot(sourcePath); err == nil {
+			if snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName); err == nil {
 				_ = snapshot.Close()
 				t.Fatal("createExecutableSnapshot accepted an unsafe TMPDIR")
 			}
 		})
+	}
+}
+
+func TestExecutableSnapshotUsesOnlyValidatedPrivateFileName(t *testing.T) {
+	sourcePath := filepath.Join(t.TempDir(), "deno-source")
+	if err := os.WriteFile(sourcePath, []byte("trusted runtime bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+
+	snapshot, err := createExecutableSnapshot(sourcePath, "deno_macos_arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.Close() })
+	if got := filepath.Base(snapshot.Path()); got != "deno_macos_arm64" {
+		t.Fatalf("snapshot filename = %q, want deno_macos_arm64", got)
+	}
+
+	for _, name := range []string{"", ".", "..", "nested/deno", "nested\\deno"} {
+		if unsafeSnapshot, err := createExecutableSnapshot(sourcePath, name); err == nil {
+			_ = unsafeSnapshot.Close()
+			t.Fatalf("createExecutableSnapshot accepted unsafe name %q", name)
+		}
 	}
 }
 
@@ -218,7 +241,7 @@ func TestExecutableSnapshotDetectsDigestMutationAndClosesOwnedFiles(t *testing.T
 	if err := os.WriteFile(sourcePath, trusted, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := createExecutableSnapshot(sourcePath)
+	snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -272,7 +295,7 @@ func TestExecutableSnapshotRejectsClosedPinnedFileDescriptor(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := createExecutableSnapshot(sourcePath)
+	snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -294,7 +317,7 @@ func TestExecutableSnapshotClosePreservesActiveLease(t *testing.T) {
 	if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := createExecutableSnapshot(sourcePath)
+	snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName)
 	if err != nil {
 		t.Fatal(err)
 	}

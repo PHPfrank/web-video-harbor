@@ -8,6 +8,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -16,7 +17,6 @@ import (
 
 const (
 	snapshotDirectoryPrefix = ".web-video-harbor-parser-"
-	snapshotFileName        = "yt-dlp_macos"
 	snapshotCreateAttempts  = 32
 )
 
@@ -35,6 +35,7 @@ type ExecutableSnapshot struct {
 	directoryInfo os.FileInfo
 	file          *os.File
 	fileInfo      os.FileInfo
+	fileName      string
 	path          string
 	size          int64
 	digest        [sha256.Size]byte
@@ -42,7 +43,11 @@ type ExecutableSnapshot struct {
 	closed        bool
 }
 
-func createExecutableSnapshot(sourcePath string) (*ExecutableSnapshot, error) {
+func createExecutableSnapshot(sourcePath, snapshotFileName string) (*ExecutableSnapshot, error) {
+	if snapshotFileName == "" || snapshotFileName == "." || snapshotFileName == ".." ||
+		filepath.Base(snapshotFileName) != snapshotFileName || strings.ContainsAny(snapshotFileName, `/\\`) {
+		return nil, errors.New("platform snapshot filename is invalid")
+	}
 	sourceFD, err := unix.Open(sourcePath, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return nil, errors.New("open bundled platform downloader safely")
@@ -149,6 +154,7 @@ func createExecutableSnapshot(sourcePath string) (*ExecutableSnapshot, error) {
 		parent: parent, parentPath: parentPath, parentInfo: parentInfo,
 		directory: directory, directoryName: directoryName, directoryInfo: directoryInfo,
 		file: opened, fileInfo: openedInfo,
+		fileName: snapshotFileName,
 		path: filepath.Join(directoryPath, snapshotFileName),
 		size: size, digest: expectedDigest,
 	}
@@ -291,11 +297,11 @@ func (s *ExecutableSnapshot) verifyLocked() error {
 	if err != nil || pinnedDigest != s.digest {
 		return errors.New("platform executable snapshot file descriptor changed")
 	}
-	fd, err := unix.Openat(int(s.directory.Fd()), snapshotFileName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	fd, err := unix.Openat(int(s.directory.Fd()), s.fileName, unix.O_RDONLY|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
 	if err != nil {
 		return errors.New("platform executable snapshot file changed")
 	}
-	opened := os.NewFile(uintptr(fd), snapshotFileName)
+	opened := os.NewFile(uintptr(fd), s.fileName)
 	if opened == nil {
 		_ = unix.Close(fd)
 		return errors.New("platform executable snapshot file changed")
@@ -355,7 +361,7 @@ func (s *ExecutableSnapshot) Close() error {
 	}
 	var result error
 	if err := s.verifyLocked(); err == nil {
-		result = errors.Join(result, unix.Unlinkat(int(s.directory.Fd()), snapshotFileName, 0))
+		result = errors.Join(result, unix.Unlinkat(int(s.directory.Fd()), s.fileName, 0))
 	} else {
 		result = errors.Join(result, err)
 	}

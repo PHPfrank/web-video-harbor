@@ -330,7 +330,7 @@ func TestRunnerRejectsPrivateExecutableSnapshotReplacementBeforeAndAfterStart(t 
 				if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
 					t.Fatal(err)
 				}
-				snapshot, err := createExecutableSnapshot(sourcePath)
+				snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName)
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2801,7 +2801,7 @@ func testConfig(t *testing.T) Config {
 	if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
 		t.Fatal(err)
 	}
-	snapshot, err := createExecutableSnapshot(sourcePath)
+	snapshot, err := createExecutableSnapshot(sourcePath, bundledBinaryName)
 	if err != nil {
 		t.Fatal(err)
 	}
