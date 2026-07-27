@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -44,6 +45,24 @@ func (r exactFixtureResolver) AllowExactHostPort(hostPort string) bool {
 type noReveal struct{}
 
 func (noReveal) Reveal(context.Context, string) error { return nil }
+
+type recordingReveal struct {
+	mu    sync.Mutex
+	paths []string
+}
+
+func (r *recordingReveal) Reveal(_ context.Context, path string) error {
+	r.mu.Lock()
+	r.paths = append(r.paths, path)
+	r.mu.Unlock()
+	return nil
+}
+
+func (r *recordingReveal) Paths() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	return append([]string(nil), r.paths...)
+}
 
 func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
@@ -133,7 +152,13 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	resolver := exactFixtureResolver{hostPort: parsedFixture.Host}
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, ytdlp.ProbeResult{})
+	platform := prepareFakePlatformDownloader(t, repoRoot, downloadDir, ffmpegPath)
+	t.Cleanup(func() {
+		if err := platform.Close(); err != nil {
+			t.Errorf("close fake platform downloader: %v", err)
+		}
+	})
+	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, platform)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -144,10 +169,12 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 			t.Errorf("shutdown engine: %v", err)
 		}
 	})
+	revealer := &recordingReveal{}
 	helperAPI, err := api.New(api.Options{
 		Token: smokeToken, Version: "integration", FFmpegAvailable: true,
+		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: platform.Version,
 		DownloadDir: downloadDir, Inspector: api.NewMediaInspector(resolver),
-		Tasks: engine, Revealer: noReveal{},
+		Tasks: engine, Revealer: revealer,
 	})
 	if err != nil {
 		t.Fatalf("create helper API: %v", err)
@@ -155,13 +182,18 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	helperURL := startFixedHelperServer(t, helperAPI)
 
 	var health struct {
-		Ready   bool   `json:"ready"`
-		Version string `json:"version"`
-		FFmpeg  bool   `json:"ffmpeg"`
-		PID     int    `json:"pid"`
+		Ready              bool   `json:"ready"`
+		Version            string `json:"version"`
+		FFmpeg             bool   `json:"ffmpeg"`
+		PlatformDownloader struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		} `json:"platformDownloader"`
+		PID int `json:"pid"`
 	}
 	getJSON(t, helperURL+"/health", false, &health)
-	if !health.Ready || !health.FFmpeg || health.Version != "integration" || health.PID <= 1 {
+	if !health.Ready || !health.FFmpeg || health.Version != "integration" || health.PID <= 1 ||
+		!health.PlatformDownloader.Available || health.PlatformDownloader.Version != "2026.07.04" {
 		t.Fatalf("unexpected health response: %+v", health)
 	}
 
@@ -202,8 +234,29 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	assertCompletedOutput(t, single, downloadDir)
 
 	multi := createTask(t, helperURL, api.JobSpec{URL: masterInspection.Variants[0].URL, Title: "集成测试-多清晰度-1080p", MediaType: "hls"})
-	multi = waitForStatus(t, helperURL, multi.ID, tasks.Completed, 20*time.Second)
+	multi, multiStatuses := waitForLifecycle(t, helperURL, multi, 20*time.Second)
 	assertCompletedOutput(t, multi, downloadDir)
+	for _, status := range []tasks.Status{tasks.Queued, tasks.Downloading, tasks.Merging, tasks.Completed} {
+		if !multiStatuses[status] {
+			t.Fatalf("HLS lifecycle did not expose %q: %#v", status, multiStatuses)
+		}
+	}
+
+	platformTask := createTask(t, helperURL, api.JobSpec{
+		URL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", Title: "集成测试-平台-720p",
+		MediaType: "platform", Quality: "720",
+	})
+	platformTask, platformStatuses := waitForLifecycle(t, helperURL, platformTask, 20*time.Second)
+	assertCompletedOutput(t, platformTask, downloadDir)
+	if !platformStatuses[tasks.Queued] || !platformStatuses[tasks.Downloading] || !platformStatuses[tasks.Completed] {
+		t.Fatalf("platform lifecycle missing status: %#v", platformStatuses)
+	}
+	revealResponse := postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformTask.ID)+"/reveal")
+	var revealResult map[string]bool
+	decodeStatus(t, revealResponse, http.StatusOK, &revealResult)
+	if !revealResult["revealed"] || len(revealer.Paths()) != 1 || revealer.Paths()[0] != platformTask.OutputPath {
+		t.Fatalf("platform reveal mismatch: result=%v paths=%v", revealResult, revealer.Paths())
+	}
 
 	cancel := createTask(t, helperURL, api.JobSpec{URL: fixture.URL + "/slow.mp4", Title: "集成测试-取消", MediaType: "mp4"})
 	waitForDownloadingProgress(t, helperURL, cancel.ID, 10*time.Second)
@@ -218,16 +271,40 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	assertNoDownloadStaging(t, downloadDir)
 
+	platformCancel := createTask(t, helperURL, api.JobSpec{
+		URL: "https://www.youtube.com/watch?v=cancel12345", Title: "集成测试-平台取消",
+		MediaType: "platform", Quality: "720",
+	})
+	waitForDownloadingProgress(t, helperURL, platformCancel.ID, 10*time.Second)
+	decodeStatus(t, postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformCancel.ID)+"/cancel"), http.StatusOK, &platformCancel)
+	platformCancel = waitForStatus(t, helperURL, platformCancel.ID, tasks.Canceled, 5*time.Second)
+	if platformCancel.OutputPath != "" {
+		t.Fatalf("canceled platform task published output %q", platformCancel.OutputPath)
+	}
+	assertNoDownloadStaging(t, downloadDir)
+
+	platformRetry := createTask(t, helperURL, api.JobSpec{
+		URL: "https://www.youtube.com/watch?v=retry123456", Title: "集成测试-平台重试",
+		MediaType: "platform", Quality: "720",
+	})
+	platformRetry = waitForStatus(t, helperURL, platformRetry.ID, tasks.Failed, 10*time.Second)
+	var retried tasks.Task
+	decodeStatus(t, postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformRetry.ID)+"/retry"), http.StatusCreated, &retried)
+	retried = waitForStatus(t, helperURL, retried.ID, tasks.Completed, 20*time.Second)
+	assertCompletedOutput(t, retried, downloadDir)
+
 	var listed []tasks.Task
 	getJSON(t, helperURL+"/v1/tasks", true, &listed)
-	if len(listed) != 4 {
-		t.Fatalf("task count = %d, want 4", len(listed))
+	if len(listed) != 8 {
+		t.Fatalf("task count = %d, want 8", len(listed))
 	}
 
 	results := map[string]string{
-		"direct":      direct.OutputPath,
-		"single_hls":  single.OutputPath,
-		"master_1080": multi.OutputPath,
+		"direct":         direct.OutputPath,
+		"single_hls":     single.OutputPath,
+		"master_1080":    multi.OutputPath,
+		"platform_720":   platformTask.OutputPath,
+		"platform_retry": retried.OutputPath,
 	}
 	resultBytes, err := json.MarshalIndent(results, "", "  ")
 	if err != nil {
@@ -429,6 +506,26 @@ func waitForStatus(t *testing.T, helperURL, id string, wanted tasks.Status, time
 	}
 	t.Fatalf("task status = %q, want %q within %s: %+v", task.Status, wanted, timeout, task)
 	return tasks.Task{}
+}
+
+func waitForLifecycle(t *testing.T, helperURL string, initial tasks.Task, timeout time.Duration) (tasks.Task, map[tasks.Status]bool) {
+	t.Helper()
+	observed := map[tasks.Status]bool{initial.Status: true}
+	deadline := time.Now().Add(timeout)
+	current := initial
+	for time.Now().Before(deadline) {
+		getJSON(t, helperURL+"/v1/tasks/"+url.PathEscape(initial.ID), true, &current)
+		observed[current.Status] = true
+		if current.Status == tasks.Completed {
+			return current, observed
+		}
+		if current.Status == tasks.Failed || current.Status == tasks.Canceled {
+			t.Fatalf("platform task reached %q: %+v", current.Status, current)
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+	t.Fatalf("platform task did not complete within %s: %+v statuses=%v", timeout, current, observed)
+	return current, observed
 }
 
 func assertCompletedOutput(t *testing.T, task tasks.Task, downloadDir string) {

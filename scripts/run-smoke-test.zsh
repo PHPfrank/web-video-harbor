@@ -133,33 +133,43 @@ done
   git diff --check
 )
 
-for result_key in direct single_hls master_1080; do
+for result_key in direct single_hls master_1080 platform_720 platform_retry; do
   media_path="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))[process.argv[2]]" "$results_path" "$result_key")"
-  probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name \
+  probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name,width,height \
     -of json "$media_path")"
   node -e '
     const probe = JSON.parse(process.argv[1]);
+    const key = process.argv[2];
     const duration = Number(probe.format && probe.format.duration);
     const codecs = new Map((probe.streams || []).map((stream) => [stream.codec_type, stream.codec_name]));
     if (!(duration >= 1.5 && duration <= 3.0)) throw new Error(`unexpected duration ${duration}`);
     if (codecs.get("video") !== "h264") throw new Error(`unexpected video codec ${codecs.get("video")}`);
     if (codecs.get("audio") !== "aac") throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
-  ' "$probe_json"
+    const video = (probe.streams || []).find((stream) => stream.codec_type === "video");
+    if (key.startsWith("platform_") && (!video || video.height !== 720)) {
+      throw new Error(`unexpected platform height ${video && video.height}`);
+    }
+  ' "$probe_json" "$result_key"
   print -- "已验证 $result_key：$media_path"
 done
 
-for result_key in direct hls; do
+for result_key in direct hls platform; do
   media_path="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).outputs[process.argv[2]]" "$browser_results_path" "$result_key")"
-  probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name \
+  probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name,width,height \
     -of json "$media_path")"
   node -e '
     const probe = JSON.parse(process.argv[1]);
+    const key = process.argv[2];
     const duration = Number(probe.format && probe.format.duration);
     const codecs = new Map((probe.streams || []).map((stream) => [stream.codec_type, stream.codec_name]));
     if (!(duration >= 1.5 && duration <= 3.0)) throw new Error(`unexpected duration ${duration}`);
     if (codecs.get("video") !== "h264") throw new Error(`unexpected video codec ${codecs.get("video")}`);
     if (codecs.get("audio") !== "aac") throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
-  ' "$probe_json"
+    const video = (probe.streams || []).find((stream) => stream.codec_type === "video");
+    if (key === "platform" && (!video || video.height !== 720)) {
+      throw new Error(`unexpected platform height ${video && video.height}`);
+    }
+  ' "$probe_json" "$result_key"
   print -- "已验证 Chrome popup $result_key：$media_path"
 done
 

@@ -127,6 +127,7 @@ const chromeArguments = [
   '--disable-component-update',
   '--disable-default-apps',
   '--disable-sync',
+  '--host-resolver-rules=MAP www.youtube.com ~NOTFOUND, MAP youtube.com ~NOTFOUND',
   '--no-first-run',
   '--no-default-browser-check',
   'about:blank',
@@ -304,13 +305,64 @@ try {
     assert.ok(fs.statSync(task.outputPath).size > 0);
   }
 
+  await cdp.send('Target.closeTarget', { targetId: popupTarget.targetId });
+  const youtubeURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  const youtubeTarget = await cdp.send('Target.createTarget', { url: youtubeURL, background: false });
+  await cdp.send('Target.activateTarget', { targetId: youtubeTarget.targetId });
+  await poll('offline YouTube watch target', async () => {
+    const targets = await currentTargets(cdp);
+    const target = targets.find((item) => item.targetId === youtubeTarget.targetId);
+    return target && target.url === youtubeURL ? target : null;
+  }, 15000);
+
+  const beforePlatformTaskIDs = new Set((await helperTasks()).map((task) => task.id));
+  const platformPopupTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/popup.html`, background: true });
+  const platformPopupSession = await attach(cdp, platformPopupTarget.targetId);
+  const platformView = await poll('YouTube-only platform card', async () => {
+    const state = await evaluate(cdp, platformPopupSession, `({
+      text: document.body ? document.body.innerText : '',
+      cards: document.querySelectorAll('.candidate-card').length,
+      platformCards: document.querySelectorAll('.candidate-card-platform').length,
+      options: Array.from(document.querySelectorAll('.platform-quality-select option')).map((option) => option.value),
+      connected: document.body ? document.body.innerText.includes('本地助手已连接') : false
+    })`);
+    return state && state.connected && state.cards === 1 && state.platformCards === 1 ? state : null;
+  }, 15000);
+  assert.match(platformView.text, /YouTube/);
+  assert.deepEqual(platformView.options, ['best', '1080', '720']);
+
+  const platformClicked = await evaluate(cdp, platformPopupSession, `(() => {
+    const card = document.querySelector('.candidate-card-platform');
+    const select = card?.querySelector('.platform-quality-select');
+    const button = card?.querySelector('button[data-action="download"]');
+    if (!select || !button || button.disabled) return false;
+    select.value = '720';
+    select.dispatchEvent(new Event('change', { bubbles: true }));
+    if (select.value !== '720') return false;
+    button.click();
+    return true;
+  })()`);
+  assert.equal(platformClicked, true);
+
+  const platformTask = await poll('popup-created YouTube 720P download', async () => {
+    const created = (await helperTasks()).filter((task) => !beforePlatformTaskIDs.has(task.id));
+    if (created.some((task) => task.status === 'failed' || task.status === 'canceled')) {
+      throw new Error(`platform popup task failed: ${JSON.stringify(created.map((task) => ({ status: task.status, code: task.errorCode })))}`);
+    }
+    return created.find((task) => task.url === youtubeURL && task.status === 'completed') || null;
+  }, 25000);
+  const platformRelative = path.relative(downloadDir, platformTask.outputPath);
+  assert.ok(platformRelative && platformRelative !== '..' && !platformRelative.startsWith(`..${path.sep}`)
+    && !path.isAbsolute(platformRelative));
+  assert.ok(fs.statSync(platformTask.outputPath).size > 0);
+
   evidence = {
     status: 'passed',
     browser: version.product,
     extension: { id: loaded.id, name: extension.name, version: extension.version, enabled: extension.enabled },
     targets: { serviceWorker: serviceWorker.url, popup: `${extensionBase}/popup.html`, fixture: `${fixtureURL}/` },
     candidates: discovered.map((candidate) => ({ kind: candidate.kind, path: new URL(candidate.url).pathname })),
-    outputs: { direct: directTask.outputPath, hls: hlsTask.outputPath },
+    outputs: { direct: directTask.outputPath, hls: hlsTask.outputPath, platform: platformTask.outputPath },
     artifacts: { snapshotPath, screenshotPath, chromeLogPath, profileDir },
   };
   fs.writeFileSync(resultsPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });
