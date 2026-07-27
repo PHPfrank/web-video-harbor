@@ -10,6 +10,7 @@ mkdir -p "$test_output_root"
 run_output_dir="$(/usr/bin/mktemp -d "$test_output_root/run.XXXXXX")"
 archive_path="$run_output_dir/WebVideoHarbor-macOS.zip"
 unpack_root="$run_output_dir/unpacked"
+fixture_root="$repo_root/work/package-yt-dlp-fixture"
 
 fail() {
   print -u2 -- "FAIL: $1"
@@ -22,6 +23,127 @@ package_script_text="$(<"$package_script")"
 if [[ "$package_script_text" != *"trap cleanup_publish_temps EXIT"*"trap 'exit 130' INT"*"trap 'exit 143' TERM"* ]]; then
   fail "打包发布临时文件没有使用 EXIT 清理并把 INT/TERM 转换为退出"
 fi
+[[ "$package_script_text" != *'fetch_output='* ]] || fail "打包脚本保留了未使用的 fetcher 输出"
+[[ "$package_script_text" == *'parser_sha256='*'license_sha256='* ]] || \
+  fail "打包脚本没有独立重验解析器与许可证 SHA256"
+[[ "$package_script_text" == *'"$source_parser" --version'* ]] || \
+  fail "打包脚本没有在复制前验证解析器版本"
+[[ "$package_script_text" == *'lipo "$source_parser" -verify_arch arm64 x86_64'* ]] || \
+  fail "打包脚本没有在复制前验证解析器 universal 架构"
+[[ "$package_script_text" == *"缓存包含未完成的解析器 .part 文件"* ]] || \
+  fail "打包脚本没有拒绝解析器 .part 文件"
+
+invalid_mode_output="$(/usr/bin/mktemp -d "$test_output_root/invalid-mode.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=0 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$invalid_mode_output" \
+  /bin/zsh "$package_script" >"$invalid_mode_output/rejected.txt" 2>&1; then
+  fail "打包脚本接受了非 1 的测试模式开关"
+fi
+rg -Fq '测试模式开关无效' "$invalid_mode_output/rejected.txt" || \
+  fail "无效测试模式开关的拒绝信息不明确"
+
+production_injection_output="$(/usr/bin/mktemp -d "$test_output_root/production-injection.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$repo_root/work" \
+  WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$(printf '0%.0s' {1..64})" \
+  WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$(printf '1%.0s' {1..64})" \
+  WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$production_injection_output" \
+  /bin/zsh "$package_script" >"$production_injection_output/rejected.txt" 2>&1; then
+  fail "生产模式接受了测试 fixture 或哈希注入"
+fi
+rg -Fq '生产模式不得注入测试数据' "$production_injection_output/rejected.txt" || \
+  fail "生产模式测试数据注入的拒绝信息不明确"
+
+go_prefix="$(brew --prefix go 2>/dev/null)" || fail "无法定位 Homebrew Go"
+go_command="$go_prefix/bin/go"
+[[ -x "$go_command" ]] || fail "Go 编译器不可执行"
+mkdir -p "$fixture_root/src" "$fixture_root/build"
+print -r -- 'package main' >"$fixture_root/src/main.go"
+print -r -- 'import ("fmt"; "os")' >>"$fixture_root/src/main.go"
+print -r -- 'func main(){ if len(os.Args)==2 && os.Args[1]=="--version" { fmt.Println("2026.07.04"); return }; os.Exit(2) }' \
+  >>"$fixture_root/src/main.go"
+env CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 "$go_command" build -trimpath \
+  -o "$fixture_root/build/yt-dlp-arm64" "$fixture_root/src/main.go"
+env CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 "$go_command" build -trimpath \
+  -o "$fixture_root/build/yt-dlp-amd64" "$fixture_root/src/main.go"
+/usr/bin/lipo -create "$fixture_root/build/yt-dlp-arm64" "$fixture_root/build/yt-dlp-amd64" \
+  -output "$fixture_root/yt-dlp_macos"
+chmod 0755 "$fixture_root/yt-dlp_macos"
+print -r -- 'fixture yt-dlp third-party license bundle' >"$fixture_root/THIRD_PARTY_LICENSES.txt"
+export WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$fixture_root"
+export WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$(/usr/bin/shasum -a 256 "$fixture_root/yt-dlp_macos" | awk '{print $1}')"
+export WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$(/usr/bin/shasum -a 256 "$fixture_root/THIRD_PARTY_LICENSES.txt" | awk '{print $1}')"
+
+env WEB_VIDEO_PACKAGE_TESTING=1 /bin/zsh "$repo_root/scripts/fetch-yt-dlp.zsh" >/dev/null
+fixture_cache="$repo_root/work/vendor/yt-dlp/test-${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256[1,16]}-${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256[1,16]}"
+parser_part="$fixture_cache/yt-dlp_macos.part"
+trap '/bin/rm -f -- "$parser_part"' EXIT INT TERM
+: >"$parser_part"
+part_output="$(/usr/bin/mktemp -d "$test_output_root/parser-part.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$part_output" \
+  /bin/zsh "$package_script" >"$part_output/rejected.txt" 2>&1; then
+  fail "未完成的解析器 .part 文件未被拒绝"
+fi
+/bin/rm -f -- "$parser_part"
+trap - EXIT INT TERM
+[[ ! -e "$part_output/WebVideoHarbor-macOS.zip" ]] || fail "存在解析器 .part 文件时仍发布了 ZIP"
+rg -Fq '缓存包含未完成的解析器 .part 文件' "$part_output/rejected.txt" || \
+  fail "解析器 .part 文件拒绝信息不明确"
+
+bad_parser_output="$(/usr/bin/mktemp -d "$test_output_root/bad-parser.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_parser_output" \
+  WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$(printf 'f%.0s' {1..64})" \
+  /bin/zsh "$package_script" >"$bad_parser_output/rejected.txt" 2>&1; then
+  fail "校验和错误的解析器被打包"
+fi
+[[ ! -e "$bad_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "错误解析器仍发布了 ZIP"
+
+bad_license_output="$(/usr/bin/mktemp -d "$test_output_root/bad-license.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_license_output" \
+  WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$(printf 'e%.0s' {1..64})" \
+  /bin/zsh "$package_script" >"$bad_license_output/rejected.txt" 2>&1; then
+  fail "校验和错误的许可证被打包"
+fi
+[[ ! -e "$bad_license_output/WebVideoHarbor-macOS.zip" ]] || fail "错误许可证仍发布了 ZIP"
+
+invalid_parser_fixture="$repo_root/work/package-invalid-parser-fixture"
+mkdir -p "$invalid_parser_fixture"
+print -r -- '#!/bin/zsh' >"$invalid_parser_fixture/yt-dlp_macos"
+print -r -- '[[ "${1:-}" == "--version" ]] || exit 2' >>"$invalid_parser_fixture/yt-dlp_macos"
+print -r -- 'print -- 1900.01.01' >>"$invalid_parser_fixture/yt-dlp_macos"
+chmod 0755 "$invalid_parser_fixture/yt-dlp_macos"
+/bin/cp -p "$fixture_root/THIRD_PARTY_LICENSES.txt" "$invalid_parser_fixture/THIRD_PARTY_LICENSES.txt"
+invalid_parser_sha="$(/usr/bin/shasum -a 256 "$invalid_parser_fixture/yt-dlp_macos" | awk '{print $1}')"
+invalid_parser_license_sha="$(/usr/bin/shasum -a 256 "$invalid_parser_fixture/THIRD_PARTY_LICENSES.txt" | awk '{print $1}')"
+invalid_parser_output="$(/usr/bin/mktemp -d "$test_output_root/invalid-parser.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$invalid_parser_fixture" \
+  WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$invalid_parser_sha" \
+  WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$invalid_parser_license_sha" \
+  WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$invalid_parser_output" \
+  /bin/zsh "$package_script" >"$invalid_parser_output/rejected.txt" 2>&1; then
+  fail "版本错误的解析器被打包"
+fi
+[[ ! -e "$invalid_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "版本错误的解析器仍发布了 ZIP"
+rg -Fq '解析器版本异常' "$invalid_parser_output/rejected.txt" || fail "解析器版本错误信息不明确"
+
+thin_parser_fixture="$repo_root/work/package-thin-parser-fixture"
+mkdir -p "$thin_parser_fixture"
+print -r -- '#!/bin/zsh' >"$thin_parser_fixture/yt-dlp_macos"
+print -r -- '[[ "${1:-}" == "--version" ]] || exit 2' >>"$thin_parser_fixture/yt-dlp_macos"
+print -r -- 'print -- 2026.07.04' >>"$thin_parser_fixture/yt-dlp_macos"
+chmod 0755 "$thin_parser_fixture/yt-dlp_macos"
+/bin/cp -p "$fixture_root/THIRD_PARTY_LICENSES.txt" "$thin_parser_fixture/THIRD_PARTY_LICENSES.txt"
+thin_parser_sha="$(/usr/bin/shasum -a 256 "$thin_parser_fixture/yt-dlp_macos" | awk '{print $1}')"
+thin_parser_license_sha="$(/usr/bin/shasum -a 256 "$thin_parser_fixture/THIRD_PARTY_LICENSES.txt" | awk '{print $1}')"
+thin_parser_output="$(/usr/bin/mktemp -d "$test_output_root/thin-parser.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$thin_parser_fixture" \
+  WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$thin_parser_sha" \
+  WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$thin_parser_license_sha" \
+  WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$thin_parser_output" \
+  /bin/zsh "$package_script" >"$thin_parser_output/rejected.txt" 2>&1; then
+  fail "非 universal 解析器被打包"
+fi
+[[ ! -e "$thin_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "非 universal 解析器仍发布了 ZIP"
+rg -Fq '解析器缺少 universal 架构' "$thin_parser_output/rejected.txt" || \
+  fail "非 universal 解析器错误信息不明确"
 
 env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$run_output_dir" \
   /bin/zsh "$package_script"
@@ -42,8 +164,11 @@ for required_path in \
   scripts/build-macos.zsh \
   scripts/start-helper.zsh \
   helper/go.mod \
+  helper/go.sum \
   helper/cmd/web-video-harbor-helper/main.go \
   helper/internal/safety/exact_host_default.go \
+  work/dist/yt-dlp_macos \
+  licenses/yt-dlp-THIRD_PARTY_LICENSES.txt \
   work/dist/web-video-harbor-helper; do
   [[ -e "$package_root/$required_path" ]] || fail "ZIP 缺少：$required_path"
 done
@@ -66,6 +191,21 @@ fi
   fail "预构建助手不是 arm64+x86_64 universal"
 [[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper dev" ]] || \
   fail "预构建助手版本输出异常"
+parser_path="$package_root/work/dist/yt-dlp_macos"
+[[ -x "$parser_path" && ! -L "$parser_path" ]] || fail "包内平台解析器无效"
+[[ "$($parser_path --version)" == "2026.07.04" ]] || fail "包内平台解析器版本错误"
+/usr/bin/lipo "$parser_path" -verify_arch arm64 x86_64 || fail "包内平台解析器不是 universal"
+[[ "$(/usr/bin/shasum -a 256 "$parser_path" | awk '{print $1}')" == \
+  "$WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256" ]] || fail "包内平台解析器与已验证 fixture 不一致"
+packaged_license="$package_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt"
+[[ "$(/usr/bin/shasum -a 256 "$packaged_license" | awk '{print $1}')" == \
+  "$WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256" ]] || fail "包内 yt-dlp 许可证内容被篡改"
+rg -Fq 'yt-dlp' "$package_root/THIRD_PARTY_NOTICES.md" || fail "第三方说明缺少 yt-dlp"
+rg -Fq '2026.07.04' "$package_root/THIRD_PARTY_NOTICES.md" || fail "第三方说明缺少 yt-dlp 版本"
+rg -Fq 'https://github.com/yt-dlp/yt-dlp/tree/2026.07.04' "$package_root/THIRD_PARTY_NOTICES.md" || \
+  fail "第三方说明缺少 yt-dlp 固定版本上游 URL"
+rg -Fq 'licenses/yt-dlp-THIRD_PARTY_LICENSES.txt' "$package_root/THIRD_PARTY_NOTICES.md" || \
+  fail "第三方说明没有引用包内 yt-dlp 许可证"
 
 archive_listing="$(/usr/bin/bsdtar -tf "$archive_path")"
 top_levels="$(print -r -- "$archive_listing" | sed '/^$/d; s#/.*##' | sort -u)"
@@ -76,15 +216,25 @@ if print -r -- "$archive_listing" | rg -i \
   fail "ZIP 包含测试、缓存、凭证或运行时文件"
 fi
 
-unexpected_file="$repo_root/extension/.package-test-private.pem"
+unexpected_files=(
+  "$repo_root/extension/.package-parser.part"
+  "$repo_root/extension/.package-debug.log"
+  "$repo_root/extension/token"
+  "$repo_root/extension/.package-unexpected.bin"
+)
 unexpected_output_dir="$(/usr/bin/mktemp -d "$test_output_root/unexpected.XXXXXX")"
-trap 'rm -f -- "$unexpected_file"' EXIT INT TERM
-: >"$unexpected_file"
+cleanup_unexpected_files() {
+  rm -f -- $unexpected_files
+}
+trap cleanup_unexpected_files EXIT INT TERM
+for unexpected_file in $unexpected_files; do
+  : >"$unexpected_file"
+done
 if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$unexpected_output_dir" \
   /bin/zsh "$package_script" >"$unexpected_output_dir/rejected.txt" 2>&1; then
-  fail "扩展目录中的非白名单敏感文件被静默打包"
+  fail "扩展目录中的 .part、日志、凭证或意外二进制被静默打包"
 fi
-rm -f -- "$unexpected_file"
+cleanup_unexpected_files
 trap - EXIT INT TERM
 rg -Fq '非白名单' "$unexpected_output_dir/rejected.txt" || fail "非白名单扩展文件的拒绝信息不明确"
 [[ ! -e "$unexpected_output_dir/WebVideoHarbor-macOS.zip" ]] || fail "拒绝非白名单文件后仍发布了 ZIP"

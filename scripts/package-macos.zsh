@@ -18,6 +18,13 @@ for required_command in zip unzip bsdtar shasum find sort touch node file lipo m
   command -v "$required_command" >/dev/null 2>&1 || fail "缺少打包命令：$required_command"
 done
 
+package_testing="${WEB_VIDEO_PACKAGE_TESTING:-}"
+[[ -z "$package_testing" || "$package_testing" == "1" ]] || fail "测试模式开关无效"
+if [[ "$package_testing" != "1" ]]; then
+  package_test_inputs="${WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR:-}${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_FORCE_REFRESH:-}${WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR:-}"
+  [[ -z "$package_test_inputs" ]] || fail "生产模式不得注入测试数据"
+fi
+
 [[ -f "$repo_root/README.md" && ! -L "$repo_root/README.md" ]] || fail "缺少安全的 README.md"
 [[ -f "$repo_root/docs/安装使用说明.md" && ! -L "$repo_root/docs/安装使用说明.md" ]] || \
   fail "缺少安全的 docs/安装使用说明.md"
@@ -57,6 +64,34 @@ fi
 archive_path="$output_dir/$archive_name"
 [[ ! -e "$archive_path" && ! -L "$archive_path" ]] || fail "输出 ZIP 已存在，拒绝覆盖：$archive_path"
 
+"$repo_root/scripts/fetch-yt-dlp.zsh" >/dev/null || fail "无法获取并校验固定平台解析器"
+source "$repo_root/third_party/yt-dlp.env"
+yt_dlp_cache_key="$YTDLP_VERSION"
+expected_parser_sha="$YTDLP_MACOS_SHA256"
+expected_license_sha="$YTDLP_LICENSE_SHA256"
+if [[ "${WEB_VIDEO_PACKAGE_TESTING:-}" == "1" ]]; then
+  test_parser_sha="${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256:-}"
+  test_license_sha="${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256:-}"
+  [[ "$test_parser_sha" =~ '^[0-9a-f]{64}$' ]] || fail "测试模式缺少解析器 SHA256"
+  [[ "$test_license_sha" =~ '^[0-9a-f]{64}$' ]] || fail "测试模式缺少许可证 SHA256"
+  yt_dlp_cache_key="test-${test_parser_sha[1,16]}-${test_license_sha[1,16]}"
+  expected_parser_sha="$test_parser_sha"
+  expected_license_sha="$test_license_sha"
+fi
+yt_dlp_cache="$repo_root/work/vendor/yt-dlp/$yt_dlp_cache_key"
+[[ ! -e "$yt_dlp_cache/yt-dlp_macos.part" && ! -L "$yt_dlp_cache/yt-dlp_macos.part" ]] || \
+  fail "缓存包含未完成的解析器 .part 文件"
+source_parser="$yt_dlp_cache/yt-dlp_macos"
+source_parser_license="$yt_dlp_cache/THIRD_PARTY_LICENSES.txt"
+[[ -x "$source_parser" && ! -L "$source_parser" ]] || fail "固定平台解析器缓存无效"
+[[ -f "$source_parser_license" && ! -L "$source_parser_license" ]] || fail "平台解析器许可证缓存无效"
+parser_sha256="$(/usr/bin/shasum -a 256 "$source_parser" | /usr/bin/awk '{print $1}')"
+license_sha256="$(/usr/bin/shasum -a 256 "$source_parser_license" | /usr/bin/awk '{print $1}')"
+[[ "$parser_sha256" == "$expected_parser_sha" ]] || fail "固定平台解析器缓存 SHA256 异常"
+[[ "$license_sha256" == "$expected_license_sha" ]] || fail "平台解析器许可证缓存 SHA256 异常"
+[[ "$("$source_parser" --version)" == "$YTDLP_VERSION" ]] || fail "固定平台解析器版本异常"
+/usr/bin/lipo "$source_parser" -verify_arch arm64 x86_64 || fail "固定平台解析器缺少 universal 架构"
+
 "$repo_root/scripts/build-macos.zsh"
 source_binary="$repo_root/work/dist/web-video-harbor-helper"
 [[ -x "$source_binary" && ! -L "$source_binary" ]] || fail "构建没有生成安全的 universal 助手"
@@ -95,7 +130,7 @@ if /usr/bin/find "$repo_root/extension" "$repo_root/helper/cmd" "$repo_root/help
   fail "源码目录包含符号链接"
 fi
 
-expected_extension_files=$'background.js\ncontent.js\nlib/helper-client.js\nlib/media.js\nlib/popup-controller.js\nlib/popup-state.js\nmanifest.json\noptions.html\noptions.js\npopup.css\npopup.html\npopup.js'
+expected_extension_files=$'background.js\ncontent.js\nlib/helper-client.js\nlib/media.js\nlib/platform.js\nlib/popup-controller.js\nlib/popup-state.js\nmanifest.json\noptions.html\noptions.js\npopup.css\npopup.html\npopup.js'
 actual_extension_files="$(
   cd "$repo_root/extension"
   /usr/bin/find . -type f ! -path './tests/*' -print | sed 's#^\./##' | /usr/bin/sort
@@ -108,6 +143,7 @@ for relative_extension_path in ${(f)expected_extension_files}; do
 done
 
 copy_regular_file "$repo_root/helper/go.mod" "$stage_root/helper/go.mod"
+copy_regular_file "$repo_root/helper/go.sum" "$stage_root/helper/go.sum"
 while IFS= read -r -d '' source_path; do
   if rg -Pq '^//go:build[[:space:]].*(?<![![:alnum:]_])integration(?![[:alnum:]_])' "$source_path"; then
     continue
@@ -123,11 +159,18 @@ for packaged_script in \
   copy_regular_file "$repo_root/scripts/$packaged_script" "$stage_root/scripts/$packaged_script"
 done
 copy_regular_file "$source_binary" "$stage_root/work/dist/web-video-harbor-helper"
+copy_regular_file "$source_parser" "$stage_root/work/dist/yt-dlp_macos"
+copy_regular_file "$source_parser_license" "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt"
+[[ "$(/usr/bin/shasum -a 256 "$stage_root/work/dist/yt-dlp_macos" | /usr/bin/awk '{print $1}')" == \
+  "$expected_parser_sha" ]] || fail "staging 平台解析器 SHA256 异常"
+[[ "$(/usr/bin/shasum -a 256 "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt" | /usr/bin/awk '{print $1}')" == \
+  "$expected_license_sha" ]] || fail "staging 平台解析器许可证 SHA256 异常"
 
 chmod 0755 "$stage_root/scripts/build-macos.zsh" "$stage_root/scripts/helper-status.zsh" \
   "$stage_root/scripts/start-helper.zsh" "$stage_root/scripts/stop-helper.zsh" \
-  "$stage_root/work/dist/web-video-harbor-helper"
+  "$stage_root/work/dist/web-video-harbor-helper" "$stage_root/work/dist/yt-dlp_macos"
 chmod 0644 "$stage_root/scripts/bounded-log.zsh" "$stage_root/scripts/helper-common.zsh"
+chmod 0644 "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt"
 /usr/bin/find "$stage_root" -exec /usr/bin/touch -t 202001010000.00 {} +
 
 validate_package_tree() {
@@ -267,7 +310,7 @@ create_checksum_manifest "$unpacked_root" "$unpacked_checksums"
 
 for executable_path in \
   scripts/build-macos.zsh scripts/helper-status.zsh scripts/start-helper.zsh \
-  scripts/stop-helper.zsh work/dist/web-video-harbor-helper; do
+  scripts/stop-helper.zsh work/dist/web-video-harbor-helper work/dist/yt-dlp_macos; do
   [[ -x "$unpacked_root/$executable_path" ]] || fail "ZIP 未保留可执行位：$executable_path"
 done
 [[ ! -x "$unpacked_root/scripts/helper-common.zsh" ]] || fail "共享脚本权限意外变为可执行"
@@ -277,6 +320,18 @@ unpacked_binary="$unpacked_root/work/dist/web-video-harbor-helper"
 /usr/bin/file "$unpacked_binary"
 /usr/bin/lipo -info "$unpacked_binary"
 /usr/bin/lipo "$unpacked_binary" -verify_arch arm64 x86_64 || fail "解包助手缺少 universal 架构"
+
+unpacked_parser="$unpacked_root/work/dist/yt-dlp_macos"
+[[ -x "$unpacked_parser" && ! -L "$unpacked_parser" ]] || fail "解包平台解析器无效"
+[[ "$(/usr/bin/shasum -a 256 "$unpacked_parser" | /usr/bin/awk '{print $1}')" == \
+  "$expected_parser_sha" ]] || fail "解包平台解析器 SHA256 异常"
+[[ "$($unpacked_parser --version)" == "$YTDLP_VERSION" ]] || fail "解包平台解析器版本异常"
+/usr/bin/lipo "$unpacked_parser" -verify_arch arm64 x86_64 || fail "解包平台解析器缺少 universal 架构"
+[[ -f "$unpacked_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt" ]] || fail "解包内容缺少 yt-dlp 许可证"
+[[ "$(/usr/bin/shasum -a 256 "$unpacked_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt" | /usr/bin/awk '{print $1}')" == \
+  "$expected_license_sha" ]] || fail "解包平台解析器许可证 SHA256 异常"
+rg -Fq 'licenses/yt-dlp-THIRD_PARTY_LICENSES.txt' "$unpacked_root/THIRD_PARTY_NOTICES.md" || \
+  fail "第三方说明未引用包内 yt-dlp 许可证"
 
 (
   cd "$unpacked_root"
