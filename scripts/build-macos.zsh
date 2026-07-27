@@ -50,7 +50,7 @@ fi
 trap 'rm -f -- "$universal_temp"' EXIT
 
 print -- "使用 Homebrew Go：$("$go_command" version)"
-release_ldflags='-X main.version=0.2.0'
+release_ldflags='-X main.version=0.2.1'
 (
   cd "$repo_root/helper"
   env GOCACHE="$build_cache" GOTMPDIR="$build_tmp" CGO_ENABLED=0 \

@@ -60,11 +60,20 @@ health_version="$(health_extract version string)" || health_schema_valid=""
 health_ffmpeg="$(health_extract ffmpeg bool)" || health_schema_valid=""
 platform_available="$(health_extract platformDownloader.available bool)" || health_schema_valid=""
 platform_version="$(health_extract platformDownloader.version string)" || health_schema_valid=""
+runtime_available="$(health_extract javascriptRuntime.available bool)" || health_schema_valid=""
+runtime_version="$(health_extract javascriptRuntime.version string)" || health_schema_valid=""
 if [[ "$platform_available" == "true" ]]; then
   parsed_platform_date="$(/bin/date -j -f '%Y.%m.%d' "$platform_version" '+%Y.%m.%d' 2>/dev/null)" || health_schema_valid=""
   [[ "$parsed_platform_date" == "$platform_version" ]] || health_schema_valid=""
 elif [[ "$platform_available" == "false" ]]; then
   [[ -z "$platform_version" ]] || health_schema_valid=""
+else
+  health_schema_valid=""
+fi
+if [[ "$runtime_available" == "true" ]]; then
+  [[ "$runtime_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]] || health_schema_valid=""
+elif [[ "$runtime_available" == "false" ]]; then
+  [[ -z "$runtime_version" ]] || health_schema_valid=""
 else
   health_schema_valid=""
 fi
@@ -89,6 +98,12 @@ if [[ "$platform_available" == "true" ]] && \
   print -- "平台解析器: 可用（$platform_version）"
 else
   print -- "平台解析器: 不可用"
+fi
+if [[ "$runtime_available" == "true" ]] && \
+  [[ "$runtime_version" =~ '^[0-9]+\.[0-9]+\.[0-9]+$' ]]; then
+  print -- "JavaScript 解析环境: 可用（$runtime_version）"
+else
+  print -- "JavaScript 解析环境: 不可用"
 fi
 print -- "版本：$health_version"
 helper_config_download_dir

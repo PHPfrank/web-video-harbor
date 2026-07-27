@@ -64,6 +64,7 @@ function harness(overrides = {}) {
       version: '0.2.0',
       ffmpeg: true,
       platformDownloader: { available: true, version: '2026.07.04' },
+      javascriptRuntime: { available: true, version: '2.8.1' },
     }),
     listTasks: async () => [],
     inspect: async () => ({ mediaType: 'hls', variants: [] }),
@@ -381,12 +382,29 @@ test('platform candidate defaults to best, skips inspection, and sends the selec
   }]);
 });
 
-test('platform availability requires both the bundled downloader and FFmpeg without blocking MP4', async () => {
+test('platform availability requires parser, JavaScript runtime, and FFmpeg without blocking MP4', async () => {
   const platformURL = 'https://www.bilibili.com/video/BV1K3Gz6pEoo';
   const mp4URL = 'https://cdn.example/video.mp4';
+  let createCalls = 0;
   const healthResults = [
-    { ready: true, ffmpeg: true, platformDownloader: { available: false, version: '' } },
-    { ready: true, ffmpeg: false, platformDownloader: { available: true, version: '2026.07.04' } },
+    {
+      ready: true,
+      ffmpeg: true,
+      platformDownloader: { available: false, version: '' },
+      javascriptRuntime: { available: true, version: '2.8.1' },
+    },
+    {
+      ready: true,
+      ffmpeg: true,
+      platformDownloader: { available: true, version: '2026.07.04' },
+      javascriptRuntime: { available: false, version: '' },
+    },
+    {
+      ready: true,
+      ffmpeg: false,
+      platformDownloader: { available: true, version: '2026.07.04' },
+      javascriptRuntime: { available: true, version: '2.8.1' },
+    },
   ];
   const { controller, renderer } = harness({
     bridge: {
@@ -398,15 +416,28 @@ test('platform availability requires both the bundled downloader and FFmpeg with
         ],
       }),
     },
-    helper: { health: async () => healthResults.shift(), listTasks: async () => [] },
+    helper: {
+      health: async () => healthResults.shift(),
+      listTasks: async () => [],
+      createTask: async () => { createCalls += 1; return { id: 'unexpected' }; },
+    },
   });
   await controller.refreshCandidates();
 
   await controller.refreshTasks();
   let candidates = renderer.candidates.at(-1).candidates;
   assert.equal(candidates.find((item) => item.url === platformURL).canUse, false);
-  assert.match(candidates.find((item) => item.url === platformURL).blockedReason, /解析器/);
+  assert.match(candidates.find((item) => item.url === platformURL).blockedReason, /安装包不完整.*解析器/);
   assert.equal(candidates.find((item) => item.url === mp4URL).canUse, true);
+
+  await controller.refreshTasks();
+  candidates = renderer.candidates.at(-1).candidates;
+  assert.equal(candidates.find((item) => item.url === platformURL).canUse, false);
+  assert.match(candidates.find((item) => item.url === platformURL).blockedReason, /安装包不完整.*JavaScript/);
+  assert.equal(candidates.find((item) => item.url === mp4URL).canUse, true);
+  await controller.downloadCandidate(platformURL);
+  assert.equal(createCalls, 0);
+  assert.match(renderer.notices.at(-1).message, /安装包不完整.*JavaScript/);
 
   await controller.refreshTasks();
   candidates = renderer.candidates.at(-1).candidates;

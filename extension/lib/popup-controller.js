@@ -36,6 +36,7 @@
       connection: 'connecting',
       ffmpegAvailable: null,
       platformDownloaderAvailable: null,
+      javascriptRuntimeAvailable: null,
       scanning: false,
       candidates: [],
       tasks: [],
@@ -56,7 +57,7 @@
     let stopped = false;
 
     function capabilityKey() {
-      return `${model.connection}:${String(model.ffmpegAvailable)}:${String(model.platformDownloaderAvailable)}`;
+      return `${model.connection}:${String(model.ffmpegAvailable)}:${String(model.platformDownloaderAvailable)}:${String(model.javascriptRuntimeAvailable)}`;
     }
 
     function candidateModels() {
@@ -64,6 +65,8 @@
         const hlsBlocked = candidate.kind === 'hls' && model.ffmpegAvailable === false;
         const platformParserBlocked = candidate.kind === 'platform'
           && model.platformDownloaderAvailable === false;
+        const platformRuntimeBlocked = candidate.kind === 'platform'
+          && model.javascriptRuntimeAvailable === false;
         const platformFFmpegBlocked = candidate.kind === 'platform' && model.ffmpegAvailable === false;
         const variants = viewState.sortHlsVariants(candidate.variants);
         const selected = selectedVariants.get(candidate.url);
@@ -76,7 +79,8 @@
         if (candidate.kind === 'platform') selectedQualities.set(candidate.url, selectedQuality);
         let blockedReason = '';
         if (hlsBlocked) blockedReason = '未安装 FFmpeg，无法处理 M3U8 视频';
-        else if (platformParserBlocked) blockedReason = '未安装平台解析器，无法下载 YouTube 或哔哩哔哩视频';
+        else if (platformParserBlocked) blockedReason = '安装包不完整：缺少平台解析器';
+        else if (platformRuntimeBlocked) blockedReason = '安装包不完整：缺少 JavaScript 解析组件';
         else if (platformFFmpegBlocked) blockedReason = '未安装 FFmpeg，无法合并平台视频';
         return {
           ...candidate,
@@ -87,7 +91,7 @@
           selectedQuality: candidate.kind === 'platform' ? selectedQuality : '',
           pending: pendingCandidates.has(candidate.url),
           canUse: model.connection === 'connected' && !hlsBlocked
-            && !platformParserBlocked && !platformFFmpegBlocked,
+            && !platformParserBlocked && !platformRuntimeBlocked && !platformFFmpegBlocked,
           blockedReason,
         };
       });
@@ -177,6 +181,8 @@
           model.ffmpegAvailable = Boolean(health && health.ffmpeg);
           model.platformDownloaderAvailable = Boolean(health && health.platformDownloader
             && health.platformDownloader.available);
+          model.javascriptRuntimeAvailable = Boolean(health && health.javascriptRuntime
+            && health.javascriptRuntime.available);
           const tasks = await helper.listTasks();
           model.connection = 'connected';
           const nextTasks = Array.isArray(tasks) ? tasks : [];
@@ -268,7 +274,11 @@
         return true;
       }
       if (candidate.kind === 'platform' && model.platformDownloaderAvailable === false) {
-        setNotice('未安装平台解析器，无法下载 YouTube 或哔哩哔哩视频');
+        setNotice('安装包不完整：缺少平台解析器');
+        return true;
+      }
+      if (candidate.kind === 'platform' && model.javascriptRuntimeAvailable === false) {
+        setNotice('安装包不完整：缺少 JavaScript 解析组件');
         return true;
       }
       if (candidate.kind === 'platform' && model.ffmpegAvailable === false) {

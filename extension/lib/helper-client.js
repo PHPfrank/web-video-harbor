@@ -24,6 +24,9 @@
     not_found: '未找到该下载任务',
     invalid_state: '任务当前状态不允许此操作',
     task_error: '本地助手无法执行该任务',
+    verification_required: 'YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息',
+    network_filtered: '当前网络阻止了本地下载连接，请联系网络管理员或更换网络',
+    javascript_runtime: '视频解析组件不完整，请重新安装网页视频港',
     not_revealable: '任务文件尚不可显示',
     reveal_failed: '无法在 Finder 中显示文件',
   };
@@ -117,6 +120,7 @@
       ffmpeg: health.ffmpeg === true,
       pid: Number.isSafeInteger(health.pid) && health.pid > 1 ? health.pid : 0,
       platformDownloader: normalizePlatformDownloader(health.platformDownloader),
+      javascriptRuntime: normalizePlatformDownloader(health.javascriptRuntime),
     };
   }
 

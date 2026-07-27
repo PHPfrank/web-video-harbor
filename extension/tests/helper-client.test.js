@@ -35,6 +35,7 @@ test('health is unauthenticated while every v1 request uses the locally stored t
           ffmpeg: true,
           pid: 4321,
           platformDownloader: { available: true, version: '2026.07.04' },
+          javascriptRuntime: { available: true, version: '2.8.1' },
         })
         : jsonResponse(200, []);
     },
@@ -45,6 +46,7 @@ test('health is unauthenticated while every v1 request uses the locally stored t
 
   assert.equal(health.pid, 4321);
   assert.deepEqual(health.platformDownloader, { available: true, version: '2026.07.04' });
+  assert.deepEqual(health.javascriptRuntime, { available: true, version: '2.8.1' });
   assert.equal(calls[0].url, 'http://127.0.0.1:17432/health');
   assert.equal(calls[0].options.headers['X-Video-Helper-Token'], undefined);
   assert.equal(calls[1].url, 'http://127.0.0.1:17432/v1/tasks');
@@ -99,6 +101,39 @@ test('health rejects unbounded platform downloader versions without throwing', a
 
   const health = await client.health();
   assert.deepEqual(health.platformDownloader, { available: false, version: '' });
+});
+
+test('health normalizes missing or malformed JavaScript runtime status safely', async () => {
+  const unsafeCases = [
+    undefined,
+    {},
+    null,
+    'available',
+    { available: 'true', version: '/Users/person/private-runtime' },
+    { available: true, version: '2.8.1\n/private-runtime', path: '/Users/person/private-runtime' },
+    { available: true, version: '1'.repeat(65) },
+  ];
+
+  for (const javascriptRuntime of unsafeCases) {
+    const client = helper.createHelperClient({
+      storageLocal: localStorage(),
+      async fetchImpl() {
+        return jsonResponse(200, {
+          ready: true,
+          version: '0.2.1',
+          ffmpeg: true,
+          pid: 4321,
+          path: '/Users/person/helper',
+          ...(javascriptRuntime === undefined ? {} : { javascriptRuntime }),
+        });
+      },
+    });
+
+    const health = await client.health();
+    assert.deepEqual(health.javascriptRuntime, { available: false, version: '' });
+    assert.equal(Object.hasOwn(health, 'path'), false);
+    assert.doesNotMatch(JSON.stringify(health), /Users|private-runtime/);
+  }
 });
 
 test('helper address stays fixed even if a caller supplies a different base URL', async () => {
@@ -209,6 +244,25 @@ test('remote and network errors never expose response text, URL, or token', asyn
     assert.doesNotMatch(error.message, /private|sensitive|token|https?:/i);
     return true;
   });
+});
+
+test('platform compatibility errors use fixed safe Chinese messages', async () => {
+  const cases = [
+    ['verification_required', 'YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息'],
+    ['network_filtered', '当前网络阻止了本地下载连接，请联系网络管理员或更换网络'],
+    ['javascript_runtime', '视频解析组件不完整，请重新安装网页视频港'],
+  ];
+
+  for (const [code, message] of cases) {
+    const client = helper.createHelperClient({
+      storageLocal: localStorage('secret'),
+      async fetchImpl() {
+        return jsonResponse(422, { code, message: 'https://private.example/?token=secret' });
+      },
+    });
+
+    await assert.rejects(client.createTask({ mediaType: 'platform' }), { code, message });
+  }
 });
 
 test('pairing token is trimmed and stored only through the supplied local storage area', async () => {

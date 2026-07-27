@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "网页视频港",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "description": "下载网页 MP4、M3U8，以及公开的 YouTube 和哔哩哔哩单个视频。",
   "permissions": [
     "storage",

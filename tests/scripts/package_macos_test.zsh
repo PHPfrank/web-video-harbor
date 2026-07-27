@@ -11,6 +11,7 @@ run_output_dir="$(/usr/bin/mktemp -d "$test_output_root/run.XXXXXX")"
 archive_path="$run_output_dir/WebVideoHarbor-macOS.zip"
 unpack_root="$run_output_dir/unpacked"
 fixture_root="$repo_root/work/package-yt-dlp-fixture"
+deno_fixture_root="$repo_root/work/package-deno-fixture"
 
 fail() {
   print -u2 -- "FAIL: $1"
@@ -32,6 +33,12 @@ fi
   fail "打包脚本没有在复制前验证解析器 universal 架构"
 [[ "$package_script_text" == *"缓存包含未完成的解析器 .part 文件"* ]] || \
   fail "打包脚本没有拒绝解析器 .part 文件"
+[[ "$package_script_text" == *'scripts/fetch-deno.zsh'* ]] || \
+  fail "打包脚本没有获取固定 Deno 运行环境"
+[[ "$package_script_text" == *'deno_arm64_sha256='*'deno_amd64_sha256='*'deno_license_sha256='* ]] || \
+  fail "打包脚本没有独立重验两种架构 Deno 与许可证 SHA256"
+[[ "$package_script_text" == *"缓存包含未完成的 Deno .part 文件"* ]] || \
+  fail "打包脚本没有拒绝 Deno .part 文件"
 
 invalid_mode_output="$(/usr/bin/mktemp -d "$test_output_root/invalid-mode.XXXXXX")"
 if env WEB_VIDEO_PACKAGE_TESTING=0 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$invalid_mode_output" \
@@ -72,7 +79,31 @@ export WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$fixture_root"
 export WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256="$(/usr/bin/shasum -a 256 "$fixture_root/yt-dlp_macos" | awk '{print $1}')"
 export WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256="$(/usr/bin/shasum -a 256 "$fixture_root/THIRD_PARTY_LICENSES.txt" | awk '{print $1}')"
 
+mkdir -p "$deno_fixture_root/src" "$deno_fixture_root/build" \
+  "$deno_fixture_root/arm64" "$deno_fixture_root/amd64"
+print -r -- 'package main' >"$deno_fixture_root/src/main.go"
+print -r -- 'import ("fmt"; "os")' >>"$deno_fixture_root/src/main.go"
+print -r -- 'func main(){ if len(os.Args)==2 && os.Args[1]=="--version" { fmt.Println("deno 2.8.1"); return }; os.Exit(2) }' \
+  >>"$deno_fixture_root/src/main.go"
+env CGO_ENABLED=0 GOOS=darwin GOARCH=arm64 "$go_command" build -trimpath \
+  -o "$deno_fixture_root/arm64/deno" "$deno_fixture_root/src/main.go"
+env CGO_ENABLED=0 GOOS=darwin GOARCH=amd64 "$go_command" build -trimpath \
+  -o "$deno_fixture_root/amd64/deno" "$deno_fixture_root/src/main.go"
+/bin/rm -f -- "$deno_fixture_root/deno-aarch64-apple-darwin.zip" \
+  "$deno_fixture_root/deno-x86_64-apple-darwin.zip"
+/usr/bin/zip -q -j "$deno_fixture_root/deno-aarch64-apple-darwin.zip" "$deno_fixture_root/arm64/deno"
+/usr/bin/zip -q -j "$deno_fixture_root/deno-x86_64-apple-darwin.zip" "$deno_fixture_root/amd64/deno"
+print -r -- 'fixture Deno license' >"$deno_fixture_root/LICENSE.md"
+export WEB_VIDEO_DENO_TESTING=1
+export WEB_VIDEO_DENO_TEST_SOURCE_DIR="$deno_fixture_root"
+export WEB_VIDEO_DENO_TEST_ARM64_ZIP_SHA256="$(/usr/bin/shasum -a 256 "$deno_fixture_root/deno-aarch64-apple-darwin.zip" | awk '{print $1}')"
+export WEB_VIDEO_DENO_TEST_AMD64_ZIP_SHA256="$(/usr/bin/shasum -a 256 "$deno_fixture_root/deno-x86_64-apple-darwin.zip" | awk '{print $1}')"
+export WEB_VIDEO_DENO_TEST_ARM64_BINARY_SHA256="$(/usr/bin/shasum -a 256 "$deno_fixture_root/arm64/deno" | awk '{print $1}')"
+export WEB_VIDEO_DENO_TEST_AMD64_BINARY_SHA256="$(/usr/bin/shasum -a 256 "$deno_fixture_root/amd64/deno" | awk '{print $1}')"
+export WEB_VIDEO_DENO_TEST_LICENSE_SHA256="$(/usr/bin/shasum -a 256 "$deno_fixture_root/LICENSE.md" | awk '{print $1}')"
+
 env WEB_VIDEO_PACKAGE_TESTING=1 /bin/zsh "$repo_root/scripts/fetch-yt-dlp.zsh" >/dev/null
+env WEB_VIDEO_DENO_TESTING=1 /bin/zsh "$repo_root/scripts/fetch-deno.zsh" >/dev/null
 fixture_cache="$repo_root/work/vendor/yt-dlp/test-${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256[1,16]}-${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256[1,16]}"
 parser_part="$fixture_cache/yt-dlp_macos.part"
 trap '/bin/rm -f -- "$parser_part"' EXIT INT TERM
@@ -87,6 +118,22 @@ trap - EXIT INT TERM
 [[ ! -e "$part_output/WebVideoHarbor-macOS.zip" ]] || fail "存在解析器 .part 文件时仍发布了 ZIP"
 rg -Fq '缓存包含未完成的解析器 .part 文件' "$part_output/rejected.txt" || \
   fail "解析器 .part 文件拒绝信息不明确"
+
+deno_cache_key="test-${WEB_VIDEO_DENO_TEST_ARM64_ZIP_SHA256[1,12]}-${WEB_VIDEO_DENO_TEST_AMD64_ZIP_SHA256[1,12]}-${WEB_VIDEO_DENO_TEST_LICENSE_SHA256[1,12]}"
+deno_fixture_cache="$repo_root/work/vendor/deno/$deno_cache_key"
+deno_part="$deno_fixture_cache/deno_macos_arm64.part"
+trap '/bin/rm -f -- "$deno_part"' EXIT INT TERM
+: >"$deno_part"
+deno_part_output="$(/usr/bin/mktemp -d "$test_output_root/deno-part.XXXXXX")"
+if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$deno_part_output" \
+  /bin/zsh "$package_script" >"$deno_part_output/rejected.txt" 2>&1; then
+  fail "未完成的 Deno .part 文件未被拒绝"
+fi
+/bin/rm -f -- "$deno_part"
+trap - EXIT INT TERM
+[[ ! -e "$deno_part_output/WebVideoHarbor-macOS.zip" ]] || fail "存在 Deno .part 文件时仍发布了 ZIP"
+rg -Fq '缓存包含未完成的 Deno .part 文件' "$deno_part_output/rejected.txt" || \
+  fail "Deno .part 文件拒绝信息不明确"
 
 bad_parser_output="$(/usr/bin/mktemp -d "$test_output_root/bad-parser.XXXXXX")"
 if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_parser_output" \
@@ -174,6 +221,9 @@ for required_path in \
   helper/cmd/web-video-harbor-helper/main.go \
   helper/internal/safety/exact_host_default.go \
   work/dist/yt-dlp_macos \
+  work/dist/deno_macos_arm64 \
+  work/dist/deno_macos_x86_64 \
+  licenses/Deno-LICENSE.md \
   licenses/yt-dlp-THIRD_PARTY_LICENSES.txt \
   work/dist/web-video-harbor-helper; do
   [[ -e "$package_root/$required_path" ]] || fail "ZIP 缺少：$required_path"
@@ -195,7 +245,7 @@ fi
 [[ -x "$package_root/work/dist/web-video-harbor-helper" ]] || fail "预构建助手不可执行"
 /usr/bin/lipo "$package_root/work/dist/web-video-harbor-helper" -verify_arch arm64 x86_64 || \
   fail "预构建助手不是 arm64+x86_64 universal"
-[[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper 0.2.0" ]] || \
+[[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper 0.2.1" ]] || \
   fail "预构建助手版本输出异常"
 parser_path="$package_root/work/dist/yt-dlp_macos"
 [[ -x "$parser_path" && ! -L "$parser_path" ]] || fail "包内平台解析器无效"
@@ -212,6 +262,29 @@ rg -Fq 'https://github.com/yt-dlp/yt-dlp/tree/2026.07.04' "$package_root/THIRD_P
   fail "第三方说明缺少 yt-dlp 固定版本上游 URL"
 rg -Fq 'licenses/yt-dlp-THIRD_PARTY_LICENSES.txt' "$package_root/THIRD_PARTY_NOTICES.md" || \
   fail "第三方说明没有引用包内 yt-dlp 许可证"
+
+deno_arm64_path="$package_root/work/dist/deno_macos_arm64"
+deno_amd64_path="$package_root/work/dist/deno_macos_x86_64"
+[[ -x "$deno_arm64_path" && ! -L "$deno_arm64_path" ]] || fail "包内 arm64 Deno 无效"
+[[ -x "$deno_amd64_path" && ! -L "$deno_amd64_path" ]] || fail "包内 x86_64 Deno 无效"
+/usr/bin/lipo "$deno_arm64_path" -verify_arch arm64 || fail "包内 arm64 Deno 架构错误"
+if /usr/bin/lipo "$deno_arm64_path" -verify_arch x86_64 >/dev/null 2>&1; then
+  fail "包内 arm64 Deno 意外包含 x86_64"
+fi
+/usr/bin/lipo "$deno_amd64_path" -verify_arch x86_64 || fail "包内 x86_64 Deno 架构错误"
+if /usr/bin/lipo "$deno_amd64_path" -verify_arch arm64 >/dev/null 2>&1; then
+  fail "包内 x86_64 Deno 意外包含 arm64"
+fi
+[[ "$(/usr/bin/shasum -a 256 "$deno_arm64_path" | awk '{print $1}')" == \
+  "$WEB_VIDEO_DENO_TEST_ARM64_BINARY_SHA256" ]] || fail "包内 arm64 Deno 与已验证 fixture 不一致"
+[[ "$(/usr/bin/shasum -a 256 "$deno_amd64_path" | awk '{print $1}')" == \
+  "$WEB_VIDEO_DENO_TEST_AMD64_BINARY_SHA256" ]] || fail "包内 x86_64 Deno 与已验证 fixture 不一致"
+[[ "$(/usr/bin/shasum -a 256 "$package_root/licenses/Deno-LICENSE.md" | awk '{print $1}')" == \
+  "$WEB_VIDEO_DENO_TEST_LICENSE_SHA256" ]] || fail "包内 Deno 许可证内容被篡改"
+rg -Fq 'Deno' "$package_root/THIRD_PARTY_NOTICES.md" || fail "第三方说明缺少 Deno"
+rg -Fq '2.8.1' "$package_root/THIRD_PARTY_NOTICES.md" || fail "第三方说明缺少 Deno 版本"
+rg -Fq 'licenses/Deno-LICENSE.md' "$package_root/THIRD_PARTY_NOTICES.md" || \
+  fail "第三方说明没有引用包内 Deno 许可证"
 
 archive_listing="$(/usr/bin/bsdtar -tf "$archive_path")"
 top_levels="$(print -r -- "$archive_listing" | sed '/^$/d; s#/.*##' | sort -u)"

@@ -21,7 +21,7 @@ done
 package_testing="${WEB_VIDEO_PACKAGE_TESTING:-}"
 [[ -z "$package_testing" || "$package_testing" == "1" ]] || fail "测试模式开关无效"
 if [[ "$package_testing" != "1" ]]; then
-  package_test_inputs="${WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR:-}${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_FORCE_REFRESH:-}${WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR:-}"
+  package_test_inputs="${WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR:-}${WEB_VIDEO_PACKAGE_TEST_BINARY_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_LICENSE_SHA256:-}${WEB_VIDEO_PACKAGE_TEST_FORCE_REFRESH:-}${WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR:-}${WEB_VIDEO_DENO_TESTING:-}${WEB_VIDEO_DENO_TEST_SOURCE_DIR:-}${WEB_VIDEO_DENO_TEST_FORCE_REFRESH:-}${WEB_VIDEO_DENO_TEST_ARM64_ZIP_SHA256:-}${WEB_VIDEO_DENO_TEST_AMD64_ZIP_SHA256:-}${WEB_VIDEO_DENO_TEST_ARM64_BINARY_SHA256:-}${WEB_VIDEO_DENO_TEST_AMD64_BINARY_SHA256:-}${WEB_VIDEO_DENO_TEST_LICENSE_SHA256:-}"
   [[ -z "$package_test_inputs" ]] || fail "生产模式不得注入测试数据"
 fi
 
@@ -121,6 +121,52 @@ license_sha256="$(/usr/bin/shasum -a 256 "$source_parser_license" | /usr/bin/awk
 [[ "$("$source_parser" --version)" == "$YTDLP_VERSION" ]] || fail "固定平台解析器版本异常"
 /usr/bin/lipo "$source_parser" -verify_arch arm64 x86_64 || fail "固定平台解析器缺少 universal 架构"
 
+"$repo_root/scripts/fetch-deno.zsh" >/dev/null || fail "无法获取并校验固定 JavaScript 运行环境"
+source "$repo_root/third_party/deno.env"
+deno_cache_key="$DENO_VERSION"
+expected_deno_arm64_sha="$DENO_ARM64_BINARY_SHA256"
+expected_deno_amd64_sha="$DENO_AMD64_BINARY_SHA256"
+expected_deno_license_sha="$DENO_LICENSE_SHA256"
+if [[ "$package_testing" == "1" ]]; then
+  test_deno_arm64_zip_sha="${WEB_VIDEO_DENO_TEST_ARM64_ZIP_SHA256:-}"
+  test_deno_amd64_zip_sha="${WEB_VIDEO_DENO_TEST_AMD64_ZIP_SHA256:-}"
+  test_deno_arm64_sha="${WEB_VIDEO_DENO_TEST_ARM64_BINARY_SHA256:-}"
+  test_deno_amd64_sha="${WEB_VIDEO_DENO_TEST_AMD64_BINARY_SHA256:-}"
+  test_deno_license_sha="${WEB_VIDEO_DENO_TEST_LICENSE_SHA256:-}"
+  for test_deno_sha in "$test_deno_arm64_zip_sha" "$test_deno_amd64_zip_sha" \
+    "$test_deno_arm64_sha" "$test_deno_amd64_sha" "$test_deno_license_sha"; do
+    [[ "$test_deno_sha" =~ '^[0-9a-f]{64}$' ]] || fail "测试模式缺少 Deno SHA256"
+  done
+  deno_cache_key="test-${test_deno_arm64_zip_sha[1,12]}-${test_deno_amd64_zip_sha[1,12]}-${test_deno_license_sha[1,12]}"
+  expected_deno_arm64_sha="$test_deno_arm64_sha"
+  expected_deno_amd64_sha="$test_deno_amd64_sha"
+  expected_deno_license_sha="$test_deno_license_sha"
+fi
+deno_cache="$repo_root/work/vendor/deno/$deno_cache_key"
+if /usr/bin/find "$deno_cache" -maxdepth 1 -type f -name '*.part' -print -quit | rg -q .; then
+  fail "缓存包含未完成的 Deno .part 文件"
+fi
+source_deno_arm64="$deno_cache/deno_macos_arm64"
+source_deno_amd64="$deno_cache/deno_macos_x86_64"
+source_deno_license="$deno_cache/LICENSE.md"
+[[ -x "$source_deno_arm64" && ! -L "$source_deno_arm64" ]] || fail "固定 arm64 Deno 缓存无效"
+[[ -x "$source_deno_amd64" && ! -L "$source_deno_amd64" ]] || fail "固定 x86_64 Deno 缓存无效"
+[[ -f "$source_deno_license" && ! -L "$source_deno_license" ]] || fail "Deno 许可证缓存无效"
+deno_arm64_sha256="$(/usr/bin/shasum -a 256 "$source_deno_arm64" | /usr/bin/awk '{print $1}')"
+deno_amd64_sha256="$(/usr/bin/shasum -a 256 "$source_deno_amd64" | /usr/bin/awk '{print $1}')"
+deno_license_sha256="$(/usr/bin/shasum -a 256 "$source_deno_license" | /usr/bin/awk '{print $1}')"
+[[ "$deno_arm64_sha256" == "$expected_deno_arm64_sha" ]] || fail "固定 arm64 Deno 缓存 SHA256 异常"
+[[ "$deno_amd64_sha256" == "$expected_deno_amd64_sha" ]] || fail "固定 x86_64 Deno 缓存 SHA256 异常"
+[[ "$deno_license_sha256" == "$expected_deno_license_sha" ]] || fail "Deno 许可证缓存 SHA256 异常"
+/usr/bin/lipo "$source_deno_arm64" -verify_arch arm64 || fail "固定 arm64 Deno 架构异常"
+if /usr/bin/lipo "$source_deno_arm64" -verify_arch x86_64 >/dev/null 2>&1; then
+  fail "固定 arm64 Deno 意外包含 x86_64 架构"
+fi
+/usr/bin/lipo "$source_deno_amd64" -verify_arch x86_64 || fail "固定 x86_64 Deno 架构异常"
+if /usr/bin/lipo "$source_deno_amd64" -verify_arch arm64 >/dev/null 2>&1; then
+  fail "固定 x86_64 Deno 意外包含 arm64 架构"
+fi
+
 "$repo_root/scripts/build-macos.zsh"
 source_binary="$repo_root/work/dist/web-video-harbor-helper"
 [[ -x "$source_binary" && ! -L "$source_binary" ]] || fail "构建没有生成安全的 universal 助手"
@@ -189,17 +235,27 @@ for packaged_script in \
 done
 copy_regular_file "$source_binary" "$stage_root/work/dist/web-video-harbor-helper"
 copy_regular_file "$source_parser" "$stage_root/work/dist/yt-dlp_macos"
+copy_regular_file "$source_deno_arm64" "$stage_root/work/dist/deno_macos_arm64"
+copy_regular_file "$source_deno_amd64" "$stage_root/work/dist/deno_macos_x86_64"
 copy_regular_file "$source_parser_license" "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt"
+copy_regular_file "$source_deno_license" "$stage_root/licenses/Deno-LICENSE.md"
 [[ "$(/usr/bin/shasum -a 256 "$stage_root/work/dist/yt-dlp_macos" | /usr/bin/awk '{print $1}')" == \
   "$expected_parser_sha" ]] || fail "staging 平台解析器 SHA256 异常"
 [[ "$(/usr/bin/shasum -a 256 "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt" | /usr/bin/awk '{print $1}')" == \
   "$expected_license_sha" ]] || fail "staging 平台解析器许可证 SHA256 异常"
+[[ "$(/usr/bin/shasum -a 256 "$stage_root/work/dist/deno_macos_arm64" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_arm64_sha" ]] || fail "staging arm64 Deno SHA256 异常"
+[[ "$(/usr/bin/shasum -a 256 "$stage_root/work/dist/deno_macos_x86_64" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_amd64_sha" ]] || fail "staging x86_64 Deno SHA256 异常"
+[[ "$(/usr/bin/shasum -a 256 "$stage_root/licenses/Deno-LICENSE.md" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_license_sha" ]] || fail "staging Deno 许可证 SHA256 异常"
 
 chmod 0755 "$stage_root/scripts/build-macos.zsh" "$stage_root/scripts/helper-status.zsh" \
   "$stage_root/scripts/start-helper.zsh" "$stage_root/scripts/stop-helper.zsh" \
-  "$stage_root/work/dist/web-video-harbor-helper" "$stage_root/work/dist/yt-dlp_macos"
+  "$stage_root/work/dist/web-video-harbor-helper" "$stage_root/work/dist/yt-dlp_macos" \
+  "$stage_root/work/dist/deno_macos_arm64" "$stage_root/work/dist/deno_macos_x86_64"
 chmod 0644 "$stage_root/scripts/bounded-log.zsh" "$stage_root/scripts/helper-common.zsh"
-chmod 0644 "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt"
+chmod 0644 "$stage_root/licenses/yt-dlp-THIRD_PARTY_LICENSES.txt" "$stage_root/licenses/Deno-LICENSE.md"
 /usr/bin/find "$stage_root" -exec /usr/bin/touch -t 202001010000.00 {} +
 
 validate_package_tree() {
@@ -328,13 +384,14 @@ create_checksum_manifest "$unpacked_root" "$unpacked_checksums"
 
 for executable_path in \
   scripts/build-macos.zsh scripts/helper-status.zsh scripts/start-helper.zsh \
-  scripts/stop-helper.zsh work/dist/web-video-harbor-helper work/dist/yt-dlp_macos; do
+  scripts/stop-helper.zsh work/dist/web-video-harbor-helper work/dist/yt-dlp_macos \
+  work/dist/deno_macos_arm64 work/dist/deno_macos_x86_64; do
   [[ -x "$unpacked_root/$executable_path" ]] || fail "ZIP 未保留可执行位：$executable_path"
 done
 [[ ! -x "$unpacked_root/scripts/helper-common.zsh" ]] || fail "共享脚本权限意外变为可执行"
 
 unpacked_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($unpacked_binary --version)" == "web-video-harbor-helper 0.2.0" ]] || fail "解包助手版本输出异常"
+[[ "$($unpacked_binary --version)" == "web-video-harbor-helper 0.2.1" ]] || fail "解包助手版本输出异常"
 /usr/bin/file "$unpacked_binary"
 /usr/bin/lipo -info "$unpacked_binary"
 /usr/bin/lipo "$unpacked_binary" -verify_arch arm64 x86_64 || fail "解包助手缺少 universal 架构"
@@ -351,12 +408,26 @@ unpacked_parser="$unpacked_root/work/dist/yt-dlp_macos"
 rg -Fq 'licenses/yt-dlp-THIRD_PARTY_LICENSES.txt' "$unpacked_root/THIRD_PARTY_NOTICES.md" || \
   fail "第三方说明未引用包内 yt-dlp 许可证"
 
+unpacked_deno_arm64="$unpacked_root/work/dist/deno_macos_arm64"
+unpacked_deno_amd64="$unpacked_root/work/dist/deno_macos_x86_64"
+[[ "$(/usr/bin/shasum -a 256 "$unpacked_deno_arm64" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_arm64_sha" ]] || fail "解包 arm64 Deno SHA256 异常"
+[[ "$(/usr/bin/shasum -a 256 "$unpacked_deno_amd64" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_amd64_sha" ]] || fail "解包 x86_64 Deno SHA256 异常"
+/usr/bin/lipo "$unpacked_deno_arm64" -verify_arch arm64 || fail "解包 arm64 Deno 架构异常"
+/usr/bin/lipo "$unpacked_deno_amd64" -verify_arch x86_64 || fail "解包 x86_64 Deno 架构异常"
+[[ -f "$unpacked_root/licenses/Deno-LICENSE.md" ]] || fail "解包内容缺少 Deno 许可证"
+[[ "$(/usr/bin/shasum -a 256 "$unpacked_root/licenses/Deno-LICENSE.md" | /usr/bin/awk '{print $1}')" == \
+  "$expected_deno_license_sha" ]] || fail "解包 Deno 许可证 SHA256 异常"
+rg -Fq 'licenses/Deno-LICENSE.md' "$unpacked_root/THIRD_PARTY_NOTICES.md" || \
+  fail "第三方说明未引用包内 Deno 许可证"
+
 (
   cd "$unpacked_root"
   /bin/zsh ./scripts/build-macos.zsh
 )
 rebuilt_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper 0.2.0" ]] || fail "解包源码重建后的版本输出异常"
+[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper 0.2.1" ]] || fail "解包源码重建后的版本输出异常"
 /usr/bin/file "$rebuilt_binary"
 /usr/bin/lipo -info "$rebuilt_binary"
 /usr/bin/lipo "$rebuilt_binary" -verify_arch arm64 x86_64 || fail "解包源码无法重建 universal 助手"

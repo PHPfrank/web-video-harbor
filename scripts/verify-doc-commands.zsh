@@ -68,7 +68,7 @@ chmod 0600 "$config_path"
 "$script_dir/build-macos.zsh" >/dev/null
 /usr/bin/lipo "$helper_binary" -verify_arch arm64 x86_64
 version_output="$("$helper_binary" --version)"
-[[ "$version_output" == 'web-video-harbor-helper 0.2.0' ]] || {
+[[ "$version_output" == 'web-video-harbor-helper 0.2.1' ]] || {
   print -u2 -- "助手版本命令输出异常"
   exit 1
 }

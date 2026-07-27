@@ -4,6 +4,8 @@
 
 本项目固定分发 `yt-dlp 2026.07.04` 的官方 macOS universal 可执行文件，用于解析 YouTube 与哔哩哔哩无需登录即可观看的公开视频。上游项目与源码见 [github.com/yt-dlp/yt-dlp](https://github.com/yt-dlp/yt-dlp/tree/2026.07.04)。安装包同时附带该版本发布的完整第三方许可证清单：[yt-dlp THIRD_PARTY_LICENSES](licenses/yt-dlp-THIRD_PARTY_LICENSES.txt)。本项目不会静默更新该组件。
 
+本项目固定分发 `Deno 2.8.1` 的官方 macOS arm64 与 x86_64 可执行文件，仅作为 yt-dlp 解析公开视频页面所需的 JavaScript 运行环境。上游项目与源码见 [github.com/denoland/deno](https://github.com/denoland/deno/tree/v2.8.1)。安装包附带该版本的完整 MIT 许可证：[Deno LICENSE](licenses/Deno-LICENSE.md)。本项目不会静默更新该组件。
+
 FFmpeg 是下载和合并 M3U8/HLS 时需要的外部程序，本压缩包不分发 FFmpeg。FFmpeg 的实际许可证取决于用户安装的构建选项；项目说明与许可证信息见 [ffmpeg.org](https://ffmpeg.org/) 和 [FFmpeg Legal](https://ffmpeg.org/legal.html)。
 
 Google Chrome 是加载扩展所需的外部浏览器，本压缩包不分发 Chrome。Chrome 的产品条款见 [Google Chrome](https://www.google.com/chrome/terms/)，其开源基础 Chromium 的第三方许可证信息见 [Chromium](https://www.chromium.org/Home/)。

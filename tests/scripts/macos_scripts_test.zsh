@@ -124,6 +124,8 @@ for readonly_script in stop-helper.zsh helper-status.zsh; do
     fail "$readonly_script 未在读取 PID 前安全准备状态目录并获取生命周期锁"
   fi
 done
+rg -Fq 'javascriptRuntime.available' "$repo_root/scripts/helper-status.zsh" || \
+  fail "helper-status.zsh 没有读取 JavaScript 解析环境状态"
 
 dist_dir="$repo_root/work/dist"
 arm_binary="$dist_dir/web-video-harbor-helper-arm64"
@@ -141,10 +143,10 @@ architecture_info="$(/usr/bin/lipo -info "$universal_binary")"
 [[ "$architecture_info" == *"arm64"* && "$architecture_info" == *"x86_64"* ]] || \
   fail "universal 助手缺少 arm64 或 x86_64：$architecture_info"
 version_output="$("$universal_binary" --version)"
-[[ "$version_output" == "web-video-harbor-helper 0.2.0" ]] || fail "助手版本输出异常：$version_output"
+[[ "$version_output" == "web-video-harbor-helper 0.2.1" ]] || fail "助手版本输出异常：$version_output"
 rg -Fq -- '-ldflags' "$repo_root/scripts/build-macos.zsh" && \
-  rg -Fq -- '-X main.version=0.2.0' "$repo_root/scripts/build-macos.zsh" || \
-  fail "构建脚本没有注入 v0.2.0 助手版本"
+  rg -Fq -- '-X main.version=0.2.1' "$repo_root/scripts/build-macos.zsh" || \
+  fail "构建脚本没有注入 v0.2.1 助手版本"
 rg -Fq 'var version = "dev"' "$repo_root/helper/cmd/web-video-harbor-helper/main.go" || \
   fail "助手版本变量不能由 release 构建注入"
 rg -Fq '$("$go_command" version)' "$repo_root/scripts/build-macos.zsh" || \
@@ -170,7 +172,8 @@ for required_topic in \
   'Cookie' '授权头' '请求体' '页面正文' '127.0.0.1:17432' \
   '未连接' 'FFmpeg' '无候选' '权限' '端口占用' 'YouTube' '哔哩哔哩' \
   '单个视频' '最佳画质' '1080P' '720P' 'MKV' '播放列表' 'yt-dlp' \
-  '不会静默更新' '保留现有配对状态' '平台解析器缺失' '平台解析规则已变化' 'PO Token'; do
+  '不会静默更新' '保留现有配对状态' '平台解析器缺失' '平台解析规则已变化' 'PO Token' \
+  'Deno' 'JavaScript 解析组件' '当前网络阻止' '浏览器验证'; do
   rg -Fq "$required_topic" "$guide_path" || fail "安装说明缺少主题：$required_topic"
 done
 rg -Fq '~/Downloads/WebVideoHarbor/' "$readme_path" "$guide_path" || \
@@ -397,7 +400,19 @@ elif [[ -f \"$fixture_root/work/platform-unavailable\" ]]; then
 else
   platform_status='\"available\":true,\"version\":\"2026.07.04\",\"path\":\"/must/not/leak/yt-dlp_macos\"'
 fi
-print -r -- \"{\\\"platformDownloader\\\":{\$platform_status},\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"" \
+if [[ -f \"$fixture_root/work/health-missing-runtime\" ]]; then
+  print -r -- \"{\\\"platformDownloader\\\":{\$platform_status},\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"
+  exit 0
+elif [[ -f \"$fixture_root/work/health-wrong-runtime-type\" ]]; then
+  runtime_status='\"available\":\"true\",\"version\":\"2.8.1\"'
+elif [[ -f \"$fixture_root/work/health-invalid-runtime-version\" ]]; then
+  runtime_status='\"available\":true,\"version\":\"not-a-version\"'
+elif [[ -f \"$fixture_root/work/runtime-unavailable\" ]]; then
+  runtime_status='\"available\":false,\"version\":\"\"'
+else
+  runtime_status='\"available\":true,\"version\":\"2.8.1\",\"path\":\"/must/not/leak/deno_macos_arm64\"'
+fi
+print -r -- \"{\\\"platformDownloader\\\":{\$platform_status},\\\"javascriptRuntime\\\":{\$runtime_status},\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"" \
   >"$fixture_fake_bin/curl"
 chmod 0755 "$fixture_fake_bin/curl"
 
@@ -873,12 +888,17 @@ env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
 rg -q '助手状态：健康' "$status_output" || fail "状态脚本未报告健康"
 rg -q 'FFmpeg：可用' "$status_output" || fail "状态脚本未报告 FFmpeg"
 rg -Fq '平台解析器: 可用（2026.07.04）' "$status_output" || fail "状态脚本未报告平台解析器版本"
+rg -Fq 'JavaScript 解析环境: 可用（2.8.1）' "$status_output" || \
+  fail "状态脚本未报告 JavaScript 解析环境版本"
 rg -Fq '版本：test-version' "$status_output" || fail "状态脚本未严格读取助手顶层版本"
 if rg -Fq '版本：2026.07.04' "$status_output"; then
   fail "状态脚本把嵌套平台解析器版本误当成助手版本"
 fi
 if rg -Fq '/must/not/leak/yt-dlp_macos' "$status_output"; then
   fail "状态脚本泄露了平台解析器路径"
+fi
+if rg -Fq '/must/not/leak/deno_macos_arm64' "$status_output"; then
+  fail "状态脚本泄露了 JavaScript 解析环境路径"
 fi
 rg -Fq "下载目录：$fixture_download" "$status_output" || fail "状态脚本未报告下载目录"
 if rg -Fq "$sentinel_token" "$status_output"; then
@@ -896,7 +916,21 @@ if rg -Fq '2026.07.04' "$unavailable_status_output"; then
 fi
 rm -f -- "$fixture_root/work/platform-unavailable"
 
-for schema_failure in health-malformed health-missing-platform health-wrong-type health-invalid-calendar; do
+print -r -- unavailable >"$fixture_root/work/runtime-unavailable"
+runtime_unavailable_output="$fixture_root/work/status-runtime-unavailable.txt"
+env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+  WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+  WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+  /bin/zsh "$fixture_scripts/helper-status.zsh" >"$runtime_unavailable_output" 2>&1
+rg -Fq 'JavaScript 解析环境: 不可用' "$runtime_unavailable_output" || \
+  fail "状态脚本未报告 JavaScript 解析环境不可用"
+if rg -Fq '2.8.1' "$runtime_unavailable_output"; then
+  fail "不可用状态错误显示了 JavaScript 解析环境版本"
+fi
+rm -f -- "$fixture_root/work/runtime-unavailable"
+
+for schema_failure in health-malformed health-missing-platform health-wrong-type health-invalid-calendar \
+  health-missing-runtime health-wrong-runtime-type health-invalid-runtime-version; do
   print -r -- fail >"$fixture_root/work/$schema_failure"
   schema_output="$fixture_root/work/status-$schema_failure.txt"
   if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
@@ -909,7 +943,8 @@ for schema_failure in health-malformed health-missing-platform health-wrong-type
   if rg -Fxq '助手状态：健康' "$schema_output"; then
     fail "$schema_failure 被伪装成整体健康"
   fi
-  if rg -Fq '/must/not/leak/yt-dlp_macos' "$schema_output" || rg -Fq "$sentinel_token" "$schema_output"; then
+  if rg -Fq '/must/not/leak/yt-dlp_macos' "$schema_output" || \
+    rg -Fq '/must/not/leak/deno_macos_arm64' "$schema_output" || rg -Fq "$sentinel_token" "$schema_output"; then
     fail "$schema_failure 输出泄露敏感信息"
   fi
   rm -f -- "$fixture_root/work/$schema_failure"
