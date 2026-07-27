@@ -268,6 +268,86 @@ func TestRunnerCancellationTerminatesProcessGroupAndCleansStaging(t *testing.T) 
 	assertNoPlatformStaging(t, config.OutputDir)
 }
 
+func TestRunnerRejectsPrivateExecutableSnapshotReplacementBeforeAndAfterStart(t *testing.T) {
+	for _, timing := range []string{"before start", "after preflight"} {
+		for _, replacement := range []string{"symlink", "other inode"} {
+			t.Run(timing+"/"+replacement, func(t *testing.T) {
+				sourceDir := t.TempDir()
+				sourcePath := filepath.Join(sourceDir, bundledBinaryName)
+				if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
+					t.Fatal(err)
+				}
+				snapshot, err := createExecutableSnapshot(sourcePath)
+				if err != nil {
+					t.Fatal(err)
+				}
+				snapshotDir := filepath.Dir(snapshot.Path())
+				t.Cleanup(func() {
+					_ = snapshot.Close()
+					_ = os.RemoveAll(snapshotDir)
+				})
+				config := testConfig(t)
+				config.BinaryPath = snapshot.Path()
+				config.ExecutableSnapshot = snapshot
+				runner, err := New(config)
+				if err != nil {
+					t.Fatal(err)
+				}
+				factoryCalled := false
+				var command *exec.Cmd
+				if timing == "before start" {
+					replaceExecutableSnapshotPath(t, snapshot.Path(), replacement)
+					runner.commandFactory = func(string, []string, []string) *exec.Cmd {
+						factoryCalled = true
+						return fakeCommandFactory("cancel-tree", []string{"WVH_FAKE_MARKER_DIR=" + t.TempDir()})("", nil, minimalEnvironment())
+					}
+				} else {
+					fakeFactory := fakeCommandFactory("cancel-tree", []string{"WVH_FAKE_MARKER_DIR=" + t.TempDir()})
+					runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+						factoryCalled = true
+						replaceExecutableSnapshotPath(t, snapshot.Path(), replacement)
+						command = fakeFactory(path, args, env)
+						return command
+					}
+				}
+				_, err = runner.Run(context.Background(), validRequest("快照替换"))
+				assertRunnerCode(t, err, CodeProcess)
+				if timing == "before start" && factoryCalled {
+					t.Fatal("command factory ran after pre-start snapshot mismatch")
+				}
+				if timing == "after preflight" {
+					if !factoryCalled || command == nil || command.Process == nil {
+						t.Fatal("post-start mismatch test did not start the controlled command")
+					}
+					if processGroupExists(command.Process.Pid) {
+						t.Fatalf("process group %d survived post-start snapshot mismatch", command.Process.Pid)
+					}
+				}
+			})
+		}
+	}
+}
+
+func replaceExecutableSnapshotPath(t *testing.T, path, replacement string) {
+	t.Helper()
+	target := filepath.Join(t.TempDir(), "replacement")
+	if err := os.WriteFile(target, []byte("replacement executable bytes"), 0o500); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(path); err != nil {
+		t.Fatal(err)
+	}
+	if replacement == "symlink" {
+		if err := os.Symlink(target, path); err != nil {
+			t.Fatal(err)
+		}
+		return
+	}
+	if err := os.Rename(target, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestRunnerCancellationBoundsDrainFromEscapedDescendant(t *testing.T) {
 	config := testConfig(t)
 	markerDir := t.TempDir()
@@ -2553,6 +2633,7 @@ func TestNewValidatesRequiredPathsWithoutLeakingRequestData(t *testing.T) {
 		mutate func(*Config)
 	}{
 		{name: "empty binary", mutate: func(config *Config) { config.BinaryPath = "" }},
+		{name: "missing executable snapshot", mutate: func(config *Config) { config.ExecutableSnapshot = nil }},
 		{name: "relative binary", mutate: func(config *Config) { config.BinaryPath = "yt-dlp" }},
 		{name: "unclean binary", mutate: func(config *Config) { config.BinaryPath += "/../yt-dlp" }},
 		{name: "empty ffmpeg", mutate: func(config *Config) { config.FFmpegPath = "" }},
@@ -2623,11 +2704,22 @@ func newTestRunner(t *testing.T) (*Runner, string) {
 
 func testConfig(t *testing.T) Config {
 	t.Helper()
-	root := t.TempDir()
+	sourceRoot := t.TempDir()
+	outputRoot := t.TempDir()
+	sourcePath := filepath.Join(sourceRoot, "yt-dlp-source")
+	if err := os.WriteFile(sourcePath, []byte("trusted executable bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	snapshot, err := createExecutableSnapshot(sourcePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = snapshot.Close() })
 	return Config{
-		BinaryPath: filepath.Join(root, "yt-dlp_macos"),
-		FFmpegPath: filepath.Join(root, "ffmpeg"),
-		OutputDir:  root,
+		BinaryPath:         snapshot.Path(),
+		FFmpegPath:         filepath.Join(sourceRoot, "ffmpeg"),
+		OutputDir:          outputRoot,
+		ExecutableSnapshot: snapshot,
 	}
 }
 

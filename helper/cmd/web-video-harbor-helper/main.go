@@ -109,10 +109,11 @@ type listenFunc func(network, address string) (net.Listener, error)
 
 func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, listen listenFunc) error {
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform.Path)
+	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform)
 	if err != nil {
 		return fmt.Errorf("create task engine: %w", err)
 	}
+	defer func() { _ = finishEngineAndClosePlatform(engine, platform) }()
 	apiServer, err := api.New(api.Options{
 		Token: cfg.Token, Version: appVersion, FFmpegAvailable: ffmpegPath != "",
 		PlatformDownloaderAvailable: platform.Path != "", PlatformDownloaderVersion: platform.Version,
@@ -156,6 +157,17 @@ func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPa
 
 type engineShutdowner interface {
 	Shutdown(context.Context) error
+}
+
+type platformCloser interface {
+	Close() error
+}
+
+// finishEngineAndClosePlatform performs an unbounded final worker join after
+// the user-facing shutdown deadline. The executable snapshot is closed only
+// after no Runner can still hold an active lease.
+func finishEngineAndClosePlatform(engine engineShutdowner, platform platformCloser) error {
+	return errors.Join(engine.Shutdown(context.Background()), platform.Close())
 }
 
 func shutdownServices(ctx context.Context, shutdownHTTP func(context.Context) error, engine engineShutdowner) error {

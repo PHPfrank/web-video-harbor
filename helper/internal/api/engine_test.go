@@ -182,6 +182,48 @@ func TestEnginePlatformDownloaderMissingRejectsSynchronously(t *testing.T) {
 	}
 }
 
+func TestEnginePlatformFFmpegMissingRejectsSynchronously(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := NewEngine(manager, t.TempDir(), nil, "", ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err == nil {
+		t.Fatal("Start accepted a platform task without FFmpeg")
+	}
+	var safe interface{ SafeMessage() string }
+	if !errors.As(err, &safe) || safe.SafeMessage() != "未安装 FFmpeg，请先安装后重试" {
+		t.Fatalf("Start error = %v, safe = %#v", err, safe)
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("missing FFmpeg created tasks: %#v", got)
+	}
+}
+
+func TestNewEngineRejectsPathOnlyPlatformIdentity(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := NewEngine(manager, t.TempDir(), nil, "/usr/local/bin/ffmpeg", ytdlp.ProbeResult{
+		Path:    "/Applications/WebVideoHarbor/yt-dlp_macos",
+		Version: "2026.07.04",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	var unavailable *PlatformDownloaderUnavailableError
+	if !errors.As(err, &unavailable) {
+		t.Fatalf("Start error = %v, want fail-closed platform identity error", err)
+	}
+	if got := manager.List(); len(got) != 0 {
+		t.Fatalf("path-only platform identity created tasks: %#v", got)
+	}
+}
+
 func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testing.T) {
 	manager := tasks.NewManager()
 	requests := make(chan ytdlp.Request, 1)

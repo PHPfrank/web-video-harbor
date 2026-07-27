@@ -243,6 +243,61 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	}
 }
 
+func TestFinishEngineBeforeClosingPlatformSnapshot(t *testing.T) {
+	release := make(chan struct{})
+	shutdownStarted := make(chan struct{})
+	engine := &blockingShutdowner{started: shutdownStarted, release: release}
+	platform := &recordingCloser{closed: make(chan struct{})}
+	done := make(chan error, 1)
+	go func() { done <- finishEngineAndClosePlatform(engine, platform) }()
+	select {
+	case <-shutdownStarted:
+	case <-time.After(time.Second):
+		t.Fatal("engine shutdown did not start")
+	}
+	select {
+	case <-platform.closed:
+		t.Fatal("platform snapshot closed while engine still had active work")
+	default:
+	}
+	close(release)
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatalf("finishEngineAndClosePlatform() error = %v", err)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("final shutdown did not complete")
+	}
+	select {
+	case <-platform.closed:
+	default:
+		t.Fatal("platform snapshot was not closed after engine shutdown")
+	}
+}
+
+type blockingShutdowner struct {
+	started chan struct{}
+	release chan struct{}
+	once    sync.Once
+}
+
+func (s *blockingShutdowner) Shutdown(context.Context) error {
+	s.once.Do(func() { close(s.started) })
+	<-s.release
+	return nil
+}
+
+type recordingCloser struct {
+	closed chan struct{}
+	once   sync.Once
+}
+
+func (c *recordingCloser) Close() error {
+	c.once.Do(func() { close(c.closed) })
+	return nil
+}
+
 func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *testing.T) {
 	dir := privateTempDir(t)
 	cfg := appconfig.Config{Address: "127.0.0.1:0", Token: "serve-helper-test-token", DownloadDir: dir}
@@ -274,8 +329,6 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 	select {
 	case bound := <-address:
 		baseURL = "http://" + bound
-	case err := <-done:
-		t.Fatalf("serveHelper() exited before listening: %v", err)
 	case <-time.After(time.Second):
 		t.Fatal("serveHelper() did not listen")
 	}
@@ -332,6 +385,103 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 		if status != http.StatusCreated || body["id"] == "" {
 			t.Fatalf("non-platform create status=%d body=%#v", status, body)
 		}
+	}
+}
+
+func TestServeHelperKeepsParserHealthyButRejectsPlatformWithoutFFmpeg(t *testing.T) {
+	dir := privateTempDir(t)
+	cfg := appconfig.Config{Address: "127.0.0.1:0", Token: "serve-helper-ffmpeg-test-token", DownloadDir: dir}
+	ctx, cancel := context.WithCancel(context.Background())
+	address := make(chan string, 1)
+	done := make(chan error, 1)
+	platform := ytdlp.ProbeResult{Path: "/private/snapshot/yt-dlp_macos", Version: "2026.07.04"}
+	go func() {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", platform, func(network, requested string) (net.Listener, error) {
+			listener, err := net.Listen(network, requested)
+			if err == nil {
+				address <- listener.Addr().String()
+			}
+			return listener, err
+		})
+	}()
+	t.Cleanup(func() {
+		cancel()
+		select {
+		case err := <-done:
+			if err != nil {
+				t.Errorf("serveHelper() shutdown error = %v", err)
+			}
+		case <-time.After(2 * time.Second):
+			t.Error("serveHelper() did not shut down")
+		}
+	})
+
+	var baseURL string
+	select {
+	case bound := <-address:
+		baseURL = "http://" + bound
+	case <-time.After(time.Second):
+		t.Fatal("serveHelper() did not listen")
+	}
+	client := &http.Client{Timeout: time.Second}
+	response, err := client.Get(baseURL + "/health")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var health struct {
+		PlatformDownloader struct {
+			Available bool   `json:"available"`
+			Version   string `json:"version"`
+		} `json:"platformDownloader"`
+	}
+	if err := json.NewDecoder(response.Body).Decode(&health); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !health.PlatformDownloader.Available || health.PlatformDownloader.Version != platform.Version {
+		t.Fatalf("health status=%d body=%#v", response.StatusCode, health)
+	}
+
+	request, err := http.NewRequest(http.MethodPost, baseURL+"/v1/tasks", strings.NewReader(
+		`{"url":"https://youtu.be/_mVb1D8wHxg","title":"platform","mediaType":"platform","quality":"best"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Video-Helper-Token", cfg.Token)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var failure map[string]any
+	if err := json.NewDecoder(response.Body).Decode(&failure); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusConflict || failure["code"] != "ffmpeg_missing" || failure["message"] != "未安装 FFmpeg，请先安装后重试" {
+		t.Fatalf("platform status=%d body=%#v", response.StatusCode, failure)
+	}
+
+	request, err = http.NewRequest(http.MethodGet, baseURL+"/v1/tasks", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("X-Video-Helper-Token", cfg.Token)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var listed []any
+	if err := json.NewDecoder(response.Body).Decode(&listed); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || len(listed) != 0 {
+		t.Fatalf("task list status=%d tasks=%#v", response.StatusCode, listed)
 	}
 }
 

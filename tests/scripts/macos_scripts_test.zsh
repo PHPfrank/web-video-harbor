@@ -230,12 +230,15 @@ if case_enabled bounded_signal_exit; then
     WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH="$signal_logger_marker" \
     /bin/zsh "$fixture_scripts/bounded-log.zsh" "$fixture_state/helper.log" &
   signal_pipeline_pid=$!
+  signal_logger_pid=""
   for attempt in {1..100}; do
-    [[ -f "$signal_logger_marker" ]] && break
+    if [[ -f "$signal_logger_marker" ]]; then
+      signal_logger_pid="$(<"$signal_logger_marker")"
+      [[ "$signal_logger_pid" == <-> ]] && break
+    fi
     /bin/sleep 0.02
   done
-  [[ -f "$signal_logger_marker" ]] || fail "未观察到 signal bounded logger"
-  signal_logger_pid="$(<"$signal_logger_marker")"
+  [[ "$signal_logger_pid" == <-> ]] || fail "未观察到 signal bounded logger"
   kill -TERM "$signal_logger_pid"
   for attempt in {1..50}; do
     ! kill -0 "$signal_logger_pid" 2>/dev/null && break
@@ -354,7 +357,19 @@ print -r -- "#!/bin/zsh
 if [[ ! -f \"$fixture_state/helper.pid\" ]]; then exit 22; fi
 health_pid=\"\$(<\"$fixture_state/helper.pid\")\"
 if [[ -f \"$fixture_root/work/health-mismatch\" ]]; then (( health_pid += 1 )); fi
-if [[ -f \"$fixture_root/work/platform-unavailable\" ]]; then
+if [[ -f \"$fixture_root/work/health-malformed\" ]]; then
+  print -r -- '{\"ready\":true,\"pid\":'
+  exit 0
+fi
+if [[ -f \"$fixture_root/work/health-missing-platform\" ]]; then
+  print -r -- \"{\\\"ready\\\":true,\\\"version\\\":\\\"test-version\\\",\\\"ffmpeg\\\":true,\\\"pid\\\":\$health_pid}\"
+  exit 0
+fi
+if [[ -f \"$fixture_root/work/health-wrong-type\" ]]; then
+  platform_status='\"available\":\"true\",\"version\":\"2026.07.04\"'
+elif [[ -f \"$fixture_root/work/health-invalid-calendar\" ]]; then
+  platform_status='\"available\":true,\"version\":\"2026.02.31\"'
+elif [[ -f \"$fixture_root/work/platform-unavailable\" ]]; then
   platform_status='\"available\":false,\"version\":\"\"'
 else
   platform_status='\"available\":true,\"version\":\"2026.07.04\",\"path\":\"/must/not/leak/yt-dlp_macos\"'
@@ -801,6 +816,25 @@ if rg -Fq '2026.07.04' "$unavailable_status_output"; then
   fail "不可用状态错误显示了解析器版本"
 fi
 rm -f -- "$fixture_root/work/platform-unavailable"
+
+for schema_failure in health-malformed health-missing-platform health-wrong-type health-invalid-calendar; do
+  print -r -- fail >"$fixture_root/work/$schema_failure"
+  schema_output="$fixture_root/work/status-$schema_failure.txt"
+  if env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    /bin/zsh "$fixture_scripts/helper-status.zsh" >"$schema_output" 2>&1; then
+    fail "状态脚本接受了无效 health schema：$schema_failure"
+  fi
+  rg -Fq '健康响应格式无效' "$schema_output" || fail "$schema_failure 未报告固定安全错误"
+  if rg -Fxq '助手状态：健康' "$schema_output"; then
+    fail "$schema_failure 被伪装成整体健康"
+  fi
+  if rg -Fq '/must/not/leak/yt-dlp_macos' "$schema_output" || rg -Fq "$sentinel_token" "$schema_output"; then
+    fail "$schema_failure 输出泄露敏感信息"
+  fi
+  rm -f -- "$fixture_root/work/$schema_failure"
+done
 
 for identity_failure in wrong-config lsof-fails; do
   print -r -- fail >"$fixture_root/work/$identity_failure"

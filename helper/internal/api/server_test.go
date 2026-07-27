@@ -424,6 +424,24 @@ func TestCreateAcceptsPlatformQualityContract(t *testing.T) {
 	}
 }
 
+func TestCreateMapsMissingPlatformFFmpegToStableError(t *testing.T) {
+	srv, service, _, _, _ := newTestServer(t, nil)
+	service.err = &PlatformFFmpegUnavailableError{}
+	rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", []byte(
+		`{"url":"https://youtu.be/_mVb1D8wHxg","title":"demo","mediaType":"platform","quality":"best"}`,
+	), testToken, "")
+	if rr.Code != http.StatusConflict {
+		t.Fatalf("create status = %d: %s", rr.Code, rr.Body.String())
+	}
+	got := decodeObject(t, rr)
+	if got["code"] != "ffmpeg_missing" || got["message"] != "未安装 FFmpeg，请先安装后重试" {
+		t.Fatalf("create error = %#v", got)
+	}
+	if len(service.startSpecs) != 0 || len(service.items) != 0 {
+		t.Fatalf("missing FFmpeg created task state: specs=%#v items=%#v", service.startSpecs, service.items)
+	}
+}
+
 func TestCreateRejectsInvalidMediaQualityContracts(t *testing.T) {
 	cases := []struct {
 		name string

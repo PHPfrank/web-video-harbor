@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -26,8 +27,18 @@ var versionPattern = regexp.MustCompile(`^[0-9]{4}\.(0[1-9]|1[0-2])\.(0[1-9]|[12
 // helper. Path is for internal process execution and must not be exposed by
 // health or status responses.
 type ProbeResult struct {
-	Path    string
-	Version string
+	Path     string
+	Version  string
+	Snapshot *ExecutableSnapshot
+}
+
+// Close releases the private executable snapshot after the task engine has
+// fully shut down. It is safe to call on an empty or already-closed result.
+func (r ProbeResult) Close() error {
+	if r.Snapshot == nil {
+		return nil
+	}
+	return r.Snapshot.Close()
 }
 
 type versionCommand func(context.Context, string, ...string) ([]byte, error)
@@ -81,17 +92,23 @@ func probeAdjacent(ctx context.Context, helperPath string, run versionCommand) (
 		return ProbeResult{}, fmt.Errorf("resolve helper path: %w", err)
 	}
 	candidate := filepath.Join(filepath.Dir(absHelper), bundledBinaryName)
-	info, err := os.Lstat(candidate)
+	snapshot, err := createExecutableSnapshot(candidate)
 	if err != nil {
-		return ProbeResult{}, fmt.Errorf("inspect bundled platform downloader: %w", err)
+		return ProbeResult{}, err
 	}
-	if !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0o111 == 0 {
-		return ProbeResult{}, errors.New("bundled platform downloader is not a regular executable")
+	keepSnapshot := false
+	defer func() {
+		if !keepSnapshot {
+			_ = snapshot.Close()
+		}
+	}()
+	if err := snapshot.Verify(); err != nil {
+		return ProbeResult{}, err
 	}
 
 	probeCtx, cancel := context.WithTimeout(ctx, probeTimeout)
 	defer cancel()
-	output, err := run(probeCtx, candidate, "--version")
+	output, err := run(probeCtx, snapshot.Path(), "--version")
 	if err != nil {
 		if probeCtx.Err() != nil {
 			return ProbeResult{}, probeCtx.Err()
@@ -108,19 +125,62 @@ func probeAdjacent(ctx context.Context, helperPath string, run versionCommand) (
 	if _, err := time.Parse("2006.01.02", version); err != nil {
 		return ProbeResult{}, errors.New("bundled platform downloader returned an invalid version")
 	}
-	return ProbeResult{Path: candidate, Version: version}, nil
+	if err := snapshot.Verify(); err != nil {
+		return ProbeResult{}, err
+	}
+	keepSnapshot = true
+	return ProbeResult{Path: snapshot.Path(), Version: version, Snapshot: snapshot}, nil
 }
 
 func runVersionCommand(ctx context.Context, path string, args ...string) ([]byte, error) {
-	command := exec.CommandContext(ctx, path, args...)
+	if ctx == nil {
+		return nil, context.Canceled
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	command := exec.Command(path, args...)
+	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	command.WaitDelay = outputDrainGrace
 	stdout := boundedVersionBuffer{limit: maxVersionOutput}
 	command.Stdout = &stdout
 	command.Stderr = io.Discard
-	if err := command.Run(); err != nil {
+	if err := command.Start(); err != nil {
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, err
+	}
+	waitResult := make(chan error, 1)
+	go func() { waitResult <- command.Wait() }()
+	var waitErr error
+	select {
+	case waitErr = <-waitResult:
+		terminateOrphanedProcessGroup(command.Process.Pid)
+	case <-ctx.Done():
+		_ = terminateProcessGroup(command.Process.Pid, waitResult)
+		return nil, ctx.Err()
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if waitErr != nil {
+		return nil, waitErr
 	}
 	if stdout.exceeded {
 		return nil, errors.New("platform downloader version output exceeded limit")
 	}
 	return stdout.buffer.Bytes(), nil
+}
+
+func terminateOrphanedProcessGroup(pid int) {
+	if !processGroupExists(pid) {
+		return
+	}
+	_ = syscall.Kill(-pid, syscall.SIGTERM)
+	if confirmProcessGroupExit(pid, terminationGrace, processGroupExists) {
+		return
+	}
+	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	_ = confirmProcessGroupExit(pid, terminationConfirmGrace, processGroupExists)
 }

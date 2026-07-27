@@ -53,13 +53,22 @@ health_json="$REPLY"
 health_extract() {
   /usr/bin/plutil -extract "$1" raw -expect "$2" -o - - <<<"$health_json" 2>/dev/null
 }
-health_ready="$(health_extract ready bool)" || health_ready=""
-health_pid="$(health_extract pid integer)" || health_pid=""
-health_version="$(health_extract version string)" || health_version=""
-health_ffmpeg="$(health_extract ffmpeg bool)" || health_ffmpeg=""
-platform_available="$(health_extract platformDownloader.available bool)" || platform_available=""
-platform_version="$(health_extract platformDownloader.version string)" || platform_version=""
-if [[ "$health_ready" != "true" || "$health_pid" != <-> || -z "$health_version" ]]; then
+health_schema_valid="1"
+health_ready="$(health_extract ready bool)" || health_schema_valid=""
+health_pid="$(health_extract pid integer)" || health_schema_valid=""
+health_version="$(health_extract version string)" || health_schema_valid=""
+health_ffmpeg="$(health_extract ffmpeg bool)" || health_schema_valid=""
+platform_available="$(health_extract platformDownloader.available bool)" || health_schema_valid=""
+platform_version="$(health_extract platformDownloader.version string)" || health_schema_valid=""
+if [[ "$platform_available" == "true" ]]; then
+  parsed_platform_date="$(/bin/date -j -f '%Y.%m.%d' "$platform_version" '+%Y.%m.%d' 2>/dev/null)" || health_schema_valid=""
+  [[ "$parsed_platform_date" == "$platform_version" ]] || health_schema_valid=""
+elif [[ "$platform_available" == "false" ]]; then
+  [[ -z "$platform_version" ]] || health_schema_valid=""
+else
+  health_schema_valid=""
+fi
+if [[ -z "$health_schema_valid" || "$health_ready" != "true" || "$health_pid" != <-> || -z "$health_version" ]]; then
   print -u2 -- "助手状态：健康响应格式无效"
   exit 1
 fi

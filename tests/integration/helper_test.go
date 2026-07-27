@@ -22,6 +22,7 @@ import (
 
 	"web-video-harbor/helper/internal/api"
 	"web-video-harbor/helper/internal/tasks"
+	"web-video-harbor/helper/internal/ytdlp"
 )
 
 const smokeToken = "integration-test-token"
@@ -58,7 +59,7 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	resolver := exactFixtureResolver{hostPort: parsed.Host}
 	downloadDir := t.TempDir()
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", "")
+	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{})
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -132,7 +133,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	resolver := exactFixtureResolver{hostPort: parsedFixture.Host}
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, "")
+	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, ytdlp.ProbeResult{})
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}

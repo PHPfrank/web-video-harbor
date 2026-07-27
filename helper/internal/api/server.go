@@ -516,6 +516,11 @@ func (s *Server) writeServiceError(w http.ResponseWriter, err error) {
 		writeError(w, status, string(inspectErr.Code), inspectErr.Message)
 		return
 	}
+	var platformFFmpegMissing *PlatformFFmpegUnavailableError
+	if errors.As(err, &platformFFmpegMissing) {
+		writeError(w, http.StatusConflict, "ffmpeg_missing", platformFFmpegMissing.SafeMessage())
+		return
+	}
 	var safe interface{ SafeMessage() string }
 	if errors.As(err, &safe) {
 		writeError(w, http.StatusConflict, "task_error", safe.SafeMessage())

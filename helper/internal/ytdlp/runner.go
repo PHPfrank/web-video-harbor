@@ -103,10 +103,11 @@ func (e *Error) Unwrap() error { return e.cause }
 
 // Config contains only fixed local paths and an optional progress callback.
 type Config struct {
-	BinaryPath string
-	FFmpegPath string
-	OutputDir  string
-	OnProgress ProgressFunc
+	BinaryPath         string
+	FFmpegPath         string
+	OutputDir          string
+	OnProgress         ProgressFunc
+	ExecutableSnapshot *ExecutableSnapshot
 }
 
 // Request identifies one canonical supported platform video page.
@@ -122,6 +123,7 @@ type Runner struct {
 	ffmpegPath                  string
 	outputDir                   string
 	outputInfo                  os.FileInfo
+	executableSnapshot          *ExecutableSnapshot
 	onProgress                  ProgressFunc
 	commandFactory              commandFactory
 	removeTree                  func(*os.File) error
@@ -154,6 +156,9 @@ func New(config Config) (*Runner, error) {
 	if !validConfiguredPathSyntax(config.OutputDir) {
 		return nil, errInvalidConfig
 	}
+	if config.ExecutableSnapshot == nil || config.BinaryPath != config.ExecutableSnapshot.Path() || config.ExecutableSnapshot.Verify() != nil {
+		return nil, errInvalidConfig
+	}
 	outputRoot, info, err := openConfiguredOutputRoot(config.OutputDir, nil)
 	if err != nil {
 		return nil, errInvalidConfig
@@ -161,14 +166,15 @@ func New(config Config) (*Runner, error) {
 	_ = outputRoot.Close()
 
 	return &Runner{
-		binaryPath:     config.BinaryPath,
-		ffmpegPath:     config.FFmpegPath,
-		outputDir:      config.OutputDir,
-		outputInfo:     info,
-		onProgress:     config.OnProgress,
-		commandFactory: defaultCommandFactory,
-		removeTree:     removeDirectoryContents,
-		copyOutput:     copyWithContext,
+		binaryPath:         config.BinaryPath,
+		ffmpegPath:         config.FFmpegPath,
+		outputDir:          config.OutputDir,
+		outputInfo:         info,
+		executableSnapshot: config.ExecutableSnapshot,
+		onProgress:         config.OnProgress,
+		commandFactory:     defaultCommandFactory,
+		removeTree:         removeDirectoryContents,
+		copyOutput:         copyWithContext,
 		reserveOutput: func(root *os.File, dir, base, extension string) (outputReservation, error) {
 			return output.ReserveAvailablePathAt(root, dir, base, extension)
 		},
@@ -190,6 +196,14 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if err := validateRequest(request); err != nil {
 		return "", err
 	}
+	if r.executableSnapshot == nil {
+		return "", runError(CodeProcess)
+	}
+	releaseSnapshot, err := r.executableSnapshot.acquire()
+	if err != nil {
+		return "", runError(CodeProcess)
+	}
+	defer releaseSnapshot()
 
 	outputRoot, _, err := openConfiguredOutputRoot(r.outputDir, r.outputInfo)
 	if err != nil {
@@ -245,6 +259,11 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	if err := verifyConfiguredOutputRoot(r.outputDir, outputRoot, r.outputInfo); err != nil {
 		return "", outputError()
 	}
+	if r.executableSnapshot != nil {
+		if err := r.executableSnapshot.Verify(); err != nil {
+			return "", runError(CodeProcess)
+		}
+	}
 	command := r.commandFactory(r.binaryPath, args, minimalEnvironment())
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = outputDrainGrace
@@ -280,6 +299,14 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 	go func() {
 		waitResult <- command.Wait()
 	}()
+	if r.executableSnapshot != nil {
+		if err := r.executableSnapshot.Verify(); err != nil {
+			_ = terminateProcessGroup(command.Process.Pid, waitResult)
+			progressWriter.finish()
+			diagnosticWriter.finish()
+			return "", runError(CodeProcess)
+		}
+	}
 	var waitErr error
 	canceled := false
 	select {
