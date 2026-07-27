@@ -141,7 +141,12 @@ architecture_info="$(/usr/bin/lipo -info "$universal_binary")"
 [[ "$architecture_info" == *"arm64"* && "$architecture_info" == *"x86_64"* ]] || \
   fail "universal 助手缺少 arm64 或 x86_64：$architecture_info"
 version_output="$("$universal_binary" --version)"
-[[ "$version_output" == "web-video-harbor-helper dev" ]] || fail "助手版本输出异常：$version_output"
+[[ "$version_output" == "web-video-harbor-helper 0.2.0" ]] || fail "助手版本输出异常：$version_output"
+rg -Fq -- '-ldflags' "$repo_root/scripts/build-macos.zsh" && \
+  rg -Fq -- '-X main.version=0.2.0' "$repo_root/scripts/build-macos.zsh" || \
+  fail "构建脚本没有注入 v0.2.0 助手版本"
+rg -Fq 'var version = "dev"' "$repo_root/helper/cmd/web-video-harbor-helper/main.go" || \
+  fail "助手版本变量不能由 release 构建注入"
 rg -Fq '$("$go_command" version)' "$repo_root/scripts/build-macos.zsh" || \
   fail "构建脚本执行 Homebrew Go 时没有完整引用路径"
 
@@ -163,7 +168,9 @@ done
 for required_topic in \
   'MP4' 'M3U8' '微信视频号' '最佳努力' 'DRM' '加密' 'Blob-only' \
   'Cookie' '授权头' '请求体' '页面正文' '127.0.0.1:17432' \
-  '未连接' 'FFmpeg' '无候选' '权限' '端口占用'; do
+  '未连接' 'FFmpeg' '无候选' '权限' '端口占用' 'YouTube' '哔哩哔哩' \
+  '单个视频' '最佳画质' '1080P' '720P' 'MKV' '播放列表' 'yt-dlp' \
+  '不会静默更新' '保留现有配对状态' '平台解析器缺失' '平台解析规则已变化' 'PO Token'; do
   rg -Fq "$required_topic" "$guide_path" || fail "安装说明缺少主题：$required_topic"
 done
 rg -Fq '~/Downloads/WebVideoHarbor/' "$readme_path" "$guide_path" || \

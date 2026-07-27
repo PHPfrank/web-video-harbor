@@ -316,7 +316,7 @@ done
 [[ ! -x "$unpacked_root/scripts/helper-common.zsh" ]] || fail "共享脚本权限意外变为可执行"
 
 unpacked_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($unpacked_binary --version)" == "web-video-harbor-helper dev" ]] || fail "解包助手版本输出异常"
+[[ "$($unpacked_binary --version)" == "web-video-harbor-helper 0.2.0" ]] || fail "解包助手版本输出异常"
 /usr/bin/file "$unpacked_binary"
 /usr/bin/lipo -info "$unpacked_binary"
 /usr/bin/lipo "$unpacked_binary" -verify_arch arm64 x86_64 || fail "解包助手缺少 universal 架构"
@@ -338,7 +338,7 @@ rg -Fq 'licenses/yt-dlp-THIRD_PARTY_LICENSES.txt' "$unpacked_root/THIRD_PARTY_NO
   /bin/zsh ./scripts/build-macos.zsh
 )
 rebuilt_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper dev" ]] || fail "解包源码重建后的版本输出异常"
+[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper 0.2.0" ]] || fail "解包源码重建后的版本输出异常"
 /usr/bin/file "$rebuilt_binary"
 /usr/bin/lipo -info "$rebuilt_binary"
 /usr/bin/lipo "$rebuilt_binary" -verify_arch arm64 x86_64 || fail "解包源码无法重建 universal 助手"

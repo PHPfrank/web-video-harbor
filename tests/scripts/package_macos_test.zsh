@@ -189,7 +189,7 @@ fi
 [[ -x "$package_root/work/dist/web-video-harbor-helper" ]] || fail "预构建助手不可执行"
 /usr/bin/lipo "$package_root/work/dist/web-video-harbor-helper" -verify_arch arm64 x86_64 || \
   fail "预构建助手不是 arm64+x86_64 universal"
-[[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper dev" ]] || \
+[[ "$($package_root/work/dist/web-video-harbor-helper --version)" == "web-video-harbor-helper 0.2.0" ]] || \
   fail "预构建助手版本输出异常"
 parser_path="$package_root/work/dist/yt-dlp_macos"
 [[ -x "$parser_path" && ! -L "$parser_path" ]] || fail "包内平台解析器无效"

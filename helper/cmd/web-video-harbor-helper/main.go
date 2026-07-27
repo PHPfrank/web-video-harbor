@@ -20,7 +20,7 @@ import (
 	"web-video-harbor/helper/internal/ytdlp"
 )
 
-const version = "dev"
+var version = "dev"
 
 type appDeps struct {
 	defaultConfigPath       func() (string, error)
