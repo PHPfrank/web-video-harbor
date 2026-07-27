@@ -571,6 +571,57 @@ func TestRunnerClassifiesBoundedDiagnosticsIntoStableSafeErrors(t *testing.T) {
 	}
 }
 
+func TestRunnerRetriesOnlyYouTubeConnectionResetWithFixedChromeImpersonation(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+		attempts++
+		if attempts == 1 {
+			return fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=ERROR: ConnectionResetError(54, connection reset by peer)"})(path, args, env)
+		}
+		if got := valueAfter(t, args, "--impersonate"); got != "Chrome-136:Macos-15" {
+			t.Fatalf("impersonation target = %q", got)
+		}
+		return fakeCommandFactory("success", nil)(path, args, env)
+	}
+
+	path, err := runner.Run(context.Background(), validRequest("公司网络兼容"))
+	if err != nil || path == "" || attempts != 2 {
+		t.Fatalf("Run() = (%q, %v), attempts=%d", path, err, attempts)
+	}
+	assertNoPlatformStaging(t, config.OutputDir)
+}
+
+func TestRunnerDoesNotApplyYouTubeImpersonationFallbackToBilibili(t *testing.T) {
+	config := testConfig(t)
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	runner.commandFactory = func(path string, args []string, env []string) *exec.Cmd {
+		attempts++
+		for _, arg := range args {
+			if arg == "--impersonate" {
+				t.Fatalf("Bilibili args contain impersonation: %q", args)
+			}
+		}
+		return fakeCommandFactory("failure", []string{"WVH_FAKE_DIAGNOSTIC=ERROR: ConnectionResetError(54, connection reset by peer)"})(path, args, env)
+	}
+
+	_, err = runner.Run(context.Background(), Request{
+		URL: "https://www.bilibili.com/video/BV1K3Gz6pEoo", Title: "Bilibili", Quality: QualityBest,
+	})
+	assertRunnerCode(t, err, CodeNetwork)
+	if attempts != 1 {
+		t.Fatalf("Bilibili attempts = %d, want 1", attempts)
+	}
+}
+
 func TestRunnerEnforcesDiagnosticLineAndTailLimits(t *testing.T) {
 	for _, mode := range []string{"tail-eviction", "overlong-diagnostic"} {
 		t.Run(mode, func(t *testing.T) {

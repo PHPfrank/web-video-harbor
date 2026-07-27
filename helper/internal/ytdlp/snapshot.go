@@ -155,8 +155,8 @@ func createExecutableSnapshot(sourcePath, snapshotFileName string) (*ExecutableS
 		directory: directory, directoryName: directoryName, directoryInfo: directoryInfo,
 		file: opened, fileInfo: openedInfo,
 		fileName: snapshotFileName,
-		path: filepath.Join(directoryPath, snapshotFileName),
-		size: size, digest: expectedDigest,
+		path:     filepath.Join(directoryPath, snapshotFileName),
+		size:     size, digest: expectedDigest,
 	}
 	if err := snapshot.verifyLocked(); err != nil {
 		_ = opened.Close()

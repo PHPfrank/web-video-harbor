@@ -93,9 +93,10 @@ const (
 
 // Error exposes only a fixed, URL-free Chinese message.
 type Error struct {
-	Code    Code
-	Message string
-	cause   error
+	Code                     Code
+	Message                  string
+	cause                    error
+	retryableConnectionReset bool
 }
 
 func (e *Error) Error() string { return e.Message }
@@ -191,9 +192,50 @@ func New(config Config) (*Runner, error) {
 	}, nil
 }
 
-// Run executes the fixed yt-dlp invocation, validates its staged output, and
-// publishes one video through an exclusive output reservation.
-func (r *Runner) Run(ctx context.Context, request Request) (path string, returnErr error) {
+type attemptMode uint8
+
+const (
+	attemptDefault attemptMode = iota
+	attemptChromeMac
+)
+
+// Run executes one default attempt and, only for a YouTube TLS reset, one
+// fixed Chrome/macOS-compatible attempt.
+func (r *Runner) Run(ctx context.Context, request Request) (string, error) {
+	path, err := r.runAttempt(ctx, request, attemptDefault)
+	if err == nil || ctx == nil || ctx.Err() != nil {
+		return path, err
+	}
+	video, classifyErr := platformurl.Classify(request.URL)
+	var runnerError *Error
+	if classifyErr != nil || video.Provider != platformurl.YouTube ||
+		!errors.As(err, &runnerError) || !runnerError.retryableConnectionReset || errorContainsCode(err, CodeOutput) {
+		return path, err
+	}
+	return r.runAttempt(ctx, request, attemptChromeMac)
+}
+
+func errorContainsCode(err error, code Code) bool {
+	if err == nil {
+		return false
+	}
+	if runnerError, ok := err.(*Error); ok && runnerError.Code == code {
+		return true
+	}
+	if joined, ok := err.(interface{ Unwrap() []error }); ok {
+		for _, nested := range joined.Unwrap() {
+			if errorContainsCode(nested, code) {
+				return true
+			}
+		}
+		return false
+	}
+	return errorContainsCode(errors.Unwrap(err), code)
+}
+
+// runAttempt executes one fixed yt-dlp invocation, validates its staged
+// output, and publishes one video through an exclusive output reservation.
+func (r *Runner) runAttempt(ctx context.Context, request Request, mode attemptMode) (path string, returnErr error) {
 	if r == nil {
 		return "", errInvalidRequest
 	}
@@ -267,7 +309,7 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		}
 	}()
 
-	args, err := r.buildArgs(request, stagingDir)
+	args, err := r.buildArgsForAttempt(request, stagingDir, mode)
 	if err != nil {
 		return "", err
 	}
@@ -596,7 +638,9 @@ func classifyDiagnostic(diagnostic []byte) error {
 	case containsAny("ffmpeg not found", "ffprobe not found", "ffmpeg is not installed"):
 		return runError(CodeFFmpegMissing)
 	case containsAny("network is unreachable", "unable to download webpage", "connection timed out", "connection reset", "temporary failure in name resolution", "nodename nor servname"):
-		return runError(CodeNetwork)
+		networkError := runError(CodeNetwork)
+		networkError.retryableConnectionReset = containsAny("connection reset", "connectionreseterror", "curl: (35)")
+		return networkError
 	default:
 		return runError(CodeProcess)
 	}
@@ -1274,6 +1318,10 @@ func removeEmptyPinnedDirectoryAt(
 }
 
 func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error) {
+	return r.buildArgsForAttempt(request, stagingDir, attemptDefault)
+}
+
+func (r *Runner) buildArgsForAttempt(request Request, stagingDir string, mode attemptMode) ([]string, error) {
 	if r == nil {
 		return nil, errInvalidConfig
 	}
@@ -1285,7 +1333,7 @@ func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error)
 	}
 
 	selector := selectors[request.Quality]
-	return []string{
+	args := []string{
 		"--ignore-config",
 		"--no-plugin-dirs",
 		"--no-playlist",
@@ -1299,8 +1347,14 @@ func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error)
 		"--paths", "home:" + stagingDir,
 		"--output", "media.%(ext)s",
 		"--format", selector,
-		request.URL,
-	}, nil
+	}
+	if mode == attemptChromeMac {
+		args = append(args, "--impersonate", "Chrome-136:Macos-15")
+	} else if mode != attemptDefault {
+		return nil, errInvalidConfig
+	}
+	args = append(args, request.URL)
+	return args, nil
 }
 
 func validateRequest(request Request) error {
