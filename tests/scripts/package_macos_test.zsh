@@ -8,7 +8,7 @@ package_script="$repo_root/scripts/package-macos.zsh"
 test_output_root="$repo_root/work/package-test-output"
 mkdir -p "$test_output_root"
 run_output_dir="$(/usr/bin/mktemp -d "$test_output_root/run.XXXXXX")"
-archive_path="$run_output_dir/WebVideoHarbor-macOS.zip"
+archive_path="$run_output_dir/WebVideoHarbor-macOS-v0.2.1.zip"
 unpack_root="$run_output_dir/unpacked"
 fixture_root="$repo_root/work/package-yt-dlp-fixture"
 deno_fixture_root="$repo_root/work/package-deno-fixture"
@@ -21,6 +21,8 @@ fail() {
 [[ -x "$package_script" ]] || fail "缺少可执行打包脚本 scripts/package-macos.zsh"
 /bin/zsh -o NO_BG_NICE -n "$package_script" || fail "打包脚本语法错误"
 package_script_text="$(<"$package_script")"
+[[ "$package_script_text" == *'archive_name="$package_name-v0.2.1.zip"'* ]] || \
+  fail "v0.2.1 打包脚本没有使用独立版本文件名"
 if [[ "$package_script_text" != *"trap cleanup_publish_temps EXIT"*"trap 'exit 130' INT"*"trap 'exit 143' TERM"* ]]; then
   fail "打包发布临时文件没有使用 EXIT 清理并把 INT/TERM 转换为退出"
 fi
@@ -115,7 +117,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$part_outp
 fi
 /bin/rm -f -- "$parser_part"
 trap - EXIT INT TERM
-[[ ! -e "$part_output/WebVideoHarbor-macOS.zip" ]] || fail "存在解析器 .part 文件时仍发布了 ZIP"
+[[ ! -e "$part_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "存在解析器 .part 文件时仍发布了 ZIP"
 rg -Fq '缓存包含未完成的解析器 .part 文件' "$part_output/rejected.txt" || \
   fail "解析器 .part 文件拒绝信息不明确"
 
@@ -131,7 +133,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$deno_part
 fi
 /bin/rm -f -- "$deno_part"
 trap - EXIT INT TERM
-[[ ! -e "$deno_part_output/WebVideoHarbor-macOS.zip" ]] || fail "存在 Deno .part 文件时仍发布了 ZIP"
+[[ ! -e "$deno_part_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "存在 Deno .part 文件时仍发布了 ZIP"
 rg -Fq '缓存包含未完成的 Deno .part 文件' "$deno_part_output/rejected.txt" || \
   fail "Deno .part 文件拒绝信息不明确"
 
@@ -141,7 +143,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_parse
   /bin/zsh "$package_script" >"$bad_parser_output/rejected.txt" 2>&1; then
   fail "校验和错误的解析器被打包"
 fi
-[[ ! -e "$bad_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "错误解析器仍发布了 ZIP"
+[[ ! -e "$bad_parser_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "错误解析器仍发布了 ZIP"
 
 bad_license_output="$(/usr/bin/mktemp -d "$test_output_root/bad-license.XXXXXX")"
 if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_license_output" \
@@ -149,7 +151,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$bad_licen
   /bin/zsh "$package_script" >"$bad_license_output/rejected.txt" 2>&1; then
   fail "校验和错误的许可证被打包"
 fi
-[[ ! -e "$bad_license_output/WebVideoHarbor-macOS.zip" ]] || fail "错误许可证仍发布了 ZIP"
+[[ ! -e "$bad_license_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "错误许可证仍发布了 ZIP"
 
 invalid_parser_fixture="$repo_root/work/package-invalid-parser-fixture"
 mkdir -p "$invalid_parser_fixture"
@@ -168,7 +170,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$invalid_p
   /bin/zsh "$package_script" >"$invalid_parser_output/rejected.txt" 2>&1; then
   fail "版本错误的解析器被打包"
 fi
-[[ ! -e "$invalid_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "版本错误的解析器仍发布了 ZIP"
+[[ ! -e "$invalid_parser_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "版本错误的解析器仍发布了 ZIP"
 rg -Fq '解析器版本异常' "$invalid_parser_output/rejected.txt" || fail "解析器版本错误信息不明确"
 
 thin_parser_fixture="$repo_root/work/package-thin-parser-fixture"
@@ -188,7 +190,7 @@ if env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_SOURCE_DIR="$thin_pars
   /bin/zsh "$package_script" >"$thin_parser_output/rejected.txt" 2>&1; then
   fail "非 universal 解析器被打包"
 fi
-[[ ! -e "$thin_parser_output/WebVideoHarbor-macOS.zip" ]] || fail "非 universal 解析器仍发布了 ZIP"
+[[ ! -e "$thin_parser_output/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "非 universal 解析器仍发布了 ZIP"
 rg -Fq '解析器缺少 universal 架构' "$thin_parser_output/rejected.txt" || \
   fail "非 universal 解析器错误信息不明确"
 
@@ -316,7 +318,7 @@ fi
 cleanup_unexpected_files
 trap - EXIT INT TERM
 rg -Fq '非白名单' "$unexpected_output_dir/rejected.txt" || fail "非白名单扩展文件的拒绝信息不明确"
-[[ ! -e "$unexpected_output_dir/WebVideoHarbor-macOS.zip" ]] || fail "拒绝非白名单文件后仍发布了 ZIP"
+[[ ! -e "$unexpected_output_dir/WebVideoHarbor-macOS-v0.2.1.zip" ]] || fail "拒绝非白名单文件后仍发布了 ZIP"
 
 [[ ! -e "$archive_path.sha256" ]] || fail "打包脚本不应发布可选摘要旁车文件"
 archive_digest_before_no_clobber="$(/usr/bin/shasum -a 256 "$archive_path" | awk '{print $1}')"
@@ -334,7 +336,7 @@ repeat_output_dir="$(/usr/bin/mktemp -d "$test_output_root/repeat.XXXXXX")"
 env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$repeat_output_dir" \
   /bin/zsh "$package_script" >/dev/null
 first_digest="$(/usr/bin/shasum -a 256 "$archive_path" | awk '{print $1}')"
-repeat_digest="$(/usr/bin/shasum -a 256 "$repeat_output_dir/WebVideoHarbor-macOS.zip" | awk '{print $1}')"
+repeat_digest="$(/usr/bin/shasum -a 256 "$repeat_output_dir/WebVideoHarbor-macOS-v0.2.1.zip" | awk '{print $1}')"
 [[ "$first_digest" == "$repeat_digest" ]] || \
   fail "相同源码重复打包的 SHA256 不一致：$first_digest != $repeat_digest"
 

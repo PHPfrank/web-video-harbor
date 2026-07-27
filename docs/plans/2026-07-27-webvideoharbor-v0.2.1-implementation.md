@@ -409,7 +409,7 @@ git commit -m "release: prepare WebVideoHarbor v0.2.1"
 
 **Files:**
 - Modify only if a failing test reveals a scoped defect.
-- Deliver: `outputs/WebVideoHarbor-macOS.zip`
+- Deliver: `outputs/WebVideoHarbor-macOS-v0.2.1.zip`（保留已有旧版 ZIP）
 
 **Step 1: Run full deterministic verification**
 

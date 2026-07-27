@@ -6,7 +6,7 @@ script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 repo_real="${repo_root:A}"
 package_name="WebVideoHarbor-macOS"
-archive_name="$package_name.zip"
+archive_name="$package_name-v0.2.1.zip"
 central_output_helper="/Users/frank/.codex/scripts/ensure-central-outputs.zsh"
 
 fail() {
