@@ -446,9 +446,17 @@ helper_rollback_started_process() {
 }
 
 helper_health_response() {
+  local request_timeout="${1:-1}"
+  if [[ "$request_timeout" != <-> && "$request_timeout" != <->.<-> ]]; then
+    return 1
+  fi
+  typeset -F request_timeout_value="$request_timeout"
+  if (( request_timeout_value <= 0.0 || request_timeout_value > 1.0 )); then
+    return 1
+  fi
   local curl_command
   curl_command="$(command -v curl)" || return 1
-  REPLY="$("$curl_command" -fsS --max-time 1 "$helper_health_url" 2>/dev/null)" || return 1
+  REPLY="$("$curl_command" -fsS --max-time "$request_timeout" "$helper_health_url" 2>/dev/null)" || return 1
   [[ "$REPLY" == *'"ready":true'* ]] || return 1
   helper_health_pid=""
   if [[ "$REPLY" =~ '"pid":[[:space:]]*([0-9]+)' ]]; then

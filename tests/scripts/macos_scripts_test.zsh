@@ -362,6 +362,22 @@ rg -q '健康端点已有实例' "$preexisting_output" || fail "已有健康实�
 print -r -- "#!/bin/zsh
 [[ -f \"$fixture_root/work/health-fails\" ]] && exit 1
 if [[ ! -f \"$fixture_state/helper.pid\" ]]; then exit 22; fi
+if [[ -f \"$fixture_root/work/health-blocks\" ]]; then
+  health_max_time=1
+  while (( \$# > 0 )); do
+    if [[ \"\$1\" == --max-time ]]; then shift; health_max_time=\"\$1\"; fi
+    shift
+  done
+  /bin/sleep \"\$health_max_time\"
+  exit 1
+fi
+if [[ -f \"$fixture_root/work/health-delay-attempts\" ]]; then
+  remaining_attempts=\"\$(<\"$fixture_root/work/health-delay-attempts\")\"
+  if [[ \"\$remaining_attempts\" == <-> && \"\$remaining_attempts\" -gt 0 ]]; then
+    print -r -- \"\$(( remaining_attempts - 1 ))\" >\"$fixture_root/work/health-delay-attempts\"
+    exit 1
+  fi
+fi
 health_pid=\"\$(<\"$fixture_state/helper.pid\")\"
 if [[ -f \"$fixture_root/work/health-mismatch\" ]]; then (( health_pid += 1 )); fi
 if [[ -f \"$fixture_root/work/health-malformed\" ]]; then
@@ -402,6 +418,13 @@ print -r -- '#!/bin/zsh
 print -r -- "$$" >>"'"$fixture_root/work/helper-launches"'"
 print -r -- "$PPID" >"'"$fixture_root/work/helper-parent-"'$$"
 trap "exit 0" TERM INT
+if [[ -f "'"$fixture_root/work/helper-exits-after-delay"'" ]]; then
+  /bin/sleep 2 &
+  exit_timer_pid=$!
+  trap "kill -TERM $exit_timer_pid 2>/dev/null || true; exit 0" TERM INT
+  while kill -0 $exit_timer_pid 2>/dev/null; do /bin/sleep 0.05; done
+  exit 1
+fi
 /bin/sleep 0.3
 bulk_output="${(l:1600000::L:)${:-}}"
 print -rn -- "$bulk_output"
@@ -468,6 +491,55 @@ print -r -- 'allowed' >"$fixture_root/work/allow-helper-identity"
 export WEB_VIDEO_HELPER_TEST_LOGGER_PID_PATH="$fixture_root/work/logger.pid"
 
 lifecycle_lock_path="$fixture_state/helper.lifecycle.lock"
+if case_enabled cold_parser_startup_window; then
+  cold_start_output="$fixture_root/work/cold-start.txt"
+  rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+    "$fixture_state/helper.pid" "$fixture_state/helper.lifecycle.lock"
+  print -r -- 55 >"$fixture_root/work/health-delay-attempts"
+  if ! env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    /bin/zsh "$fixture_scripts/start-helper.zsh" >"$cold_start_output" 2>&1; then
+    fail "start 没有等待平台解析器冷启动完成"
+  fi
+  rm -f -- "$fixture_root/work/health-delay-attempts"
+  env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    /bin/zsh "$fixture_scripts/stop-helper.zsh" >/dev/null
+  finish_focused_case cold_parser_startup_window
+fi
+
+if case_enabled startup_deadline_cleanup; then
+  zmodload zsh/datetime || fail "无法加载高精度时间模块"
+  deadline_output="$fixture_root/work/startup-deadline.txt"
+  rm -f -- "$fixture_root/work/helper-launches" "$fixture_root/work/logger.pid" \
+    "$fixture_state/helper.pid" "$fixture_state/helper.lifecycle.lock"
+  print -r -- block >"$fixture_root/work/health-blocks"
+  print -r -- exit >"$fixture_root/work/helper-exits-after-delay"
+  typeset -F 6 deadline_started="$EPOCHREALTIME"
+  set +e
+  env PATH="$fixture_fake_bin:/usr/bin:/bin" WEB_VIDEO_HELPER_TESTING=1 \
+    WEB_VIDEO_HELPER_TEST_STATE_DIR="$fixture_state" \
+    WEB_VIDEO_HELPER_TEST_PS_COMMAND="$fixture_fake_bin/ps" \
+    WEB_VIDEO_HELPER_TEST_START_TIMEOUT_SECONDS=0.5 \
+    /bin/zsh "$fixture_scripts/start-helper.zsh" >"$deadline_output" 2>&1
+  deadline_status=$?
+  set -e
+  typeset -F 6 deadline_elapsed=$(( EPOCHREALTIME - deadline_started ))
+  rm -f -- "$fixture_root/work/health-blocks" "$fixture_root/work/helper-exits-after-delay"
+  [[ "$deadline_status" != "0" ]] || fail "持续阻塞的健康检查被误报为启动成功"
+  (( deadline_elapsed < 1.5 )) || fail "启动墙钟截止时间未生效：${deadline_elapsed}s"
+  [[ ! -e "$fixture_state/helper.pid" ]] || fail "启动超时后 PID 文件残留"
+  [[ ! -e "$fixture_state/helper.lifecycle.lock" ]] || fail "启动超时后生命周期锁残留"
+  if [[ -f "$fixture_root/work/helper-launches" ]]; then
+    while IFS= read -r deadline_helper_pid; do
+      kill -0 "$deadline_helper_pid" 2>/dev/null && fail "启动超时后 helper 残留"
+    done <"$fixture_root/work/helper-launches"
+  fi
+  finish_focused_case startup_deadline_cleanup
+fi
+
 if case_enabled first_lifecycle_interleave; then
 for first_command in stop-helper.zsh helper-status.zsh; do
   first_barrier="$fixture_root/work/first-${first_command:r}-barrier"

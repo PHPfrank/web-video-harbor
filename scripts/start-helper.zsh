@@ -102,12 +102,46 @@ if ! helper_publish_pid_temp "$pid_temp" "$started_pid"; then
 fi
 pid_temp=""
 
-for attempt in {1..50}; do
-  /bin/sleep 0.1
-  if ! kill -0 "$started_pid" 2>/dev/null; then
-    break
+zmodload zsh/datetime || {
+  print -u2 -- "无法加载启动计时模块。"
+  exit 1
+}
+typeset -F 6 startup_timeout_seconds=35.0
+startup_timeout_label="35"
+if [[ "${WEB_VIDEO_HELPER_TESTING:-}" == "1" && \
+  -n "${WEB_VIDEO_HELPER_TEST_START_TIMEOUT_SECONDS:-}" ]]; then
+  requested_timeout="${WEB_VIDEO_HELPER_TEST_START_TIMEOUT_SECONDS}"
+  if [[ "$requested_timeout" != <-> && "$requested_timeout" != <->.<-> ]]; then
+    print -u2 -- "测试启动等待时间无效。"
+    exit 1
   fi
-  if helper_health_response && [[ "$helper_health_pid" == "$started_pid" ]] && helper_process_matches "$started_pid"; then
+  typeset -F requested_timeout_value="$requested_timeout"
+  if (( requested_timeout_value < 0.2 || requested_timeout_value > 35.0 )); then
+    print -u2 -- "测试启动等待时间越界。"
+    exit 1
+  fi
+  startup_timeout_seconds="$requested_timeout_value"
+  startup_timeout_label="$requested_timeout"
+fi
+typeset -F 6 startup_deadline=$(( EPOCHREALTIME + startup_timeout_seconds ))
+typeset -F 6 startup_remaining startup_sleep health_timeout
+
+while kill -0 "$started_pid" 2>/dev/null; do
+  startup_remaining=$(( startup_deadline - EPOCHREALTIME ))
+  (( startup_remaining > 0.0 )) || break
+  startup_sleep=0.1
+  (( startup_remaining < startup_sleep )) && startup_sleep="$startup_remaining"
+  /bin/sleep "$startup_sleep"
+  kill -0 "$started_pid" 2>/dev/null || break
+
+  startup_remaining=$(( startup_deadline - EPOCHREALTIME ))
+  (( startup_remaining > 0.0 )) || break
+  health_timeout=1.0
+  (( startup_remaining < health_timeout )) && health_timeout="$startup_remaining"
+  if helper_health_response "$health_timeout" && \
+    [[ "$helper_health_pid" == "$started_pid" ]] && \
+    helper_process_matches "$started_pid" && \
+    (( EPOCHREALTIME <= startup_deadline )); then
     rollback_started=""
     print -- "本地助手启动成功（PID $started_pid）。"
     print -- "状态目录：$helper_state_dir"
@@ -115,5 +149,5 @@ for attempt in {1..50}; do
   fi
 done
 
-print -u2 -- "本地助手未能在 5 秒内通过健康检查，请查看：$helper_log_path"
+print -u2 -- "本地助手未能在约 $startup_timeout_label 秒内通过健康检查，请查看：$helper_log_path"
 exit 1

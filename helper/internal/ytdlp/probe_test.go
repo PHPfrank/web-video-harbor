@@ -26,8 +26,8 @@ func TestProbeUsesOnlyExecutableAdjacentBundledBinaryAndVersionArgument(t *testi
 
 	result, err := probeAdjacent(context.Background(), helperPath, func(ctx context.Context, path string, args ...string) ([]byte, error) {
 		deadline, ok := ctx.Deadline()
-		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 3*time.Second {
-			t.Fatalf("probe deadline = %v, want a short positive deadline", deadline)
+		if !ok || time.Until(deadline) <= 0 || time.Until(deadline) > 31*time.Second {
+			t.Fatalf("probe deadline = %v, want a bounded cold-start deadline", deadline)
 		}
 		if path == bundledPath || filepath.Base(path) != bundledBinaryName {
 			t.Fatalf("probe path = %q, want a private bundled snapshot", path)
@@ -53,6 +53,28 @@ func TestProbeUsesOnlyExecutableAdjacentBundledBinaryAndVersionArgument(t *testi
 	if err != nil || !validExecutableFile(fileInfo, 0o500) {
 		t.Fatalf("snapshot executable permissions are unsafe: info=%#v err=%v", fileInfo, err)
 	}
+}
+
+func TestProbeAllowsBundledParserColdStartWindow(t *testing.T) {
+	dir := t.TempDir()
+	helperPath := filepath.Join(dir, "web-video-harbor-helper")
+	writeProbeFile(t, helperPath, 0o700)
+	writeProbeFile(t, filepath.Join(dir, bundledBinaryName), 0o700)
+
+	result, err := probeAdjacent(context.Background(), helperPath, func(ctx context.Context, _ string, _ ...string) ([]byte, error) {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			return nil, errors.New("version probe has no deadline")
+		}
+		if remaining := time.Until(deadline); remaining < 29*time.Second {
+			return nil, fmt.Errorf("version probe window = %v, want at least 29s", remaining)
+		}
+		return []byte("2026.07.04\n"), nil
+	})
+	if err != nil {
+		t.Fatalf("probeAdjacent() rejected a valid cold-start window: %v", err)
+	}
+	t.Cleanup(func() { _ = result.Close() })
 }
 
 func TestProbeRejectsUnsafeBundledFilesBeforeExecution(t *testing.T) {

@@ -17,7 +17,7 @@ import (
 
 const (
 	bundledBinaryName = "yt-dlp_macos"
-	probeTimeout      = 2 * time.Second
+	probeTimeout      = 30 * time.Second
 	maxVersionOutput  = 64
 )
 
