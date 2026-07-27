@@ -2463,7 +2463,6 @@ func TestBuildArgsUsesOnlyFixedSafeArgumentArray(t *testing.T) {
 		"--ignore-config",
 		"--no-plugin-dirs",
 		"--no-playlist",
-		"--max-downloads", "1",
 		"--newline",
 		"--no-colors",
 		"--progress",
@@ -2502,6 +2501,7 @@ func TestBuildArgsContainsNoCookieConfigPluginUpdateOrPlaylistExpansionFlags(t *
 		"--update":               {},
 		"-U":                     {},
 		"--yes-playlist":         {},
+		"--max-downloads":        {},
 	}
 	for _, arg := range args {
 		if _, found := forbidden[arg]; found {

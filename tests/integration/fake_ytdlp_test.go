@@ -38,6 +38,7 @@ page_url="${@[-1]}"
 staging_dir=''
 ffmpeg_path=''
 selector=''
+has_max_downloads=''
 while (( $# > 0 )); do
   case "$1" in
     --paths)
@@ -52,12 +53,17 @@ while (( $# > 0 )); do
       shift
       selector="$1"
       ;;
+    --max-downloads)
+      has_max_downloads='1'
+      shift
+      ;;
   esac
   shift
 done
 
 [[ -n "$staging_dir" && -d "$staging_dir" && -x "$ffmpeg_path" ]] || exit 20
 [[ "$selector" == 'bv*[height<=720]+ba/b[height<=720]' ]] || exit 21
+[[ -z "$has_max_downloads" ]] || exit 23
 
 if [[ "$page_url" == *'cancel12345'* ]]; then
   trap 'exit 143' INT TERM

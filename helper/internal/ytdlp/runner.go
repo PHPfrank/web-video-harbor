@@ -1262,7 +1262,6 @@ func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error)
 		"--ignore-config",
 		"--no-plugin-dirs",
 		"--no-playlist",
-		"--max-downloads", "1",
 		"--newline",
 		"--no-colors",
 		"--progress",

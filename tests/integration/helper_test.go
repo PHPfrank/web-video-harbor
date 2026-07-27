@@ -260,6 +260,13 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		t.Fatalf("platform reveal mismatch: result=%v paths=%v", revealResult, revealer.Paths())
 	}
 
+	bilibiliTask := createTask(t, helperURL, api.JobSpec{
+		URL: "https://www.bilibili.com/video/BV1K3Gz6pEoo/", Title: "集成测试-Bilibili合集容器",
+		MediaType: "platform", Quality: "720",
+	})
+	bilibiliTask = waitForStatus(t, helperURL, bilibiliTask.ID, tasks.Completed, 20*time.Second)
+	assertCompletedOutput(t, bilibiliTask, downloadDir)
+
 	cancel := createTask(t, helperURL, api.JobSpec{URL: fixture.URL + "/slow.mp4", Title: "集成测试-取消", MediaType: "mp4"})
 	waitForDownloadingProgress(t, helperURL, cancel.ID, 10*time.Second)
 	cancelResponse := postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(cancel.ID)+"/cancel")
@@ -297,8 +304,8 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 
 	var listed []tasks.Task
 	getJSON(t, helperURL+"/v1/tasks", true, &listed)
-	if len(listed) != 8 {
-		t.Fatalf("task count = %d, want 8", len(listed))
+	if len(listed) != 9 {
+		t.Fatalf("task count = %d, want 9", len(listed))
 	}
 
 	results := map[string]string{
@@ -306,6 +313,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		"single_hls":     single.OutputPath,
 		"master_1080":    multi.OutputPath,
 		"platform_720":   platformTask.OutputPath,
+		"bilibili_720":  bilibiliTask.OutputPath,
 		"platform_retry": retried.OutputPath,
 	}
 	resultBytes, err := json.MarshalIndent(results, "", "  ")
