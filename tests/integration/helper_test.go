@@ -78,7 +78,7 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	resolver := exactFixtureResolver{hostPort: parsed.Host}
 	downloadDir := t.TempDir()
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{})
+	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{})
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -158,7 +158,8 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 			t.Errorf("close fake platform downloader: %v", err)
 		}
 	})
-	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, platform)
+	runtimeResult := ytdlp.RuntimeResult{Path: platform.Path, Version: "2.4.5", Snapshot: platform.Snapshot}
+	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, platform, runtimeResult)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -313,7 +314,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		"single_hls":     single.OutputPath,
 		"master_1080":    multi.OutputPath,
 		"platform_720":   platformTask.OutputPath,
-		"bilibili_720":  bilibiliTask.OutputPath,
+		"bilibili_720":   bilibiliTask.OutputPath,
 		"platform_retry": retried.OutputPath,
 	}
 	resultBytes, err := json.MarshalIndent(results, "", "  ")

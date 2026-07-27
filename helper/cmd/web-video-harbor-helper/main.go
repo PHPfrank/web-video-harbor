@@ -27,7 +27,8 @@ type appDeps struct {
 	loadConfig              func(string) (appconfig.Config, error)
 	lookPath                func(string) (string, error)
 	probePlatformDownloader func(context.Context) (ytdlp.ProbeResult, error)
-	serve                   func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult) error
+	probeRuntime            func(context.Context) (ytdlp.RuntimeResult, error)
+	serve                   func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult) error
 }
 
 func defaultAppDeps() appDeps {
@@ -36,8 +37,9 @@ func defaultAppDeps() appDeps {
 		loadConfig:              appconfig.Load,
 		lookPath:                exec.LookPath,
 		probePlatformDownloader: ytdlp.Probe,
-		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult) error {
-			return serveHelper(ctx, cfg, appVersion, ffmpegPath, platform, net.Listen)
+		probeRuntime:            ytdlp.ProbeRuntime,
+		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) error {
+			return serveHelper(ctx, cfg, appVersion, ffmpegPath, platform, runtime, net.Listen)
 		},
 	}
 }
@@ -97,8 +99,15 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 	} else {
 		platform = ytdlp.ProbeResult{}
 	}
-	fmt.Fprintf(stdout, "本地助手监听：%s\n下载目录：%s\nFFmpeg: %s\n平台解析器: %s\n", cfg.Address, cfg.DownloadDir, ffmpegStatus, platformStatus)
-	if err := deps.serve(ctx, cfg, version, ffmpegPath, platform); err != nil {
+	runtimeResult, runtimeErr := deps.probeRuntime(ctx)
+	runtimeStatus := "不可用"
+	if runtimeErr == nil {
+		runtimeStatus = fmt.Sprintf("可用（%s）", runtimeResult.Version)
+	} else {
+		runtimeResult = ytdlp.RuntimeResult{}
+	}
+	fmt.Fprintf(stdout, "本地助手监听：%s\n下载目录：%s\nFFmpeg: %s\n平台解析器: %s\nJavaScript 解析环境: %s\n", cfg.Address, cfg.DownloadDir, ffmpegStatus, platformStatus, runtimeStatus)
+	if err := deps.serve(ctx, cfg, version, ffmpegPath, platform, runtimeResult); err != nil {
 		fmt.Fprintf(stderr, "本地助手运行失败：%v\n", err)
 		return 1
 	}
@@ -107,16 +116,17 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 
 type listenFunc func(network, address string) (net.Listener, error)
 
-func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, listen listenFunc) error {
+func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, listen listenFunc) error {
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform)
+	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform, runtime)
 	if err != nil {
 		return fmt.Errorf("create task engine: %w", err)
 	}
-	defer func() { _ = finishEngineAndClosePlatform(engine, platform) }()
+	defer func() { _ = finishEngineAndClosePlatform(engine, platform, runtime) }()
 	apiServer, err := api.New(api.Options{
 		Token: cfg.Token, Version: appVersion, FFmpegAvailable: ffmpegPath != "",
 		PlatformDownloaderAvailable: platform.Path != "", PlatformDownloaderVersion: platform.Version,
+		JavaScriptRuntimeAvailable: runtime.Path != "", JavaScriptRuntimeVersion: runtime.Version,
 		DownloadDir: cfg.DownloadDir, Inspector: api.NewMediaInspector(nil),
 		Tasks: engine, Revealer: api.FinderRevealer{},
 	})
@@ -166,8 +176,12 @@ type platformCloser interface {
 // finishEngineAndClosePlatform performs an unbounded final worker join after
 // the user-facing shutdown deadline. The executable snapshot is closed only
 // after no Runner can still hold an active lease.
-func finishEngineAndClosePlatform(engine engineShutdowner, platform platformCloser) error {
-	return errors.Join(engine.Shutdown(context.Background()), platform.Close())
+func finishEngineAndClosePlatform(engine engineShutdowner, platform platformCloser, additional ...platformCloser) error {
+	result := errors.Join(engine.Shutdown(context.Background()), platform.Close())
+	for _, closer := range additional {
+		result = errors.Join(result, closer.Close())
+	}
+	return result
 }
 
 func shutdownServices(ctx context.Context, shutdownHTTP func(context.Context) error, engine engineShutdowner) error {

@@ -184,7 +184,7 @@ func TestEnginePlatformDownloaderMissingRejectsSynchronously(t *testing.T) {
 
 func TestEnginePlatformFFmpegMissingRejectsSynchronously(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := NewEngine(manager, t.TempDir(), nil, "", ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos"})
+	engine, err := NewEngine(manager, t.TempDir(), nil, "", ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos"}, ytdlp.RuntimeResult{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -203,12 +203,30 @@ func TestEnginePlatformFFmpegMissingRejectsSynchronously(t *testing.T) {
 	}
 }
 
+func TestEnginePlatformRuntimeMissingRejectsSynchronously(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newEngine(engineDeps{manager: manager, platformRuntimeUnavailable: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err == nil {
+		t.Fatal("Start accepted a platform task without the JavaScript runtime")
+	}
+	var safe interface{ SafeMessage() string }
+	if !errors.As(err, &safe) || safe.SafeMessage() != "安装包缺少 JavaScript 解析组件" {
+		t.Fatalf("Start error = %v, safe = %#v", err, safe)
+	}
+}
+
 func TestNewEngineRejectsPathOnlyPlatformIdentity(t *testing.T) {
 	manager := tasks.NewManager()
 	engine, err := NewEngine(manager, t.TempDir(), nil, "/usr/local/bin/ffmpeg", ytdlp.ProbeResult{
 		Path:    "/Applications/WebVideoHarbor/yt-dlp_macos",
 		Version: "2026.07.04",
-	})
+	}, ytdlp.RuntimeResult{})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -36,7 +36,7 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	serveCalls := 0
 	deps := defaultAppDeps()
-	deps.serve = func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult) error {
+	deps.serve = func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult) error {
 		serveCalls++
 		return nil
 	}
@@ -81,7 +81,7 @@ func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
 		}
 		return "/usr/local/bin/ffmpeg", nil
 	}
-	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult) error {
+	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
 		gotConfig, gotFFmpeg = got, ffmpegPath
 		return nil
 	}
@@ -109,7 +109,7 @@ func TestNormalStartContinuesWhenFFmpegMissing(t *testing.T) {
 	deps := defaultAppDeps()
 	deps.lookPath = func(string) (string, error) { return "", errors.New("not found") }
 	called := false
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
 		called = true
 		if ffmpegPath != "" {
 			t.Fatalf("ffmpeg path=%q", ffmpegPath)
@@ -133,9 +133,14 @@ func TestNormalStartProbesAndPassesPlatformDownloader(t *testing.T) {
 	deps.probePlatformDownloader = func(context.Context) (ytdlp.ProbeResult, error) {
 		return ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos", Version: "2026.07.04"}, nil
 	}
+	deps.probeRuntime = func(context.Context) (ytdlp.RuntimeResult, error) {
+		return ytdlp.RuntimeResult{Path: "/Applications/WebVideoHarbor/deno_macos_arm64", Version: "2.4.5"}, nil
+	}
 	var got ytdlp.ProbeResult
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult) error {
+	var gotRuntime ytdlp.RuntimeResult
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) error {
 		got = platform
+		gotRuntime = runtime
 		return nil
 	}
 	if exit := runContext(context.Background(), []string{"--config", configPath}, &stdout, &stderr, deps); exit != 0 {
@@ -144,7 +149,13 @@ func TestNormalStartProbesAndPassesPlatformDownloader(t *testing.T) {
 	if got.Path != "/Applications/WebVideoHarbor/yt-dlp_macos" || got.Version != "2026.07.04" {
 		t.Fatalf("serve platform downloader = %#v", got)
 	}
+	if gotRuntime.Path != "/Applications/WebVideoHarbor/deno_macos_arm64" || gotRuntime.Version != "2.4.5" {
+		t.Fatalf("serve JavaScript runtime = %#v", gotRuntime)
+	}
 	if !strings.Contains(stdout.String(), "平台解析器: 可用（2026.07.04）") || strings.Contains(stdout.String(), got.Path) {
+		t.Fatalf("startup output = %q", stdout.String())
+	}
+	if !strings.Contains(stdout.String(), "JavaScript 解析环境: 可用（2.4.5）") || strings.Contains(stdout.String(), gotRuntime.Path) {
 		t.Fatalf("startup output = %q", stdout.String())
 	}
 }
@@ -159,7 +170,7 @@ func TestNormalStartContinuesWhenPlatformDownloaderMissing(t *testing.T) {
 		return ytdlp.ProbeResult{}, errors.New("missing path must stay internal")
 	}
 	called := false
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
 		called = true
 		if platform != (ytdlp.ProbeResult{}) {
 			t.Fatalf("platform downloader = %#v", platform)
@@ -217,7 +228,7 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveHelper(ctx, cfg, "test", "", ytdlp.ProbeResult{}, func(network, address string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, func(network, address string) (net.Listener, error) {
 			if network != "tcp" || address != appconfig.DefaultAddress {
 				t.Errorf("listen(%q,%q)", network, address)
 			}
@@ -305,7 +316,7 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 	address := make(chan string, 1)
 	done := make(chan error, 1)
 	go func() {
-		done <- serveHelper(ctx, cfg, "test-helper-version", "", ytdlp.ProbeResult{}, func(network, requested string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, func(network, requested string) (net.Listener, error) {
 			listener, err := net.Listen(network, requested)
 			if err == nil {
 				address <- listener.Addr().String()
@@ -396,7 +407,7 @@ func TestServeHelperKeepsParserHealthyButRejectsPlatformWithoutFFmpeg(t *testing
 	done := make(chan error, 1)
 	platform := ytdlp.ProbeResult{Path: "/private/snapshot/yt-dlp_macos", Version: "2026.07.04"}
 	go func() {
-		done <- serveHelper(ctx, cfg, "test-helper-version", "", platform, func(network, requested string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", platform, ytdlp.RuntimeResult{}, func(network, requested string) (net.Listener, error) {
 			listener, err := net.Listen(network, requested)
 			if err == nil {
 				address <- listener.Addr().String()

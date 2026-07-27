@@ -59,25 +59,27 @@ type ManifestInspection struct {
 }
 
 type engineDeps struct {
-	manager                   *tasks.Manager
-	inspector                 manifestInspector
-	newDownloader             func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner              func(ffmpeg.ProgressFunc) (hlsRunner, error)
-	newPlatformRunner         func(ytdlp.ProgressFunc) (platformRunner, error)
-	platformUnavailable       bool
-	platformFFmpegUnavailable bool
+	manager                    *tasks.Manager
+	inspector                  manifestInspector
+	newDownloader              func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner               func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner          func(ytdlp.ProgressFunc) (platformRunner, error)
+	platformUnavailable        bool
+	platformFFmpegUnavailable  bool
+	platformRuntimeUnavailable bool
 }
 
 // Engine owns asynchronous task execution while Manager remains the source of
 // truth for public task state.
 type Engine struct {
-	manager                   *tasks.Manager
-	inspector                 manifestInspector
-	newDownloader             func(download.ProgressFunc) (directDownloader, error)
-	newHLSRunner              func(ffmpeg.ProgressFunc) (hlsRunner, error)
-	newPlatformRunner         func(ytdlp.ProgressFunc) (platformRunner, error)
-	platformUnavailable       bool
-	platformFFmpegUnavailable bool
+	manager                    *tasks.Manager
+	inspector                  manifestInspector
+	newDownloader              func(download.ProgressFunc) (directDownloader, error)
+	newHLSRunner               func(ffmpeg.ProgressFunc) (hlsRunner, error)
+	newPlatformRunner          func(ytdlp.ProgressFunc) (platformRunner, error)
+	platformUnavailable        bool
+	platformFFmpegUnavailable  bool
+	platformRuntimeUnavailable bool
 
 	mu      sync.RWMutex
 	specs   map[string]JobSpec
@@ -115,6 +117,17 @@ func (*PlatformFFmpegUnavailableError) Error() string {
 }
 func (*PlatformFFmpegUnavailableError) SafeMessage() string {
 	return "未安装 FFmpeg，请先安装后重试"
+}
+
+// PlatformRuntimeUnavailableError reports an incomplete JavaScript challenge
+// runtime without exposing its bundled path.
+type PlatformRuntimeUnavailableError struct{}
+
+func (*PlatformRuntimeUnavailableError) Error() string {
+	return "bundled JavaScript runtime is unavailable"
+}
+func (*PlatformRuntimeUnavailableError) SafeMessage() string {
+	return "安装包缺少 JavaScript 解析组件"
 }
 
 // SpecNotFoundError means the task exists in Manager but was not created by
@@ -222,22 +235,23 @@ func newEngine(deps engineDeps) (*Engine, error) {
 	}
 	rootCtx, cancel := context.WithCancel(context.Background())
 	return &Engine{
-		manager:                   deps.manager,
-		inspector:                 deps.inspector,
-		newDownloader:             deps.newDownloader,
-		newHLSRunner:              deps.newHLSRunner,
-		newPlatformRunner:         deps.newPlatformRunner,
-		platformUnavailable:       deps.platformUnavailable,
-		platformFFmpegUnavailable: deps.platformFFmpegUnavailable,
-		specs:                     make(map[string]JobSpec),
-		rootCtx:                   rootCtx,
-		cancel:                    cancel,
+		manager:                    deps.manager,
+		inspector:                  deps.inspector,
+		newDownloader:              deps.newDownloader,
+		newHLSRunner:               deps.newHLSRunner,
+		newPlatformRunner:          deps.newPlatformRunner,
+		platformUnavailable:        deps.platformUnavailable,
+		platformFFmpegUnavailable:  deps.platformFFmpegUnavailable,
+		platformRuntimeUnavailable: deps.platformRuntimeUnavailable,
+		specs:                      make(map[string]JobSpec),
+		rootCtx:                    rootCtx,
+		cancel:                     cancel,
 	}, nil
 }
 
 // NewEngine constructs a production engine. A new downloader or FFmpeg runner
 // is created for every attempt.
-func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath string, platform ytdlp.ProbeResult) (*Engine, error) {
+func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) (*Engine, error) {
 	deps := engineDeps{
 		manager:   manager,
 		inspector: NewManifestInspector(resolver),
@@ -263,14 +277,18 @@ func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolve
 		deps.platformFFmpegUnavailable = true
 	} else if platform.Snapshot == nil || platform.Path != platform.Snapshot.Path() || platform.Snapshot.Verify() != nil {
 		deps.platformUnavailable = true
+	} else if runtime.Snapshot == nil || runtime.Path == "" || runtime.Path != runtime.Snapshot.Path() || runtime.Snapshot.Verify() != nil {
+		deps.platformRuntimeUnavailable = true
 	} else {
 		deps.newPlatformRunner = func(progress ytdlp.ProgressFunc) (platformRunner, error) {
 			return ytdlp.New(ytdlp.Config{
 				BinaryPath:         platform.Path,
+				RuntimePath:        runtime.Path,
 				FFmpegPath:         ffmpegPath,
 				OutputDir:          outputDir,
 				OnProgress:         progress,
 				ExecutableSnapshot: platform.Snapshot,
+				RuntimeSnapshot:    runtime.Snapshot,
 			})
 		}
 	}
@@ -304,6 +322,9 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 		}
 		if e.platformFFmpegUnavailable {
 			return tasks.Task{}, &PlatformFFmpegUnavailableError{}
+		}
+		if e.platformRuntimeUnavailable {
+			return tasks.Task{}, &PlatformRuntimeUnavailableError{}
 		}
 	}
 	if err := ctx.Err(); err != nil {

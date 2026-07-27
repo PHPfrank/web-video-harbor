@@ -110,6 +110,8 @@ type Options struct {
 	FFmpegAvailable             bool
 	PlatformDownloaderAvailable bool
 	PlatformDownloaderVersion   string
+	JavaScriptRuntimeAvailable  bool
+	JavaScriptRuntimeVersion    string
 	DownloadDir                 string
 	Inspector                   MediaInspector
 	Tasks                       TaskService
@@ -128,6 +130,7 @@ type Server struct {
 	processID          int
 	ffmpegAvailable    bool
 	platformDownloader platformDownloaderStatus
+	javascriptRuntime  platformDownloaderStatus
 	downloadDir        string
 	inspector          MediaInspector
 	tasks              TaskService
@@ -166,6 +169,11 @@ func New(options Options) (*Server, error) {
 	if !platformAvailable {
 		platformVersion = ""
 	}
+	runtimeVersion := safeHealthVersion(options.JavaScriptRuntimeVersion)
+	runtimeAvailable := options.JavaScriptRuntimeAvailable && runtimeVersion != ""
+	if !runtimeAvailable {
+		runtimeVersion = ""
+	}
 
 	s := &Server{
 		tokenHash: sha256.Sum256([]byte(options.Token)), version: options.Version,
@@ -174,6 +182,10 @@ func New(options Options) (*Server, error) {
 		platformDownloader: platformDownloaderStatus{
 			Available: platformAvailable,
 			Version:   platformVersion,
+		},
+		javascriptRuntime: platformDownloaderStatus{
+			Available: runtimeAvailable,
+			Version:   runtimeVersion,
 		},
 		downloadDir: filepath.Clean(absDir),
 		inspector:   options.Inspector, tasks: options.Tasks, revealer: options.Revealer,
@@ -221,6 +233,7 @@ func (s *Server) serveHTTP(w http.ResponseWriter, r *http.Request) {
 			"version":            s.version,
 			"ffmpeg":             s.ffmpegAvailable,
 			"platformDownloader": s.platformDownloader,
+			"javascriptRuntime":  s.javascriptRuntime,
 			"pid":                s.processID,
 		})
 		return

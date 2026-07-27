@@ -124,6 +124,7 @@ func newTestServer(t *testing.T, mutate func(*Options)) (*Server, *fakeTasks, *f
 	opts := Options{
 		Token: testToken, Version: "1.2.3", FFmpegAvailable: true,
 		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: "2026.07.04",
+		JavaScriptRuntimeAvailable: true, JavaScriptRuntimeVersion: "2.4.5",
 		DownloadDir: dir, Inspector: inspector, Tasks: service, Revealer: revealer,
 	}
 	if mutate != nil {
@@ -169,12 +170,16 @@ func TestHealthIsUnauthenticatedAndMinimal(t *testing.T) {
 		t.Fatalf("status = %d, body=%s", rr.Code, rr.Body.String())
 	}
 	got := decodeObject(t, rr)
-	if len(got) != 5 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true || got["pid"] != float64(os.Getpid()) {
+	if len(got) != 6 || got["ready"] != true || got["version"] != "1.2.3" || got["ffmpeg"] != true || got["pid"] != float64(os.Getpid()) {
 		t.Fatalf("health = %#v", got)
 	}
 	platform, ok := got["platformDownloader"].(map[string]any)
 	if !ok || len(platform) != 2 || platform["available"] != true || platform["version"] != "2026.07.04" {
 		t.Fatalf("platform downloader health = %#v", got["platformDownloader"])
+	}
+	runtimeStatus, ok := got["javascriptRuntime"].(map[string]any)
+	if !ok || len(runtimeStatus) != 2 || runtimeStatus["available"] != true || runtimeStatus["version"] != "2.4.5" {
+		t.Fatalf("JavaScript runtime health = %#v", got["javascriptRuntime"])
 	}
 	if got["pid"].(float64) <= 1 {
 		t.Fatalf("health PID is not a real process: %#v", got)
