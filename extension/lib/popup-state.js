@@ -23,6 +23,12 @@
     canceled: { statusLabel: '已取消', tone: 'muted', canRetry: true },
   };
 
+  const PLATFORM_QUALITY_OPTIONS = [
+    { value: 'best', label: '最佳画质' },
+    { value: '1080', label: '1080P' },
+    { value: '720', label: '720P' },
+  ];
+
   function clampProgress(value) {
     const number = Number(value);
     if (!Number.isFinite(number)) return 0;
@@ -83,23 +89,34 @@
 
   function candidateView(candidate, index) {
     const isHls = candidate && candidate.kind === 'hls';
+    const isPlatform = candidate && candidate.kind === 'platform';
     const width = Number(candidate && candidate.width) || 0;
     const height = Number(candidate && candidate.height) || 0;
+    const providerLabel = candidate && candidate.provider === 'youtube' ? 'YouTube' : '哔哩哔哩';
+    const selectedQuality = PLATFORM_QUALITY_OPTIONS.some((option) => (
+      option.value === (candidate && candidate.selectedQuality)
+    )) ? candidate.selectedQuality : 'best';
     const view = {
       id: `candidate-${index}`,
       url: candidate && typeof candidate.url === 'string' ? candidate.url : '',
-      kind: isHls ? 'hls' : 'mp4',
-      typeLabel: isHls ? 'M3U8' : 'MP4',
+      kind: isPlatform ? 'platform' : (isHls ? 'hls' : 'mp4'),
+      typeLabel: isPlatform ? providerLabel : (isHls ? 'M3U8' : 'MP4'),
       title: shortText(candidate && candidate.title, '未命名视频', 120),
-      detail: width && height ? `${width} × ${height}` : (isHls ? '需要检查可用画质' : '可直接下载'),
+      detail: isPlatform ? '仅支持无需登录即可观看的公开视频'
+        : (width && height ? `${width} × ${height}` : (isHls ? '需要检查可用画质' : '可直接下载')),
       variants: sortHlsVariants(candidate && candidate.variants),
+      qualityOptions: isPlatform ? PLATFORM_QUALITY_OPTIONS.map((option) => ({ ...option })) : [],
+      selectedQuality: isPlatform ? selectedQuality : '',
       inspecting: Boolean(candidate && candidate.inspecting),
       pending: Boolean(candidate && candidate.pending),
       canUse: candidate && typeof candidate.canUse === 'boolean' ? candidate.canUse : true,
       selectedVariant: candidate && typeof candidate.selectedVariant === 'string' ? candidate.selectedVariant : '',
       error: shortText(candidate && candidate.error, '', 80),
+      blockedReason: shortText(candidate && candidate.blockedReason, '', 80),
     };
-    if (candidate && candidate.blockedReason) view.detail = shortText(candidate.blockedReason, view.detail, 80);
+    if (!isPlatform && candidate && candidate.blockedReason) {
+      view.detail = shortText(candidate.blockedReason, view.detail, 80);
+    }
     return view;
   }
 

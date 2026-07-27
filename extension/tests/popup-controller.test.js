@@ -4,6 +4,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 
 const popupState = require('../lib/popup-state.js');
+const platform = require('../lib/platform.js');
 const { createPopupController } = require('../lib/popup-controller.js');
 
 function deferred() {
@@ -58,7 +59,12 @@ function harness(overrides = {}) {
   const renderer = overrides.renderer || fakeRenderer();
   const scheduler = overrides.scheduler || fakeScheduler();
   const helper = {
-    health: async () => ({ ready: true, version: '0.1.0', ffmpeg: true }),
+    health: async () => ({
+      ready: true,
+      version: '0.2.0',
+      ffmpeg: true,
+      platformDownloader: { available: true, version: '2026.07.04' },
+    }),
     listTasks: async () => [],
     inspect: async () => ({ mediaType: 'hls', variants: [] }),
     createTask: async (spec) => ({ id: 'created', title: spec.title, status: 'queued', progress: 0 }),
@@ -79,6 +85,7 @@ function harness(overrides = {}) {
     renderer,
     scheduler,
     viewState: popupState,
+    platformQualityOptions: platform.QUALITY_OPTIONS,
     connectedPollMs: 1200,
     disconnectedPollMs: 5000,
   });
@@ -327,4 +334,140 @@ test('health ffmpeg=false leaves MP4 usable but blocks HLS inspect and download'
   await controller.downloadCandidate(mp4URL);
   assert.equal(inspectCalls, 0);
   assert.equal(createCalls, 1);
+});
+
+test('platform candidate defaults to best, skips inspection, and sends the selected fixed quality', async () => {
+  const candidateURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  const createdSpecs = [];
+  let inspectCalls = 0;
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: candidateURL,
+        candidates: [{
+          url: candidateURL,
+          kind: 'platform',
+          provider: 'youtube',
+          title: '页面标题',
+        }],
+      }),
+    },
+    helper: {
+      inspect: async () => { inspectCalls += 1; return {}; },
+      createTask: async (spec) => {
+        createdSpecs.push(spec);
+        return { id: 'platform-task', title: spec.title, status: 'queued', progress: 0 };
+      },
+    },
+  });
+  await controller.refreshCandidates();
+  await controller.refreshTasks();
+
+  const candidate = renderer.candidates.at(-1).candidates[0];
+  assert.equal(candidate.selectedQuality, 'best');
+  assert.deepEqual(candidate.qualityOptions, platform.QUALITY_OPTIONS);
+  assert.equal(await controller.inspectCandidate(candidateURL), null);
+  assert.equal(inspectCalls, 0);
+  assert.equal(controller.selectQuality(candidateURL, '1080'), true);
+  assert.equal(controller.selectQuality(candidateURL, '2160'), false);
+
+  await controller.downloadCandidate(candidateURL);
+
+  assert.deepEqual(createdSpecs, [{
+    url: candidateURL,
+    title: '页面标题',
+    mediaType: 'platform',
+    quality: '1080',
+  }]);
+});
+
+test('platform availability requires both the bundled downloader and FFmpeg without blocking MP4', async () => {
+  const platformURL = 'https://www.bilibili.com/video/BV1K3Gz6pEoo';
+  const mp4URL = 'https://cdn.example/video.mp4';
+  const healthResults = [
+    { ready: true, ffmpeg: true, platformDownloader: { available: false, version: '' } },
+    { ready: true, ffmpeg: false, platformDownloader: { available: true, version: '2026.07.04' } },
+  ];
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: platformURL,
+        candidates: [
+          { url: platformURL, kind: 'platform', provider: 'bilibili', title: 'B站视频' },
+          { url: mp4URL, kind: 'mp4', title: 'MP4' },
+        ],
+      }),
+    },
+    helper: { health: async () => healthResults.shift(), listTasks: async () => [] },
+  });
+  await controller.refreshCandidates();
+
+  await controller.refreshTasks();
+  let candidates = renderer.candidates.at(-1).candidates;
+  assert.equal(candidates.find((item) => item.url === platformURL).canUse, false);
+  assert.match(candidates.find((item) => item.url === platformURL).blockedReason, /解析器/);
+  assert.equal(candidates.find((item) => item.url === mp4URL).canUse, true);
+
+  await controller.refreshTasks();
+  candidates = renderer.candidates.at(-1).candidates;
+  assert.equal(candidates.find((item) => item.url === platformURL).canUse, false);
+  assert.match(candidates.find((item) => item.url === platformURL).blockedReason, /FFmpeg/);
+  assert.equal(candidates.find((item) => item.url === mp4URL).canUse, true);
+});
+
+test('HLS selection remains a variant URL and never becomes a platform quality value', async () => {
+  const candidateURL = 'https://cdn.example/master.m3u8';
+  const variantURL = 'https://cdn.example/720.m3u8';
+  const createdSpecs = [];
+  const { controller } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: 'https://example.com/watch',
+        candidates: [{
+          url: candidateURL,
+          kind: 'hls',
+          title: 'HLS',
+          variants: [{ url: variantURL, label: '720p', height: 720 }],
+        }],
+      }),
+    },
+    helper: {
+      createTask: async (spec) => {
+        createdSpecs.push(spec);
+        return { id: 'hls-task', title: spec.title, status: 'queued', progress: 0 };
+      },
+    },
+  });
+  await controller.refreshCandidates();
+  await controller.refreshTasks();
+
+  assert.equal(controller.selectQuality(candidateURL, '1080'), false);
+  assert.equal(controller.selectVariant(candidateURL, variantURL), true);
+  await controller.downloadCandidate(candidateURL);
+
+  assert.deepEqual(createdSpecs, [{ url: variantURL, title: 'HLS', mediaType: 'hls' }]);
+});
+
+test('rescan preserves platform quality and focused control when the canonical page URL remains', async () => {
+  const candidateURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  let scans = 0;
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: candidateURL,
+        candidates: [{ url: candidateURL, kind: 'platform', provider: 'youtube', title: '视频' }],
+      }),
+      rescan: async () => { scans += 1; return { ok: true }; },
+    },
+  });
+  await controller.refreshCandidates();
+  controller.selectQuality(candidateURL, '720');
+  controller.focusCandidate(candidateURL, 'quality');
+
+  await controller.rescan();
+
+  assert.equal(scans, 1);
+  const latest = renderer.candidates.at(-1);
+  assert.equal(latest.candidates[0].selectedQuality, '720');
+  assert.deepEqual(latest.focusedCandidate, { url: candidateURL, control: 'quality' });
 });

@@ -13,6 +13,19 @@
     const bridge = settings.bridge;
     const renderer = settings.renderer;
     const viewState = settings.viewState;
+    const defaultPlatformQualityOptions = [
+      { value: 'best', label: '最佳画质' },
+      { value: '1080', label: '1080P' },
+      { value: '720', label: '720P' },
+    ];
+    const configuredQualityOptions = Array.isArray(settings.platformQualityOptions)
+      ? settings.platformQualityOptions : [];
+    const platformQualityOptions = defaultPlatformQualityOptions.map((fallback, index) => {
+      const configured = configuredQualityOptions[index];
+      return configured && configured.value === fallback.value && typeof configured.label === 'string'
+        ? { value: fallback.value, label: configured.label }
+        : { ...fallback };
+    });
     const scheduler = settings.scheduler || {
       setTimeout: globalThis.setTimeout.bind(globalThis),
       clearTimeout: globalThis.clearTimeout.bind(globalThis),
@@ -22,12 +35,14 @@
     const model = {
       connection: 'connecting',
       ffmpegAvailable: null,
+      platformDownloaderAvailable: null,
       scanning: false,
       candidates: [],
       tasks: [],
       pageUrl: '',
     };
     const selectedVariants = new Map();
+    const selectedQualities = new Map();
     const candidateOperations = new Map();
     const taskOperations = new Map();
     const pendingCandidates = new Set();
@@ -41,24 +56,39 @@
     let stopped = false;
 
     function capabilityKey() {
-      return `${model.connection}:${String(model.ffmpegAvailable)}`;
+      return `${model.connection}:${String(model.ffmpegAvailable)}:${String(model.platformDownloaderAvailable)}`;
     }
 
     function candidateModels() {
       return model.candidates.map((candidate) => {
         const hlsBlocked = candidate.kind === 'hls' && model.ffmpegAvailable === false;
+        const platformParserBlocked = candidate.kind === 'platform'
+          && model.platformDownloaderAvailable === false;
+        const platformFFmpegBlocked = candidate.kind === 'platform' && model.ffmpegAvailable === false;
         const variants = viewState.sortHlsVariants(candidate.variants);
         const selected = selectedVariants.get(candidate.url);
         const validSelection = variants.some((variant) => variant.url === selected) ? selected : '';
         const selectedVariant = validSelection || (variants[0] && variants[0].url) || '';
         if (selectedVariant) selectedVariants.set(candidate.url, selectedVariant);
+        const quality = selectedQualities.get(candidate.url);
+        const selectedQuality = platformQualityOptions.some((option) => option.value === quality)
+          ? quality : 'best';
+        if (candidate.kind === 'platform') selectedQualities.set(candidate.url, selectedQuality);
+        let blockedReason = '';
+        if (hlsBlocked) blockedReason = '未安装 FFmpeg，无法处理 M3U8 视频';
+        else if (platformParserBlocked) blockedReason = '未安装平台解析器，无法下载 YouTube 或哔哩哔哩视频';
+        else if (platformFFmpegBlocked) blockedReason = '未安装 FFmpeg，无法合并平台视频';
         return {
           ...candidate,
           variants,
           selectedVariant,
+          qualityOptions: candidate.kind === 'platform'
+            ? platformQualityOptions.map((option) => ({ ...option })) : [],
+          selectedQuality: candidate.kind === 'platform' ? selectedQuality : '',
           pending: pendingCandidates.has(candidate.url),
-          canUse: model.connection === 'connected' && !hlsBlocked,
-          blockedReason: hlsBlocked ? '未安装 FFmpeg，无法处理 M3U8 视频' : '',
+          canUse: model.connection === 'connected' && !hlsBlocked
+            && !platformParserBlocked && !platformFFmpegBlocked,
+          blockedReason,
         };
       });
     }
@@ -128,6 +158,9 @@
         for (const url of selectedVariants.keys()) {
           if (!currentURLs.has(url)) selectedVariants.delete(url);
         }
+        for (const url of selectedQualities.keys()) {
+          if (!currentURLs.has(url)) selectedQualities.delete(url);
+        }
         if (focusedCandidate && !currentURLs.has(focusedCandidate.url)) focusedCandidate = null;
         renderCandidates();
         return response;
@@ -142,6 +175,8 @@
         try {
           const health = await helper.health();
           model.ffmpegAvailable = Boolean(health && health.ffmpeg);
+          model.platformDownloaderAvailable = Boolean(health && health.platformDownloader
+            && health.platformDownloader.available);
           const tasks = await helper.listTasks();
           model.connection = 'connected';
           const nextTasks = Array.isArray(tasks) ? tasks : [];
@@ -198,10 +233,18 @@
 
     function selectVariant(candidateURL, variantURL) {
       const candidate = findCandidate(candidateURL);
-      if (!candidate) return false;
+      if (!candidate || candidate.kind !== 'hls') return false;
       const variants = viewState.sortHlsVariants(candidate.variants);
       if (!variants.some((variant) => variant.url === variantURL)) return false;
       selectedVariants.set(candidateURL, variantURL);
+      return true;
+    }
+
+    function selectQuality(candidateURL, quality) {
+      const candidate = findCandidate(candidateURL);
+      if (!candidate || candidate.kind !== 'platform') return false;
+      if (!platformQualityOptions.some((option) => option.value === quality)) return false;
+      selectedQualities.set(candidateURL, quality);
       return true;
     }
 
@@ -222,6 +265,14 @@
       }
       if (candidate.kind === 'hls' && model.ffmpegAvailable === false) {
         setNotice('未安装 FFmpeg，无法下载 M3U8 视频');
+        return true;
+      }
+      if (candidate.kind === 'platform' && model.platformDownloaderAvailable === false) {
+        setNotice('未安装平台解析器，无法下载 YouTube 或哔哩哔哩视频');
+        return true;
+      }
+      if (candidate.kind === 'platform' && model.ffmpegAvailable === false) {
+        setNotice('未安装 FFmpeg，无法合并平台视频');
         return true;
       }
       return false;
@@ -248,7 +299,9 @@
 
     function inspectCandidate(url) {
       const candidate = findCandidate(url);
-      if (!candidate || unavailableForCandidate(candidate)) return Promise.resolve(null);
+      if (!candidate || candidate.kind === 'platform' || unavailableForCandidate(candidate)) {
+        return Promise.resolve(null);
+      }
       return runCandidateOperation(url, async () => {
         candidate.inspecting = true;
         candidate.error = '';
@@ -282,11 +335,17 @@
       }
       return runCandidateOperation(url, async () => {
         try {
-          const task = await helper.createTask({
+          const spec = {
             url: sourceURL,
             title: candidate.title || '未命名视频',
             mediaType: candidate.kind,
-          });
+          };
+          if (candidate.kind === 'platform') {
+            const quality = selectedQualities.get(candidate.url);
+            spec.quality = platformQualityOptions.some((option) => option.value === quality)
+              ? quality : 'best';
+          }
+          const task = await helper.createTask(spec);
           replaceTask(task);
           renderTasks();
           setNotice('已添加到本地下载队列。', 'success');
@@ -372,6 +431,7 @@
       refreshCandidates,
       refreshTasks,
       rescan,
+      selectQuality,
       selectVariant,
       snapshot,
       start,

@@ -209,6 +209,10 @@ h2 {
   box-shadow: 0 1px 2px rgba(23, 33, 30, 0.05);
 }
 
+.candidate-card-platform {
+  border-color: #c8d3ce;
+}
+
 .task-card {
   padding: 10px 11px;
   background: var(--color-task);
@@ -239,6 +243,13 @@ h2 {
   line-height: 1.4;
 }
 
+.card-disabled-detail {
+  margin: 4px 0 0;
+  color: var(--color-warning);
+  font-size: 11px;
+  line-height: 1.4;
+}
+
 .format-badge,
 .status-label {
   display: inline-flex;
@@ -254,6 +265,11 @@ h2 {
 .format-badge {
   color: var(--color-accent);
   background: var(--color-accent-soft);
+}
+
+.candidate-card-platform .format-badge {
+  color: #415d54;
+  background: #e8edeb;
 }
 
 .status-label { color: var(--color-muted); background: #e3e8e6; }
@@ -278,6 +294,13 @@ h2 {
   border-radius: 7px;
   background: var(--color-surface);
 }
+
+.quality-select:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.platform-quality-select { max-width: 178px; }
 
 .progress-track {
   height: 4px;

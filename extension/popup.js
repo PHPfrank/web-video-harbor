@@ -4,7 +4,8 @@
   const viewState = globalThis.VideoGrabberPopupState;
   const helperApi = globalThis.VideoGrabberHelper;
   const controllerApi = globalThis.VideoGrabberPopupController;
-  if (!viewState || !helperApi || !controllerApi || typeof chrome === 'undefined') return;
+  const platformApi = globalThis.VideoGrabberPlatform;
+  if (!viewState || !helperApi || !controllerApi || !platformApi || typeof chrome === 'undefined') return;
 
   const helper = helperApi.createHelperClient({ storageLocal: chrome.storage.local });
   const elements = {
@@ -68,9 +69,14 @@
       activeTabId = tab.id;
       const response = await runtimeMessage({ type: 'GET_TAB_MEDIA', tabId: activeTabId });
       if (!response || !response.ok) throw new Error('无法读取页面中的视频');
+      const candidates = Array.isArray(response.candidates) ? response.candidates : [];
+      const platformCandidate = platformApi.candidateForPage({ url: tab.url, title: tab.title });
+      const combinedCandidates = platformCandidate
+        && !candidates.some((candidate) => candidate && candidate.url === platformCandidate.url)
+        ? [platformCandidate, ...candidates] : candidates;
       return {
         pageUrl: response.pageUrl || tab.url || '',
-        candidates: Array.isArray(response.candidates) ? response.candidates : [],
+        candidates: combinedCandidates,
       };
     },
     async rescan() {
@@ -83,19 +89,39 @@
 
   function renderCandidate(candidate) {
     const card = makeElement('article', 'candidate-card');
+    if (candidate.kind === 'platform') card.classList.add('candidate-card-platform');
+    card.dataset.kind = candidate.kind;
     candidateURLs.set(card, candidate.url);
     card.setAttribute('aria-busy', String(candidate.pending));
     const top = makeElement('div', 'card-top');
     const copy = makeElement('div');
     copy.append(makeElement('h3', 'card-title', candidate.title));
     copy.append(makeElement('p', 'card-detail', candidate.error || candidate.detail));
+    if (candidate.blockedReason) {
+      copy.append(makeElement('p', 'card-disabled-detail', candidate.blockedReason));
+    }
     top.append(copy, makeElement('span', 'format-badge', candidate.typeLabel));
     card.append(top);
 
     const actions = makeElement('div', 'candidate-actions');
+    if (candidate.kind === 'platform') {
+      const select = makeElement('select', 'quality-select platform-quality-select');
+      select.dataset.control = 'quality';
+      select.dataset.choice = 'platform';
+      select.setAttribute('aria-label', `选择平台视频画质：${candidate.title}`);
+      select.disabled = !candidate.canUse || candidate.pending;
+      for (const quality of candidate.qualityOptions) {
+        const option = makeElement('option', '', quality.label);
+        option.value = quality.value;
+        select.append(option);
+      }
+      select.value = candidate.selectedQuality;
+      actions.append(select);
+    }
     if (candidate.kind === 'hls' && candidate.variants.length) {
       const select = makeElement('select', 'quality-select');
       select.dataset.control = 'quality';
+      select.dataset.choice = 'hls';
       select.setAttribute('aria-label', `选择画质：${candidate.title}`);
       select.disabled = !candidate.canUse || candidate.pending;
       for (const variant of candidate.variants) {
@@ -209,13 +235,22 @@
     },
   };
 
-  controller = controllerApi.createPopupController({ helper, bridge, renderer, viewState });
+  controller = controllerApi.createPopupController({
+    helper,
+    bridge,
+    renderer,
+    viewState,
+    platformQualityOptions: platformApi.QUALITY_OPTIONS,
+  });
 
   elements.candidateList.addEventListener('change', function onQualityChange(event) {
     const select = event.target.closest('select[data-control="quality"]');
     const card = select && select.closest('.candidate-card');
     const url = card && candidateURLs.get(card);
-    if (select && url) controller.selectVariant(url, select.value);
+    if (select && url) {
+      if (select.dataset.choice === 'platform') controller.selectQuality(url, select.value);
+      else controller.selectVariant(url, select.value);
+    }
   });
 
   elements.candidateList.addEventListener('focusin', function onCandidateFocus(event) {

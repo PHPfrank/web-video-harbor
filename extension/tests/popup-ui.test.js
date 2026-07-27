@@ -53,6 +53,26 @@ test('popup controller covers scan, inspect, download, polling, and task actions
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
 });
 
+test('popup prepends one canonical platform page candidate while keeping captured media', () => {
+  const javascript = source('popup.js');
+
+  assert.match(javascript, /VideoGrabberPlatform/);
+  assert.match(javascript, /candidateForPage\s*\(\s*\{\s*url:\s*tab\.url,\s*title:\s*tab\.title\s*\}\s*\)/s);
+  assert.match(javascript, /platformCandidate/);
+  assert.match(javascript, /candidates\.some\s*\(/);
+  assert.match(javascript, /\[platformCandidate,\s*\.\.\.candidates\]/);
+});
+
+test('popup renders separate fixed platform-quality values and safe text-only titles', () => {
+  const javascript = source('popup.js');
+
+  assert.match(javascript, /candidate\.kind\s*===\s*['"]platform['"]/);
+  assert.match(javascript, /candidate\.qualityOptions/);
+  assert.match(javascript, /controller\.selectQuality\s*\(/);
+  assert.match(javascript, /makeElement\(['"]h3['"],\s*['"]card-title['"],\s*candidate\.title\)/);
+  assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
+});
+
 test('options page stores only a token locally and offers connection testing and privacy guidance', () => {
   const html = source('options.html');
   const javascript = source('options.js');

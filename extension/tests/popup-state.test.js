@@ -46,6 +46,42 @@ test('candidate view distinguishes MP4 and HLS and keeps useful metadata', () =>
   assert.equal(view.canDownload, true);
 });
 
+test('platform candidate uses its provider label and fixed public-video guidance', () => {
+  const view = state.buildViewModel({
+    connection: 'connected',
+    candidates: [
+      {
+        url: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+        kind: 'platform',
+        provider: 'youtube',
+        title: '<img src=x onerror=alert(1)>',
+        qualityOptions: [
+          { value: 'best', label: '最佳画质' },
+          { value: '1080', label: '1080P' },
+          { value: '720', label: '720P' },
+        ],
+        selectedQuality: 'best',
+      },
+      {
+        url: 'https://www.bilibili.com/video/BV1K3Gz6pEoo',
+        kind: 'platform',
+        provider: 'bilibili',
+        title: 'B站视频',
+      },
+    ],
+  });
+
+  assert.deepEqual(view.candidates.map((item) => item.typeLabel), ['YouTube', '哔哩哔哩']);
+  assert.deepEqual(view.candidates.map((item) => item.detail), [
+    '仅支持无需登录即可观看的公开视频',
+    '仅支持无需登录即可观看的公开视频',
+  ]);
+  assert.equal(view.candidates[0].kind, 'platform');
+  assert.equal(view.candidates[0].selectedQuality, 'best');
+  assert.deepEqual(view.candidates[0].qualityOptions.map((item) => item.value), ['best', '1080', '720']);
+  assert.equal(view.candidates[0].title, '<img src=x onerror=alert(1)>');
+});
+
 test('HLS variants sort by height then bandwidth without mutating input', () => {
   const variants = [
     { url: 'https://cdn.example/720-low.m3u8', label: '720p', height: 720, bandwidth: 1800000 },
