@@ -2463,6 +2463,7 @@ func TestBuildArgsUsesOnlyFixedSafeArgumentArray(t *testing.T) {
 		"--ignore-config",
 		"--no-plugin-dirs",
 		"--no-playlist",
+		"--js-runtimes", "deno:" + runner.runtimePath,
 		"--newline",
 		"--no-colors",
 		"--progress",
@@ -2725,6 +2726,9 @@ func TestNewValidatesRequiredPathsWithoutLeakingRequestData(t *testing.T) {
 	}{
 		{name: "empty binary", mutate: func(config *Config) { config.BinaryPath = "" }},
 		{name: "missing executable snapshot", mutate: func(config *Config) { config.ExecutableSnapshot = nil }},
+		{name: "empty runtime", mutate: func(config *Config) { config.RuntimePath = "" }},
+		{name: "missing runtime snapshot", mutate: func(config *Config) { config.RuntimeSnapshot = nil }},
+		{name: "relative runtime", mutate: func(config *Config) { config.RuntimePath = "deno" }},
 		{name: "relative binary", mutate: func(config *Config) { config.BinaryPath = "yt-dlp" }},
 		{name: "unclean binary", mutate: func(config *Config) { config.BinaryPath += "/../yt-dlp" }},
 		{name: "empty ffmpeg", mutate: func(config *Config) { config.FFmpegPath = "" }},
@@ -2806,11 +2810,22 @@ func testConfig(t *testing.T) Config {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = snapshot.Close() })
+	runtimeSourcePath := filepath.Join(sourceRoot, "deno-source")
+	if err := os.WriteFile(runtimeSourcePath, []byte("trusted runtime bytes"), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	runtimeSnapshot, err := createExecutableSnapshot(runtimeSourcePath, "deno_macos_arm64")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtimeSnapshot.Close() })
 	return Config{
 		BinaryPath:         snapshot.Path(),
+		RuntimePath:        runtimeSnapshot.Path(),
 		FFmpegPath:         filepath.Join(sourceRoot, "ffmpeg"),
 		OutputDir:          outputRoot,
 		ExecutableSnapshot: snapshot,
+		RuntimeSnapshot:    runtimeSnapshot,
 	}
 }
 

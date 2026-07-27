@@ -104,10 +104,12 @@ func (e *Error) Unwrap() error { return e.cause }
 // Config contains only fixed local paths and an optional progress callback.
 type Config struct {
 	BinaryPath         string
+	RuntimePath        string
 	FFmpegPath         string
 	OutputDir          string
 	OnProgress         ProgressFunc
 	ExecutableSnapshot *ExecutableSnapshot
+	RuntimeSnapshot    *ExecutableSnapshot
 }
 
 // Request identifies one canonical supported platform video page.
@@ -120,10 +122,12 @@ type Request struct {
 // Runner holds the validated inputs needed to build one fixed argument array.
 type Runner struct {
 	binaryPath                  string
+	runtimePath                 string
 	ffmpegPath                  string
 	outputDir                   string
 	outputInfo                  os.FileInfo
 	executableSnapshot          *ExecutableSnapshot
+	runtimeSnapshot             *ExecutableSnapshot
 	onProgress                  ProgressFunc
 	commandFactory              commandFactory
 	removeTree                  func(*os.File) error
@@ -150,13 +154,17 @@ type privateDirectoryOps struct {
 // without executing either binary. The caller remains responsible for
 // authenticating the binary files before construction.
 func New(config Config) (*Runner, error) {
-	if !validConfiguredPathSyntax(config.BinaryPath) || !validConfiguredPathSyntax(config.FFmpegPath) {
+	if !validConfiguredPathSyntax(config.BinaryPath) || !validConfiguredPathSyntax(config.RuntimePath) ||
+		!validConfiguredPathSyntax(config.FFmpegPath) {
 		return nil, errInvalidConfig
 	}
 	if !validConfiguredPathSyntax(config.OutputDir) {
 		return nil, errInvalidConfig
 	}
 	if config.ExecutableSnapshot == nil || config.BinaryPath != config.ExecutableSnapshot.Path() || config.ExecutableSnapshot.Verify() != nil {
+		return nil, errInvalidConfig
+	}
+	if config.RuntimeSnapshot == nil || config.RuntimePath != config.RuntimeSnapshot.Path() || config.RuntimeSnapshot.Verify() != nil {
 		return nil, errInvalidConfig
 	}
 	outputRoot, info, err := openConfiguredOutputRoot(config.OutputDir, nil)
@@ -167,10 +175,12 @@ func New(config Config) (*Runner, error) {
 
 	return &Runner{
 		binaryPath:         config.BinaryPath,
+		runtimePath:        config.RuntimePath,
 		ffmpegPath:         config.FFmpegPath,
 		outputDir:          config.OutputDir,
 		outputInfo:         info,
 		executableSnapshot: config.ExecutableSnapshot,
+		runtimeSnapshot:    config.RuntimeSnapshot,
 		onProgress:         config.OnProgress,
 		commandFactory:     defaultCommandFactory,
 		removeTree:         removeDirectoryContents,
@@ -204,6 +214,14 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		return "", runError(CodeProcess)
 	}
 	defer releaseSnapshot()
+	if r.runtimeSnapshot == nil {
+		return "", runError(CodeProcess)
+	}
+	releaseRuntime, err := r.runtimeSnapshot.acquire()
+	if err != nil {
+		return "", runError(CodeProcess)
+	}
+	defer releaseRuntime()
 
 	outputRoot, _, err := openConfiguredOutputRoot(r.outputDir, r.outputInfo)
 	if err != nil {
@@ -264,6 +282,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 			return "", runError(CodeProcess)
 		}
 	}
+	if r.runtimeSnapshot == nil || r.runtimeSnapshot.Verify() != nil {
+		return "", runError(CodeProcess)
+	}
 	command := r.commandFactory(r.binaryPath, args, minimalEnvironment())
 	command.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	command.WaitDelay = outputDrainGrace
@@ -306,6 +327,12 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 			diagnosticWriter.finish()
 			return "", runError(CodeProcess)
 		}
+	}
+	if r.runtimeSnapshot == nil || r.runtimeSnapshot.Verify() != nil {
+		_ = terminateProcessGroup(command.Process.Pid, waitResult)
+		progressWriter.finish()
+		diagnosticWriter.finish()
+		return "", runError(CodeProcess)
 	}
 	var waitErr error
 	canceled := false
@@ -1262,6 +1289,7 @@ func (r *Runner) buildArgs(request Request, stagingDir string) ([]string, error)
 		"--ignore-config",
 		"--no-plugin-dirs",
 		"--no-playlist",
+		"--js-runtimes", "deno:" + r.runtimePath,
 		"--newline",
 		"--no-colors",
 		"--progress",
