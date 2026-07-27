@@ -17,7 +17,7 @@
   const TASKS = {
     queued: { statusLabel: '等待中', tone: 'active', canCancel: true },
     downloading: { statusLabel: '下载中', tone: 'active', canCancel: true },
-    merging: { statusLabel: '正在合并', tone: 'active', canCancel: true },
+    merging: { statusLabel: '正在合并音视频', tone: 'active', canCancel: true },
     completed: { statusLabel: '已完成', tone: 'success', canReveal: true },
     failed: { statusLabel: '下载失败', tone: 'danger', canRetry: true },
     canceled: { statusLabel: '已取消', tone: 'muted', canRetry: true },

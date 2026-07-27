@@ -209,10 +209,63 @@ func TestYTDLPHelperProcess(t *testing.T) {
 	case "escaped-pipe-holder-leaf":
 		time.Sleep(30 * time.Second)
 		os.Exit(0)
+	case "orphan-closed-pipes-parent":
+		markerDir := os.Getenv("WVH_FAKE_MARKER_DIR")
+		child := exec.Command(os.Args[0], "-test.run=^TestYTDLPHelperProcess$")
+		child.Env = append(os.Environ(), "WVH_FAKE_YTDLP=1", "WVH_FAKE_MODE=orphan-closed-pipes-leaf", "WVH_FAKE_MARKER_DIR="+markerDir)
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if err := writePIDMarker(filepath.Join(markerDir, "child.pid"), child.Process.Pid); err != nil {
+			os.Exit(4)
+		}
+		waitForHelperMarker(filepath.Join(markerDir, "child.ready"))
+		_ = os.WriteFile(filepath.Join(stagingDir, "media.mp4"), []byte("video bytes"), 0o600)
+		os.Exit(0)
+	case "orphan-closed-pipes-leaf":
+		_ = unix.Close(1)
+		_ = unix.Close(2)
+		markerDir := os.Getenv("WVH_FAKE_MARKER_DIR")
+		_ = os.WriteFile(filepath.Join(markerDir, "child.ready"), []byte("ready"), 0o600)
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
+	case "orphan-held-pipes-parent":
+		markerDir := os.Getenv("WVH_FAKE_MARKER_DIR")
+		child := exec.Command(os.Args[0], "-test.run=^TestYTDLPHelperProcess$")
+		child.Env = append(os.Environ(), "WVH_FAKE_YTDLP=1", "WVH_FAKE_MODE=orphan-held-pipes-leaf", "WVH_FAKE_MARKER_DIR="+markerDir)
+		child.Stdout = os.Stdout
+		child.Stderr = os.Stderr
+		if err := child.Start(); err != nil {
+			os.Exit(3)
+		}
+		if err := writePIDMarker(filepath.Join(markerDir, "child.pid"), child.Process.Pid); err != nil {
+			os.Exit(4)
+		}
+		waitForHelperMarker(filepath.Join(markerDir, "child.ready"))
+		_ = os.WriteFile(filepath.Join(stagingDir, "media.mp4"), []byte("video bytes"), 0o600)
+		os.Exit(0)
+	case "orphan-held-pipes-leaf":
+		markerDir := os.Getenv("WVH_FAKE_MARKER_DIR")
+		_ = os.WriteFile(filepath.Join(markerDir, "child.ready"), []byte("ready"), 0o600)
+		time.Sleep(30 * time.Second)
+		os.Exit(0)
 	default:
 		fmt.Fprintln(os.Stderr, "fake helper mode is invalid")
 		os.Exit(2)
 	}
+}
+
+func waitForHelperMarker(path string) {
+	deadline := time.Now().Add(2 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, err := os.Stat(path); err == nil {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
+	os.Exit(5)
 }
 
 func writePIDMarker(path string, pid int) error {
@@ -381,6 +434,44 @@ func TestRunnerCancellationBoundsDrainFromEscapedDescendant(t *testing.T) {
 		t.Fatal("Run() waited without bound for an escaped descendant to close inherited output pipes")
 	}
 	assertNoPlatformStaging(t, config.OutputDir)
+}
+
+func TestRunnerTerminatesSameGroupDescendantAfterSuccessfulParentExit(t *testing.T) {
+	config := testConfig(t)
+	markerDir := t.TempDir()
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("orphan-closed-pipes-parent", []string{"WVH_FAKE_MARKER_DIR=" + markerDir})
+
+	path, err := runner.Run(context.Background(), validRequest("正常退出孤儿清理"))
+	childPID := waitForPIDFile(t, filepath.Join(markerDir, "child.pid"))
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	if err != nil || path == "" {
+		t.Fatalf("Run() = (%q, %v), want successful published output", path, err)
+	}
+	assertProcessGone(t, childPID)
+}
+
+func TestRunnerTerminatesSameGroupDescendantAfterWaitDelay(t *testing.T) {
+	config := testConfig(t)
+	markerDir := t.TempDir()
+	runner, err := New(config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commandFactory = fakeCommandFactory("orphan-held-pipes-parent", []string{"WVH_FAKE_MARKER_DIR=" + markerDir})
+
+	started := time.Now()
+	_, err = runner.Run(context.Background(), validRequest("管道超时孤儿清理"))
+	childPID := waitForPIDFile(t, filepath.Join(markerDir, "child.pid"))
+	t.Cleanup(func() { _ = syscall.Kill(childPID, syscall.SIGKILL) })
+	assertRunnerCode(t, err, CodeProcess)
+	if elapsed := time.Since(started); elapsed > 2*time.Second {
+		t.Fatalf("Run() exceeded bounded WaitDelay cleanup: %v", elapsed)
+	}
+	assertProcessGone(t, childPID)
 }
 
 func TestConfirmProcessGroupExitPollsUntilGoneAndStaysBounded(t *testing.T) {

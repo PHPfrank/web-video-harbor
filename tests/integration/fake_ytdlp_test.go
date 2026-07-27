@@ -85,6 +85,7 @@ print -- $'WVH_PROGRESS:"audio-140"\t10%'
   -t 2 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
   -c:a aac -b:a 64k "$staging_dir/media.mp4"
 print -- $'WVH_PROGRESS:"audio-140"\t100%'
+/bin/sleep 0.15
 `
 	if err := os.WriteFile(fakePath, []byte(script), 0o700); err != nil {
 		t.Fatalf("write fake platform downloader: %v", err)

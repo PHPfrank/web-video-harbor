@@ -306,42 +306,69 @@ try {
   }
 
   await cdp.send('Target.closeTarget', { targetId: popupTarget.targetId });
+  async function activateOfflineYouTube(videoURL, description) {
+    const target = await cdp.send('Target.createTarget', { url: videoURL, background: false });
+    await cdp.send('Target.activateTarget', { targetId: target.targetId });
+    await poll(description, async () => {
+      const targets = await currentTargets(cdp);
+      const current = targets.find((item) => item.targetId === target.targetId);
+      return current && current.url === videoURL ? current : null;
+    }, 15000);
+    return target;
+  }
+  async function openPlatformPopup(description) {
+    const target = await cdp.send('Target.createTarget', { url: `${extensionBase}/popup.html`, background: true });
+    const session = await attach(cdp, target.targetId);
+    const view = await poll(description, async () => {
+      const state = await evaluate(cdp, session, `({
+        text: document.body ? document.body.innerText : '',
+        cards: document.querySelectorAll('.candidate-card').length,
+        platformCards: document.querySelectorAll('.candidate-card-platform').length,
+        options: Array.from(document.querySelectorAll('.platform-quality-select option')).map((option) => option.value),
+        connected: document.body ? document.body.innerText.includes('本地助手已连接') : false
+      })`);
+      return state && state.connected && state.cards === 1 && state.platformCards === 1 ? state : null;
+    }, 15000);
+    return { target, session, view };
+  }
+  async function clickPlatformDownload(session) {
+    return evaluate(cdp, session, `(() => {
+      const card = document.querySelector('.candidate-card-platform');
+      const select = card?.querySelector('.platform-quality-select');
+      const button = card?.querySelector('button[data-action="download"]');
+      if (!select || !button || button.disabled) return false;
+      select.value = '720';
+      select.dispatchEvent(new Event('change', { bubbles: true }));
+      if (select.value !== '720') return false;
+      button.click();
+      return true;
+    })()`);
+  }
+  async function clickTaskAction(session, action, statusLabel, taskTitle, description) {
+    return poll(description, () => evaluate(cdp, session, `(() => {
+      const cards = Array.from(document.querySelectorAll('.task-card'));
+      const matches = cards.filter((candidate) => (
+        candidate.querySelector('.card-title')?.textContent === ${JSON.stringify(taskTitle)}
+        && candidate.querySelector('.status-label')?.textContent === ${JSON.stringify(statusLabel)}
+      ));
+      const card = matches[matches.length - 1];
+      const button = card?.querySelector('button[data-action="${action}"]');
+      if (!button || button.disabled) return false;
+      button.click();
+      return true;
+    })()`), 15000);
+  }
+
   const youtubeURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
-  const youtubeTarget = await cdp.send('Target.createTarget', { url: youtubeURL, background: false });
-  await cdp.send('Target.activateTarget', { targetId: youtubeTarget.targetId });
-  await poll('offline YouTube watch target', async () => {
-    const targets = await currentTargets(cdp);
-    const target = targets.find((item) => item.targetId === youtubeTarget.targetId);
-    return target && target.url === youtubeURL ? target : null;
-  }, 15000);
+  const youtubeTarget = await activateOfflineYouTube(youtubeURL, 'offline YouTube watch target');
 
   const beforePlatformTaskIDs = new Set((await helperTasks()).map((task) => task.id));
-  const platformPopupTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/popup.html`, background: true });
-  const platformPopupSession = await attach(cdp, platformPopupTarget.targetId);
-  const platformView = await poll('YouTube-only platform card', async () => {
-    const state = await evaluate(cdp, platformPopupSession, `({
-      text: document.body ? document.body.innerText : '',
-      cards: document.querySelectorAll('.candidate-card').length,
-      platformCards: document.querySelectorAll('.candidate-card-platform').length,
-      options: Array.from(document.querySelectorAll('.platform-quality-select option')).map((option) => option.value),
-      connected: document.body ? document.body.innerText.includes('本地助手已连接') : false
-    })`);
-    return state && state.connected && state.cards === 1 && state.platformCards === 1 ? state : null;
-  }, 15000);
+  const { target: platformPopupTarget, session: platformPopupSession, view: platformView } =
+    await openPlatformPopup('YouTube-only platform card');
   assert.match(platformView.text, /YouTube/);
   assert.deepEqual(platformView.options, ['best', '1080', '720']);
 
-  const platformClicked = await evaluate(cdp, platformPopupSession, `(() => {
-    const card = document.querySelector('.candidate-card-platform');
-    const select = card?.querySelector('.platform-quality-select');
-    const button = card?.querySelector('button[data-action="download"]');
-    if (!select || !button || button.disabled) return false;
-    select.value = '720';
-    select.dispatchEvent(new Event('change', { bubbles: true }));
-    if (select.value !== '720') return false;
-    button.click();
-    return true;
-  })()`);
+  const platformClicked = await clickPlatformDownload(platformPopupSession);
   assert.equal(platformClicked, true);
 
   const platformTask = await poll('popup-created YouTube 720P download', async () => {
@@ -356,13 +383,76 @@ try {
     && !path.isAbsolute(platformRelative));
   assert.ok(fs.statSync(platformTask.outputPath).size > 0);
 
+  assert.equal(await clickTaskAction(
+    platformPopupSession, 'reveal', '已完成', platformTask.title, 'completed platform reveal action'), true);
+  await poll('platform reveal action completion', () => evaluate(cdp, platformPopupSession, `(() => {
+    const card = Array.from(document.querySelectorAll('.task-card')).find((candidate) => (
+      candidate.querySelector('.card-title')?.textContent === ${JSON.stringify(platformTask.title)}
+      && candidate.querySelector('.status-label')?.textContent === '已完成'
+    ));
+    const button = card?.querySelector('button[data-action="reveal"]');
+    return Boolean(button && !button.disabled);
+  })()`));
+  await cdp.send('Target.closeTarget', { targetId: platformPopupTarget.targetId });
+
+  const cancelURL = 'https://www.youtube.com/watch?v=cancel12345';
+  const cancelTarget = await activateOfflineYouTube(cancelURL, 'offline platform cancel target');
+  const beforeCancelTaskIDs = new Set((await helperTasks()).map((task) => task.id));
+  const { target: cancelPopupTarget, session: cancelPopupSession } =
+    await openPlatformPopup('platform cancel popup');
+  assert.equal(await clickPlatformDownload(cancelPopupSession), true);
+  const cancelTask = await poll('popup-created cancelable platform task', async () => {
+    const created = (await helperTasks()).filter((task) => !beforeCancelTaskIDs.has(task.id));
+    return created.find((task) => task.url === cancelURL && task.status === 'downloading') || null;
+  }, 15000);
+  assert.equal(await clickTaskAction(
+    cancelPopupSession, 'cancel', '下载中', cancelTask.title, 'platform cancel action'), true);
+  await poll('popup-canceled platform task', async () => {
+    const task = (await helperTasks()).find((item) => item.id === cancelTask.id);
+    return task && task.status === 'canceled' ? task : null;
+  }, 15000);
+  await cdp.send('Target.closeTarget', { targetId: cancelPopupTarget.targetId });
+  await cdp.send('Target.closeTarget', { targetId: cancelTarget.targetId });
+
+  const retryURL = 'https://www.youtube.com/watch?v=retry123456';
+  const retryTarget = await activateOfflineYouTube(retryURL, 'offline platform retry target');
+  const beforeRetryTaskIDs = new Set((await helperTasks()).map((task) => task.id));
+  const { target: retryPopupTarget, session: retryPopupSession } =
+    await openPlatformPopup('platform retry popup');
+  assert.equal(await clickPlatformDownload(retryPopupSession), true);
+  const failedRetryTask = await poll('popup-created failed platform task', async () => {
+    const created = (await helperTasks()).filter((task) => !beforeRetryTaskIDs.has(task.id));
+    return created.find((task) => task.url === retryURL && task.status === 'failed') || null;
+  }, 15000);
+  assert.equal(await clickTaskAction(
+    retryPopupSession, 'retry', '下载失败', failedRetryTask.title, 'platform retry action'), true);
+  const retriedPlatformTask = await poll('popup-retried platform task', async () => {
+    const created = (await helperTasks()).filter((task) => (
+      !beforeRetryTaskIDs.has(task.id) && task.id !== failedRetryTask.id
+    ));
+    if (created.some((task) => task.status === 'failed' || task.status === 'canceled')) {
+      throw new Error(`platform popup retry failed: ${JSON.stringify(created.map((task) => ({ status: task.status, code: task.errorCode })))}`);
+    }
+    return created.find((task) => task.url === retryURL && task.status === 'completed') || null;
+  }, 25000);
+  assert.ok(fs.statSync(retriedPlatformTask.outputPath).size > 0);
+  await cdp.send('Target.closeTarget', { targetId: retryPopupTarget.targetId });
+  await cdp.send('Target.closeTarget', { targetId: retryTarget.targetId });
+  await cdp.send('Target.closeTarget', { targetId: youtubeTarget.targetId });
+
   evidence = {
     status: 'passed',
     browser: version.product,
     extension: { id: loaded.id, name: extension.name, version: extension.version, enabled: extension.enabled },
     targets: { serviceWorker: serviceWorker.url, popup: `${extensionBase}/popup.html`, fixture: `${fixtureURL}/` },
     candidates: discovered.map((candidate) => ({ kind: candidate.kind, path: new URL(candidate.url).pathname })),
-    outputs: { direct: directTask.outputPath, hls: hlsTask.outputPath, platform: platformTask.outputPath },
+    outputs: {
+      direct: directTask.outputPath,
+      hls: hlsTask.outputPath,
+      platform: platformTask.outputPath,
+      platform_retry: retriedPlatformTask.outputPath,
+    },
+    actions: { canceled: true, retried: true, revealed: true },
     artifacts: { snapshotPath, screenshotPath, chromeLogPath, profileDir },
   };
   fs.writeFileSync(resultsPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });

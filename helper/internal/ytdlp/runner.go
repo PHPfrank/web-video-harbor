@@ -315,6 +315,9 @@ func (r *Runner) Run(ctx context.Context, request Request) (path string, returnE
 		canceled = true
 		waitErr = terminateProcessGroup(command.Process.Pid, waitResult)
 	}
+	if !terminateOrphanedProcessGroup(command.Process.Pid) && waitErr == nil {
+		waitErr = errors.New("platform process group remained active")
+	}
 	progressWriter.finish()
 	diagnosticWriter.finish()
 	if canceled || ctx.Err() != nil {

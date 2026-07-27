@@ -248,8 +248,10 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	})
 	platformTask, platformStatuses := waitForLifecycle(t, helperURL, platformTask, 20*time.Second)
 	assertCompletedOutput(t, platformTask, downloadDir)
-	if !platformStatuses[tasks.Queued] || !platformStatuses[tasks.Downloading] || !platformStatuses[tasks.Completed] {
-		t.Fatalf("platform lifecycle missing status: %#v", platformStatuses)
+	for _, status := range []tasks.Status{tasks.Queued, tasks.Downloading, tasks.Merging, tasks.Completed} {
+		if !platformStatuses[status] {
+			t.Fatalf("platform lifecycle did not expose %q: %#v", status, platformStatuses)
+		}
 	}
 	revealResponse := postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformTask.ID)+"/reveal")
 	var revealResult map[string]bool
@@ -314,7 +316,13 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		t.Fatalf("write smoke results: %v", err)
 	}
 	runExtensionHelperFallback(t, repoRoot, fixture.URL, downloadDir)
-	runChromeExtensionSmoke(t, repoRoot, fixture.URL, downloadDir)
+	chromePlatformPath := runChromeExtensionSmoke(t, repoRoot, fixture.URL, downloadDir)
+	if chromePlatformPath != "" {
+		revealed := revealer.Paths()
+		if len(revealed) != 2 || revealed[1] != chromePlatformPath {
+			t.Fatalf("Chrome popup reveal mismatch: paths=%v platform=%q", revealed, chromePlatformPath)
+		}
+	}
 }
 
 func startFixedHelperServer(t *testing.T, helperAPI *api.Server) string {
@@ -362,14 +370,14 @@ func runExtensionHelperFallback(t *testing.T, repoRoot, fixtureURL, downloadDir 
 	}
 }
 
-func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir string) {
+func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir string) string {
 	t.Helper()
 	chromePath := os.Getenv("SMOKE_CHROME_PATH")
 	browserRoot := os.Getenv("SMOKE_BROWSER_ROOT")
 	resultsPath := os.Getenv("SMOKE_BROWSER_RESULTS_PATH")
 	if chromePath == "" || browserRoot == "" || resultsPath == "" {
 		t.Log("Chrome CDP smoke skipped: browser environment was not provided")
-		return
+		return ""
 	}
 	logPath := filepath.Join(browserRoot, "chrome-smoke-run.log")
 	pidPath := filepath.Join(browserRoot, fmt.Sprintf("chrome-%d-%d.pid", os.Getpid(), time.Now().UnixNano()))
@@ -393,6 +401,28 @@ func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir str
 	if err != nil {
 		t.Fatalf("Chrome CDP extension smoke: %v; output=%s", err, output)
 	}
+	var evidence struct {
+		Outputs map[string]string `json:"outputs"`
+		Actions struct {
+			Canceled bool `json:"canceled"`
+			Retried  bool `json:"retried"`
+			Revealed bool `json:"revealed"`
+		} `json:"actions"`
+	}
+	encoded, err := os.ReadFile(resultsPath)
+	if err != nil {
+		t.Fatalf("read Chrome smoke evidence: %v", err)
+	}
+	if err := json.Unmarshal(encoded, &evidence); err != nil {
+		t.Fatalf("decode Chrome smoke evidence: %v", err)
+	}
+	if !evidence.Actions.Canceled || !evidence.Actions.Retried || !evidence.Actions.Revealed {
+		t.Fatalf("Chrome popup actions were not all verified: %+v", evidence.Actions)
+	}
+	if evidence.Outputs["platform"] == "" || evidence.Outputs["platform_retry"] == "" {
+		t.Fatalf("Chrome platform outputs are incomplete: %v", evidence.Outputs)
+	}
+	return evidence.Outputs["platform"]
 }
 
 func newFixtureServer(t *testing.T, siteRoot, generatedRoot string) *httptest.Server {
@@ -400,6 +430,11 @@ func newFixtureServer(t *testing.T, siteRoot, generatedRoot string) *httptest.Se
 	static := http.FileServer(http.Dir(siteRoot))
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch {
+		case r.URL.Path == "/master.m3u8" || strings.HasSuffix(r.URL.Path, "/index.m3u8"):
+			// Keep the downloading phase observable in lifecycle polling before
+			// the inspector advances the task to merging.
+			time.Sleep(100 * time.Millisecond)
+			static.ServeHTTP(w, r)
 		case r.URL.Path == "/direct.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			http.ServeFile(w, r, filepath.Join(generatedRoot, "direct.mp4"))

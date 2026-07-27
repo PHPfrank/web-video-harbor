@@ -371,6 +371,9 @@ func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
 			percent = 99
 		}
 		_, _ = e.manager.SetProgress(id, percent)
+		if percent == 99 {
+			_, _ = e.manager.Transition(id, tasks.Merging)
+		}
 	})
 	if err != nil {
 		e.fail(id, err)
@@ -398,6 +401,15 @@ func (e *Engine) runPlatform(ctx context.Context, id string, spec JobSpec) {
 	if path == "" {
 		e.fail(id, errors.New("platform runner returned an empty output path"))
 		return
+	}
+	active, getErr := e.manager.Get(id)
+	if getErr != nil {
+		return
+	}
+	if active.Status == tasks.Downloading {
+		if _, transitionErr := e.manager.Transition(id, tasks.Merging); transitionErr != nil {
+			return
+		}
 	}
 	if _, err := e.manager.CompletePublished(id, path); err != nil {
 		e.fail(id, fmt.Errorf("record published platform output: %w", err))

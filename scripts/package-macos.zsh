@@ -64,6 +64,35 @@ fi
 archive_path="$output_dir/$archive_name"
 [[ ! -e "$archive_path" && ! -L "$archive_path" ]] || fail "输出 ZIP 已存在，拒绝覆盖：$archive_path"
 
+stage_run=""
+check_run=""
+temp_archive=""
+cleanup_owned_run_directory() {
+  local owned_path="$1"
+  local parent_root="$2"
+  [[ -n "$owned_path" ]] || return 0
+  [[ "${owned_path:h:A}" == "${parent_root:A}" && "${owned_path:t}" == run.?????? ]] || return 1
+  if [[ -L "$owned_path" ]]; then
+    /bin/rm -f -- "$owned_path"
+    return
+  fi
+  [[ ! -e "$owned_path" || -d "$owned_path" ]] || return 1
+  [[ ! -e "$owned_path" ]] || /bin/rm -rf -- "$owned_path"
+}
+cleanup_publish_temps() {
+  local original_status=$?
+  trap - EXIT INT TERM
+  if [[ -n "$temp_archive" && "${temp_archive:h:A}" == "$output_real" ]]; then
+    /bin/rm -f -- "$temp_archive" || original_status=1
+  fi
+  cleanup_owned_run_directory "$check_run" "$check_work" || original_status=1
+  cleanup_owned_run_directory "$stage_run" "$package_work" || original_status=1
+  return "$original_status"
+}
+trap cleanup_publish_temps EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 "$repo_root/scripts/fetch-yt-dlp.zsh" >/dev/null || fail "无法获取并校验固定平台解析器"
 source "$repo_root/third_party/yt-dlp.env"
 yt_dlp_cache_key="$YTDLP_VERSION"
@@ -262,17 +291,6 @@ validate_package_tree "$stage_root" "staging"
 validate_manifest_and_sources "$stage_root"
 
 temp_archive="$(/usr/bin/mktemp "$output_dir/.web-video-package.XXXXXX")"
-cleanup_publish_temps() {
-  local original_status=$?
-  trap - EXIT INT TERM
-  if [[ -n "${temp_archive:-}" && "${temp_archive:h:A}" == "$output_real" ]]; then
-    rm -f -- "$temp_archive"
-  fi
-  return "$original_status"
-}
-trap cleanup_publish_temps EXIT
-trap 'exit 130' INT
-trap 'exit 143' TERM
 [[ "${temp_archive:h:A}" == "$output_real" ]] || fail "随机 ZIP 临时路径越界"
 rm -f -- "$temp_archive"
 (
@@ -350,6 +368,10 @@ chmod 0644 "$temp_archive"
 /bin/ln "$temp_archive" "$archive_path" || fail "发布 ZIP 失败，可能已有同名文件"
 rm -f -- "$temp_archive"
 temp_archive=""
+cleanup_owned_run_directory "$check_run" "$check_work" || fail "无法清理解包验证目录"
+check_run=""
+cleanup_owned_run_directory "$stage_run" "$package_work" || fail "无法清理 staging 目录"
+stage_run=""
 trap - EXIT INT TERM
 
 archive_size="$(/usr/bin/stat -f '%z' "$archive_path")"

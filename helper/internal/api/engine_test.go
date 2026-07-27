@@ -346,7 +346,7 @@ func TestEnginePlatformEmptySuccessPathFailsSafely(t *testing.T) {
 	}
 }
 
-func TestEnginePlatformProgressIsMonotonicAndStopsAt99BeforeCompletion(t *testing.T) {
+func TestEnginePlatformProgressIsMonotonicAndEntersMergingAt99BeforeCompletion(t *testing.T) {
 	manager := tasks.NewManager()
 	progressReady := make(chan struct{})
 	release := make(chan struct{})
@@ -382,8 +382,8 @@ func TestEnginePlatformProgressIsMonotonicAndStopsAt99BeforeCompletion(t *testin
 	if err != nil {
 		t.Fatal(err)
 	}
-	if active.Status != tasks.Downloading {
-		t.Fatalf("status before output = %q", active.Status)
+	if active.Status != tasks.Merging {
+		t.Fatalf("status before output = %q, want %q", active.Status, tasks.Merging)
 	}
 	close(release)
 	waitStatus(t, manager, task.ID, tasks.Completed)

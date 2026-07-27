@@ -133,7 +133,7 @@ test('task lifecycle maps to concise Chinese status and valid actions', () => {
   const cases = [
     ['queued', '等待中', true, false, false],
     ['downloading', '下载中', true, false, false],
-    ['merging', '正在合并', true, false, false],
+    ['merging', '正在合并音视频', true, false, false],
     ['completed', '已完成', false, false, true],
     ['failed', '下载失败', false, true, false],
     ['canceled', '已取消', false, true, false],

@@ -173,14 +173,14 @@ func runVersionCommand(ctx context.Context, path string, args ...string) ([]byte
 	return stdout.buffer.Bytes(), nil
 }
 
-func terminateOrphanedProcessGroup(pid int) {
-	if !processGroupExists(pid) {
-		return
+func terminateOrphanedProcessGroup(pid int) bool {
+	if pid <= 1 || !processGroupExists(pid) {
+		return true
 	}
 	_ = syscall.Kill(-pid, syscall.SIGTERM)
 	if confirmProcessGroupExit(pid, terminationGrace, processGroupExists) {
-		return
+		return true
 	}
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
-	_ = confirmProcessGroupExit(pid, terminationConfirmGrace, processGroupExists)
+	return confirmProcessGroupExit(pid, terminationConfirmGrace, processGroupExists)
 }

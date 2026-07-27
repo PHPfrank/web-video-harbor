@@ -145,8 +145,14 @@ fi
 rg -Fq '解析器缺少 universal 架构' "$thin_parser_output/rejected.txt" || \
   fail "非 universal 解析器错误信息不明确"
 
+package_runs_before="$(/usr/bin/find "$repo_root/work/package" -mindepth 1 -maxdepth 1 -type d -name 'run.*' -print | /usr/bin/sort)"
+check_runs_before="$(/usr/bin/find "$repo_root/work/package-check" -mindepth 1 -maxdepth 1 -type d -name 'run.*' -print | /usr/bin/sort)"
 env WEB_VIDEO_PACKAGE_TESTING=1 WEB_VIDEO_PACKAGE_TEST_OUTPUT_DIR="$run_output_dir" \
   /bin/zsh "$package_script"
+package_runs_after="$(/usr/bin/find "$repo_root/work/package" -mindepth 1 -maxdepth 1 -type d -name 'run.*' -print | /usr/bin/sort)"
+check_runs_after="$(/usr/bin/find "$repo_root/work/package-check" -mindepth 1 -maxdepth 1 -type d -name 'run.*' -print | /usr/bin/sort)"
+[[ "$package_runs_after" == "$package_runs_before" ]] || fail "打包脚本遗留了本次 staging 目录"
+[[ "$check_runs_after" == "$check_runs_before" ]] || fail "打包脚本遗留了本次解包验证目录"
 
 [[ -f "$archive_path" ]] || fail "打包脚本没有生成测试 ZIP"
 [[ ! -L "$archive_path" ]] || fail "测试 ZIP 不得是符号链接"
