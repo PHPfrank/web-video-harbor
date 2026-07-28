@@ -16,6 +16,7 @@ import (
 
 	"web-video-harbor/helper/internal/api"
 	appconfig "web-video-harbor/helper/internal/config"
+	"web-video-harbor/helper/internal/settings"
 	"web-video-harbor/helper/internal/tasks"
 	"web-video-harbor/helper/internal/ytdlp"
 )
@@ -25,21 +26,23 @@ var version = "dev"
 type appDeps struct {
 	defaultConfigPath       func() (string, error)
 	loadConfig              func(string) (appconfig.Config, error)
+	openSettings            func(string) *settings.Store
 	lookPath                func(string) (string, error)
 	probePlatformDownloader func(context.Context) (ytdlp.ProbeResult, error)
 	probeRuntime            func(context.Context) (ytdlp.RuntimeResult, error)
-	serve                   func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult) error
+	serve                   func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult, *settings.Store) error
 }
 
 func defaultAppDeps() appDeps {
 	return appDeps{
 		defaultConfigPath:       appconfig.DefaultPath,
 		loadConfig:              appconfig.Load,
+		openSettings:            settings.Open,
 		lookPath:                exec.LookPath,
 		probePlatformDownloader: ytdlp.Probe,
 		probeRuntime:            ytdlp.ProbeRuntime,
-		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) error {
-			return serveHelper(ctx, cfg, appVersion, ffmpegPath, platform, runtime, net.Listen)
+		serve: func(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, compatibility *settings.Store) error {
+			return serveHelper(ctx, cfg, appVersion, ffmpegPath, platform, runtime, compatibility, net.Listen)
 		},
 	}
 }
@@ -85,6 +88,12 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 		fmt.Fprintln(stdout, cfg.Token)
 		return 0
 	}
+	settingsPath, err := settings.PathForConfig(path)
+	if err != nil {
+		fmt.Fprintf(stderr, "无法确定本地设置位置：%v\n", err)
+		return 1
+	}
+	compatibility := deps.openSettings(settingsPath)
 
 	ffmpegPath, findErr := deps.lookPath("ffmpeg")
 	ffmpegStatus := "可用"
@@ -107,7 +116,7 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 		runtimeResult = ytdlp.RuntimeResult{}
 	}
 	fmt.Fprintf(stdout, "本地助手监听：%s\n下载目录：%s\nFFmpeg: %s\n平台解析器: %s\nJavaScript 解析环境: %s\n", cfg.Address, cfg.DownloadDir, ffmpegStatus, platformStatus, runtimeStatus)
-	if err := deps.serve(ctx, cfg, version, ffmpegPath, platform, runtimeResult); err != nil {
+	if err := deps.serve(ctx, cfg, version, ffmpegPath, platform, runtimeResult, compatibility); err != nil {
 		fmt.Fprintf(stderr, "本地助手运行失败：%v\n", err)
 		return 1
 	}
@@ -116,9 +125,12 @@ func runContext(ctx context.Context, args []string, stdout, stderr io.Writer, de
 
 type listenFunc func(network, address string) (net.Listener, error)
 
-func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, listen listenFunc) error {
+func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, compatibility *settings.Store, listen listenFunc) error {
+	if compatibility == nil {
+		return errors.New("local settings store is required")
+	}
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform, runtime)
+	engine, err := api.NewEngine(manager, cfg.DownloadDir, nil, ffmpegPath, platform, runtime, compatibility)
 	if err != nil {
 		return fmt.Errorf("create task engine: %w", err)
 	}
@@ -128,7 +140,7 @@ func serveHelper(ctx context.Context, cfg appconfig.Config, appVersion, ffmpegPa
 		PlatformDownloaderAvailable: platform.Path != "", PlatformDownloaderVersion: platform.Version,
 		JavaScriptRuntimeAvailable: runtime.Path != "", JavaScriptRuntimeVersion: runtime.Version,
 		DownloadDir: cfg.DownloadDir, Inspector: api.NewMediaInspector(nil),
-		Tasks: engine, Revealer: api.FinderRevealer{},
+		Tasks: engine, Revealer: api.FinderRevealer{}, Settings: compatibility,
 	})
 	if err != nil {
 		return fmt.Errorf("create API server: %w", err)

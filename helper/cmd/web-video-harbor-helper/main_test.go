@@ -15,6 +15,7 @@ import (
 	"time"
 
 	appconfig "web-video-harbor/helper/internal/config"
+	"web-video-harbor/helper/internal/settings"
 	"web-video-harbor/helper/internal/ytdlp"
 )
 
@@ -36,7 +37,23 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 	var stdout, stderr bytes.Buffer
 	serveCalls := 0
 	deps := defaultAppDeps()
-	deps.serve = func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult) error {
+	deps.openSettings = func(string) *settings.Store {
+		t.Fatal("--print-token opened compatibility settings")
+		return nil
+	}
+	deps.lookPath = func(string) (string, error) {
+		t.Fatal("--print-token probed FFmpeg")
+		return "", errors.New("unexpected")
+	}
+	deps.probePlatformDownloader = func(context.Context) (ytdlp.ProbeResult, error) {
+		t.Fatal("--print-token probed platform downloader")
+		return ytdlp.ProbeResult{}, errors.New("unexpected")
+	}
+	deps.probeRuntime = func(context.Context) (ytdlp.RuntimeResult, error) {
+		t.Fatal("--print-token probed JavaScript runtime")
+		return ytdlp.RuntimeResult{}, errors.New("unexpected")
+	}
+	deps.serve = func(context.Context, appconfig.Config, string, string, ytdlp.ProbeResult, ytdlp.RuntimeResult, *settings.Store) error {
 		serveCalls++
 		return nil
 	}
@@ -63,6 +80,80 @@ func TestPrintTokenUsesConfigOverrideAndDoesNotStartServer(t *testing.T) {
 	}
 }
 
+func TestRunSettingsAreAdjacentFailClosedAndPassedToServe(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		prepare func(t *testing.T, path string)
+		enabled bool
+	}{
+		{name: "missing defaults disabled"},
+		{
+			name: "existing enabled is respected",
+			prepare: func(t *testing.T, path string) {
+				if _, err := settings.Open(path).SetPlatformCompatibility(true, settings.CurrentPlatformNoticeVersion); err != nil {
+					t.Fatal(err)
+				}
+			},
+			enabled: true,
+		},
+		{
+			name: "malformed fails closed",
+			prepare: func(t *testing.T, path string) {
+				if err := os.WriteFile(path, []byte(`{"experimental_platform_compatibility_enabled":true`), 0o600); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := privateTempDir(t)
+			t.Setenv("HOME", home)
+			configPath := filepath.Join(home, "portable", "config.json")
+			if _, err := appconfig.Load(configPath); err != nil {
+				t.Fatal(err)
+			}
+			settingsPath, err := settings.PathForConfig(configPath)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if tc.prepare != nil {
+				tc.prepare(t, settingsPath)
+			}
+
+			var openedPath string
+			var openedStore, servedStore *settings.Store
+			deps := defaultAppDeps()
+			deps.openSettings = func(path string) *settings.Store {
+				openedPath = path
+				openedStore = settings.Open(path)
+				return openedStore
+			}
+			deps.lookPath = func(string) (string, error) { return "", errors.New("missing") }
+			deps.probePlatformDownloader = func(context.Context) (ytdlp.ProbeResult, error) { return ytdlp.ProbeResult{}, errors.New("missing") }
+			deps.probeRuntime = func(context.Context) (ytdlp.RuntimeResult, error) {
+				return ytdlp.RuntimeResult{}, errors.New("missing")
+			}
+			deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult, store *settings.Store) error {
+				servedStore = store
+				return nil
+			}
+			var stdout, stderr bytes.Buffer
+			if exit := runContext(context.Background(), []string{"--config", configPath}, &stdout, &stderr, deps); exit != 0 {
+				t.Fatalf("exit=%d stderr=%s", exit, stderr.String())
+			}
+			if openedPath != settingsPath || openedStore == nil || servedStore != openedStore || servedStore.Enabled() != tc.enabled {
+				t.Fatalf("settings path=%q want=%q opened=%p served=%p enabled=%v", openedPath, settingsPath, openedStore, servedStore, servedStore != nil && servedStore.Enabled())
+			}
+			logText := stdout.String() + stderr.String()
+			for _, secret := range []string{settingsPath, settings.CurrentPlatformNoticeVersion, "experimental_platform_compatibility_enabled"} {
+				if strings.Contains(logText, secret) {
+					t.Fatalf("startup output leaked settings detail %q: %s", secret, logText)
+				}
+			}
+		})
+	}
+}
+
 func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
 	home := privateTempDir(t)
 	t.Setenv("HOME", home)
@@ -81,7 +172,7 @@ func TestNormalStartLogsSafeStateAndRedactsToken(t *testing.T) {
 		}
 		return "/usr/local/bin/ffmpeg", nil
 	}
-	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
+	deps.serve = func(_ context.Context, got appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult, _ *settings.Store) error {
 		gotConfig, gotFFmpeg = got, ffmpegPath
 		return nil
 	}
@@ -109,7 +200,7 @@ func TestNormalStartContinuesWhenFFmpegMissing(t *testing.T) {
 	deps := defaultAppDeps()
 	deps.lookPath = func(string) (string, error) { return "", errors.New("not found") }
 	called := false
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, ffmpegPath string, _ ytdlp.ProbeResult, _ ytdlp.RuntimeResult, _ *settings.Store) error {
 		called = true
 		if ffmpegPath != "" {
 			t.Fatalf("ffmpeg path=%q", ffmpegPath)
@@ -138,7 +229,7 @@ func TestNormalStartProbesAndPassesPlatformDownloader(t *testing.T) {
 	}
 	var got ytdlp.ProbeResult
 	var gotRuntime ytdlp.RuntimeResult
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, _ *settings.Store) error {
 		got = platform
 		gotRuntime = runtime
 		return nil
@@ -170,7 +261,7 @@ func TestNormalStartContinuesWhenPlatformDownloaderMissing(t *testing.T) {
 		return ytdlp.ProbeResult{}, errors.New("missing path must stay internal")
 	}
 	called := false
-	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, _ ytdlp.RuntimeResult) error {
+	deps.serve = func(_ context.Context, _ appconfig.Config, _ string, _ string, platform ytdlp.ProbeResult, _ ytdlp.RuntimeResult, _ *settings.Store) error {
 		called = true
 		if platform != (ytdlp.ProbeResult{}) {
 			t.Fatalf("platform downloader = %#v", platform)
@@ -228,7 +319,7 @@ func TestServeHelperGracefullyClosesListenerOnCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan error, 1)
 	go func() {
-		done <- serveHelper(ctx, cfg, "test", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, func(network, address string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, settings.Open(filepath.Join(dir, "settings.json")), func(network, address string) (net.Listener, error) {
 			if network != "tcp" || address != appconfig.DefaultAddress {
 				t.Errorf("listen(%q,%q)", network, address)
 			}
@@ -315,8 +406,9 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 	ctx, cancel := context.WithCancel(context.Background())
 	address := make(chan string, 1)
 	done := make(chan error, 1)
+	compatibility := settings.Open(filepath.Join(dir, "settings.json"))
 	go func() {
-		done <- serveHelper(ctx, cfg, "test-helper-version", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, func(network, requested string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, compatibility, func(network, requested string) (net.Listener, error) {
 			listener, err := net.Listen(network, requested)
 			if err == nil {
 				address <- listener.Addr().String()
@@ -384,10 +476,6 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 		return response.StatusCode, body
 	}
 
-	status, body := postTask(`{"url":"https://youtu.be/_mVb1D8wHxg","title":"platform","mediaType":"platform","quality":"best"}`)
-	if status != http.StatusConflict || body["code"] != "task_error" || body["message"] != "安装包缺少平台解析器" {
-		t.Fatalf("platform create status=%d body=%#v", status, body)
-	}
 	for _, spec := range []string{
 		`{"url":"https://127.0.0.1/video.mp4","title":"MP4","mediaType":"mp4"}`,
 		`{"url":"https://127.0.0.1/video.m3u8","title":"HLS","mediaType":"hls"}`,
@@ -396,6 +484,31 @@ func TestServeHelperWiresMissingPlatformDownloaderWithoutRegressingMP4OrHLS(t *t
 		if status != http.StatusCreated || body["id"] == "" {
 			t.Fatalf("non-platform create status=%d body=%#v", status, body)
 		}
+	}
+	status, body := postTask(`{"url":"https://youtu.be/_mVb1D8wHxg","title":"platform","mediaType":"platform","quality":"best"}`)
+	if status != http.StatusConflict || body["code"] != "platform_compatibility_disabled" || body["message"] != "实验性平台兼容尚未开启" {
+		t.Fatalf("disabled platform create status=%d body=%#v", status, body)
+	}
+
+	request, err := http.NewRequest(http.MethodPut, baseURL+"/v1/settings/platform-compatibility", strings.NewReader(
+		`{"enabled":true,"acknowledged":true,"noticeVersion":"2026-07-28-v1"}`,
+	))
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-Video-Helper-Token", cfg.Token)
+	response, err = client.Do(request)
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || !compatibility.Enabled() {
+		t.Fatalf("enable compatibility status=%d enabled=%v", response.StatusCode, compatibility.Enabled())
+	}
+	status, body = postTask(`{"url":"https://youtu.be/_mVb1D8wHxg","title":"platform","mediaType":"platform","quality":"best"}`)
+	if status != http.StatusConflict || body["code"] != "task_error" || body["message"] != "安装包缺少平台解析器" {
+		t.Fatalf("enabled platform create status=%d body=%#v", status, body)
 	}
 }
 
@@ -406,8 +519,12 @@ func TestServeHelperKeepsParserHealthyButRejectsPlatformWithoutFFmpeg(t *testing
 	address := make(chan string, 1)
 	done := make(chan error, 1)
 	platform := ytdlp.ProbeResult{Path: "/private/snapshot/yt-dlp_macos", Version: "2026.07.04"}
+	compatibility := settings.Open(filepath.Join(dir, "settings.json"))
+	if _, err := compatibility.SetPlatformCompatibility(true, settings.CurrentPlatformNoticeVersion); err != nil {
+		t.Fatal(err)
+	}
 	go func() {
-		done <- serveHelper(ctx, cfg, "test-helper-version", "", platform, ytdlp.RuntimeResult{}, func(network, requested string) (net.Listener, error) {
+		done <- serveHelper(ctx, cfg, "test-helper-version", "", platform, ytdlp.RuntimeResult{}, compatibility, func(network, requested string) (net.Listener, error) {
 			listener, err := net.Listen(network, requested)
 			if err == nil {
 				address <- listener.Addr().String()

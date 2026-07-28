@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"web-video-harbor/helper/internal/api"
+	"web-video-harbor/helper/internal/settings"
 	"web-video-harbor/helper/internal/tasks"
 	"web-video-harbor/helper/internal/ytdlp"
 )
@@ -78,7 +79,8 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	resolver := exactFixtureResolver{hostPort: parsed.Host}
 	downloadDir := t.TempDir()
 	manager := tasks.NewManager()
-	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{})
+	compatibility := settings.Open(filepath.Join(t.TempDir(), "settings.json"))
+	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, compatibility)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -87,7 +89,7 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	server, err := api.New(api.Options{
 		Token: smokeToken, Version: "integration", FFmpegAvailable: true,
 		DownloadDir: downloadDir, Inspector: api.NewMediaInspector(resolver),
-		Tasks: engine, Revealer: noReveal{},
+		Tasks: engine, Revealer: noReveal{}, Settings: compatibility,
 	})
 	if err != nil {
 		t.Fatalf("create helper API: %v", err)
@@ -152,6 +154,10 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	resolver := exactFixtureResolver{hostPort: parsedFixture.Host}
 	manager := tasks.NewManager()
+	compatibility := settings.Open(filepath.Join(t.TempDir(), "settings.json"))
+	if _, err := compatibility.SetPlatformCompatibility(true, settings.CurrentPlatformNoticeVersion); err != nil {
+		t.Fatalf("enable platform compatibility: %v", err)
+	}
 	platform := prepareFakePlatformDownloader(t, repoRoot, downloadDir, ffmpegPath)
 	t.Cleanup(func() {
 		if err := platform.Close(); err != nil {
@@ -159,7 +165,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		}
 	})
 	runtimeResult := ytdlp.RuntimeResult{Path: platform.Path, Version: "2.4.5", Snapshot: platform.Snapshot}
-	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, platform, runtimeResult)
+	engine, err := api.NewEngine(manager, downloadDir, resolver, ffmpegPath, platform, runtimeResult, compatibility)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
 	}
@@ -176,7 +182,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: platform.Version,
 		JavaScriptRuntimeAvailable: true, JavaScriptRuntimeVersion: runtimeResult.Version,
 		DownloadDir: downloadDir, Inspector: api.NewMediaInspector(resolver),
-		Tasks: engine, Revealer: revealer,
+		Tasks: engine, Revealer: revealer, Settings: compatibility,
 	})
 	if err != nil {
 		t.Fatalf("create helper API: %v", err)
