@@ -31,6 +31,13 @@ test('GitHub Pages site provides its homepage and recommendation entry point', a
   assert.match(homepage, /WebVideoHarbor/);
   assert.match(homepage, /网页视频港/);
   assert.match(homepage, /href=["']recommendations\.html["']/);
+  for (const document of [homepage, recommendations]) {
+    assert.match(
+      document,
+      /href=["']https:\/\/github\.com\/PHPfrank\/web-video-harbor\/blob\/main\/PRIVACY\.md["']/,
+    );
+    assert.doesNotMatch(document, /href=["']\.\.\/PRIVACY\.md["']/);
+  }
   assert.match(recommendations, /本页包含推广链接/);
   assert.match(recommendations, /不会增加你的购买价格/);
   assert.equal(
