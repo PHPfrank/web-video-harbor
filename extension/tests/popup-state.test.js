@@ -38,17 +38,19 @@ test('empty and scanning views explain what the popup is doing', () => {
   assert.equal(blocked.emptyMessage, '实验性平台兼容尚未开启，可在设置中阅读说明后开启');
 });
 
-test('candidate view distinguishes MP4 and HLS and keeps useful metadata', () => {
+test('candidate view distinguishes MP4, WebM, and HLS and keeps useful metadata', () => {
   const view = state.buildViewModel({
     connection: 'connected',
     candidates: [
       { url: 'https://cdn.example/movie.mp4', kind: 'mp4', title: '一段视频', width: 1920, height: 1080 },
+      { url: 'https://cdn.example/movie.webm', kind: 'webm', title: 'WebM' },
       { url: 'https://cdn.example/master.m3u8', kind: 'hls', title: '直播回放' },
     ],
   });
 
   assert.deepEqual(view.candidates.map((item) => ({ typeLabel: item.typeLabel, detail: item.detail })), [
     { typeLabel: 'MP4', detail: '1920 × 1080' },
+    { typeLabel: 'WebM', detail: '可直接下载' },
     { typeLabel: 'M3U8', detail: '需要检查可用画质' },
   ]);
   assert.equal(view.canDownload, true);

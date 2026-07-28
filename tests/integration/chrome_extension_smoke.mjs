@@ -224,11 +224,12 @@ try {
     })()`);
     return result && result.ok && Array.isArray(result.candidates) ? result : null;
   }
-  await poll('DOM MP4 and HLS discovery', async () => {
+  await poll('DOM MP4, WebM, and HLS discovery', async () => {
     const result = await queryBackgroundMedia();
     if (!result) return null;
     const paths = result.candidates.map((candidate) => `${candidate.kind}:${new URL(candidate.url).pathname}`);
-    return paths.includes('mp4:/direct.mp4') && paths.includes('hls:/master.m3u8') ? result : null;
+    return paths.includes('mp4:/direct.mp4') && paths.includes('webm:/direct.webm')
+      && paths.includes('hls:/master.m3u8') ? result : null;
   }, 15000);
   await evaluate(cdp, pageSession, `fetch('/wechat-stream?id=after-playback', {
     headers: { Range: 'bytes=0-1023' }
@@ -239,9 +240,11 @@ try {
   }, 15000);
   const discovered = backgroundResult.candidates;
   assert.ok(discovered.some((candidate) => candidate.kind === 'mp4' && new URL(candidate.url).pathname === '/direct.mp4'));
+  assert.ok(discovered.some((candidate) => candidate.kind === 'webm' && new URL(candidate.url).pathname === '/direct.webm'));
   assert.ok(discovered.some((candidate) => candidate.kind === 'hls' && new URL(candidate.url).pathname === '/master.m3u8'));
   assert.ok(discovered.some((candidate) => candidate.kind === 'mp4' && new URL(candidate.url).pathname === '/wechat-stream'));
   const directCandidateIndex = discovered.findIndex((candidate) => candidate.kind === 'mp4' && new URL(candidate.url).pathname === '/direct.mp4');
+  const webmCandidateIndex = discovered.findIndex((candidate) => candidate.kind === 'webm' && new URL(candidate.url).pathname === '/direct.webm');
   const masterCandidateIndex = discovered.findIndex((candidate) => candidate.kind === 'hls' && new URL(candidate.url).pathname === '/master.m3u8');
   await evaluate(cdp, messageSession, `chrome.storage.local.set({ videoHelperToken: ${JSON.stringify(helperToken)} })`);
   await evaluate(cdp, messageSession, 'location.reload()');
@@ -282,6 +285,15 @@ try {
   })()`);
   assert.equal(directClicked, true);
 
+  const webmClicked = await evaluate(cdp, popupSession, `(() => {
+    const card = document.querySelectorAll('.candidate-card')[${webmCandidateIndex}];
+    const button = card?.querySelector('button[data-action="download"]');
+    if (!button || button.disabled) return false;
+    button.click();
+    return true;
+  })()`);
+  assert.equal(webmClicked, true);
+
   const inspectClicked = await evaluate(cdp, popupSession, `(() => {
     const card = document.querySelectorAll('.candidate-card')[${masterCandidateIndex}];
     const button = card?.querySelector('button[data-action="inspect"]');
@@ -307,17 +319,18 @@ try {
     if (created.some((task) => task.status === 'failed' || task.status === 'canceled')) {
       throw new Error(`popup task failed: ${JSON.stringify(created.map((task) => ({ status: task.status, code: task.errorCode })))}`);
     }
-    return created.length >= 2 && created.every((task) => task.status === 'completed') ? created : null;
+    return created.length >= 3 && created.every((task) => task.status === 'completed') ? created : null;
   }, 25000);
   const directTask = browserTasks.find((task) => task.url.endsWith('/direct.mp4'));
+  const webmTask = browserTasks.find((task) => task.url.endsWith('/direct.webm'));
   const hlsTask = browserTasks.find((task) => task.url.includes('/1080/index.m3u8'));
-  assert.ok(directTask && hlsTask, JSON.stringify(browserTasks.map((task) => ({
+  assert.ok(directTask && webmTask && hlsTask, JSON.stringify(browserTasks.map((task) => ({
     url: task.url,
     title: task.title,
     status: task.status,
     output: task.outputPath,
   }))));
-  for (const task of [directTask, hlsTask]) {
+  for (const task of [directTask, webmTask, hlsTask]) {
     const relative = path.relative(downloadDir, task.outputPath);
     assert.ok(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
     assert.ok(fs.statSync(task.outputPath).size > 0);
@@ -538,6 +551,7 @@ try {
     candidates: discovered.map((candidate) => ({ kind: candidate.kind, path: new URL(candidate.url).pathname })),
     outputs: {
       direct: directTask.outputPath,
+      webm: webmTask.outputPath,
       hls: hlsTask.outputPath,
       platform: platformTask.outputPath,
       platform_retry: retriedPlatformTask.outputPath,

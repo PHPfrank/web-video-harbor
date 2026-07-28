@@ -42,6 +42,7 @@ test('normalizeUrl rejects oversized per-candidate URLs', () => {
 
 test('inferMediaKind recognizes exact path extensions despite query strings', () => {
   assert.equal(inferMediaKind('https://cdn.example/movie.MP4?x=.m3u8'), 'mp4');
+  assert.equal(inferMediaKind('https://cdn.example/movie.WeBm?x=.mp4'), 'webm');
   assert.equal(inferMediaKind('https://cdn.example/master.m3u8?file=.mp4'), 'hls');
   assert.equal(inferMediaKind('https://cdn.example/movie.mp4.js'), 'unknown');
   assert.equal(inferMediaKind('https://cdn.example/path/notmp4'), 'unknown');
@@ -49,6 +50,7 @@ test('inferMediaKind recognizes exact path extensions despite query strings', ()
 
 test('inferMediaKind recognizes exact media MIME types including extensionless WeChat CDN URLs', () => {
   assert.equal(inferMediaKind('https://finder.video.qq.com/abc', 'video/mp4; charset=binary'), 'mp4');
+  assert.equal(inferMediaKind('https://cdn.example/opaque', 'video/webm; codecs=vp9'), 'webm');
   for (const mime of [
     'application/vnd.apple.mpegurl',
     'application/x-mpegurl',
@@ -112,6 +114,15 @@ test('normalizeCandidate uses safe fallbacks and rejects unknown media', () => {
       url: 'https://example.com/movie.mp4',
       kind: 'mp4',
       title: '未命名视频',
+      source: 'unknown',
+    },
+  );
+  assert.deepEqual(
+    normalizeCandidate({ url: 'https://example.com/movie.webm', title: 'WebM' }),
+    {
+      url: 'https://example.com/movie.webm',
+      kind: 'webm',
+      title: 'WebM',
       source: 'unknown',
     },
   );

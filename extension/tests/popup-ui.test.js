@@ -53,14 +53,14 @@ test('popup controller covers scan, inspect, download, polling, and task actions
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
 });
 
-test('popup prepends one canonical platform page candidate while keeping captured media', () => {
+test('popup gates candidates against the background-coordinated current page', () => {
   const javascript = source('popup.js');
 
   assert.match(javascript, /VideoGrabberPlatform/);
   assert.match(javascript, /\.getSettings\s*\(/);
   assert.match(javascript, /experimentalPlatformCompatibilityEnabled/);
-  assert.match(javascript, /candidatesForPage\s*\(/);
-  assert.match(javascript, /experimentalPlatformBlocked/);
+  assert.match(javascript, /candidatesForCoordinatedPage\s*\(/);
+  assert.doesNotMatch(javascript, /url:\s*tab\.url/);
 });
 
 test('popup renders separate fixed platform-quality values and safe text-only titles', () => {

@@ -90,6 +90,7 @@
   function candidateView(candidate, index) {
     const isHls = candidate && candidate.kind === 'hls';
     const isPlatform = candidate && candidate.kind === 'platform';
+    const isWebM = candidate && candidate.kind === 'webm';
     const width = Number(candidate && candidate.width) || 0;
     const height = Number(candidate && candidate.height) || 0;
     const providerLabel = candidate && candidate.provider === 'youtube' ? 'YouTube' : '哔哩哔哩';
@@ -99,8 +100,8 @@
     const view = {
       id: `candidate-${index}`,
       url: candidate && typeof candidate.url === 'string' ? candidate.url : '',
-      kind: isPlatform ? 'platform' : (isHls ? 'hls' : 'mp4'),
-      typeLabel: isPlatform ? providerLabel : (isHls ? 'M3U8' : 'MP4'),
+      kind: isPlatform ? 'platform' : (isHls ? 'hls' : (isWebM ? 'webm' : 'mp4')),
+      typeLabel: isPlatform ? providerLabel : (isHls ? 'M3U8' : (isWebM ? 'WebM' : 'MP4')),
       title: shortText(candidate && candidate.title, '未命名视频', 120),
       detail: isPlatform ? '仅支持无需登录即可观看的公开视频'
         : (width && height ? `${width} × ${height}` : (isHls ? '需要检查可用画质' : '可直接下载')),

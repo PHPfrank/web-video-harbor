@@ -42,6 +42,7 @@ function rememberAuthoritativeKind(tabId, url, kind) {
 function explicitMediaMime(contentType) {
   const mime = typeof contentType === 'string' ? contentType.split(';', 1)[0].trim().toLowerCase() : '';
   return mime === 'video/mp4'
+    || mime === 'video/webm'
     || mime === 'application/vnd.apple.mpegurl'
     || mime === 'application/x-mpegurl'
     || mime === 'audio/mpegurl';

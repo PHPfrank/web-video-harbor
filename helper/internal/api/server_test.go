@@ -570,6 +570,18 @@ func TestCreateListGetCancelAndRetry(t *testing.T) {
 	}
 }
 
+func TestCreateAcceptsWebMDirectDownload(t *testing.T) {
+	srv, service, _, _, _ := newTestServer(t, nil)
+	body := []byte(`{"url":"https://media.example/video.webm","title":"WebM","mediaType":"webm"}`)
+	rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", body, testToken, "")
+	if rr.Code != http.StatusCreated {
+		t.Fatalf("create WebM status = %d: %s", rr.Code, rr.Body.String())
+	}
+	if len(service.startSpecs) != 1 || service.startSpecs[0].MediaType != "webm" {
+		t.Fatalf("start specs = %#v", service.startSpecs)
+	}
+}
+
 func TestCreateAcceptsPlatformQualityContract(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -729,7 +741,7 @@ func TestAsyncStartsAreDetachedFromRequestCancellation(t *testing.T) {
 func TestCreateValidatesRequiredFieldsAndLengths(t *testing.T) {
 	srv, service, _, _, _ := newTestServer(t, nil)
 	for _, body := range []string{
-		`{}`, `{"url":"https://x.example/a.mp4","title":"x","mediaType":"webm"}`,
+		`{}`, `{"url":"https://x.example/a.mp4","title":"x","mediaType":"avi"}`,
 		`{"url":"","title":"x","mediaType":"mp4"}`,
 		`{"url":"https://x.example/a.mp4","title":"","mediaType":"mp4"}`,
 		`{"url":"https://x.example/a.mp4","title":"` + strings.Repeat("a", maxTitleRunes+1) + `","mediaType":"mp4"}`,
@@ -742,6 +754,37 @@ func TestCreateValidatesRequiredFieldsAndLengths(t *testing.T) {
 	}
 	if len(service.startSpecs) != 0 {
 		t.Fatalf("invalid specs started: %#v", service.startSpecs)
+	}
+}
+
+func TestCreateRejectsInvalidPageURLAtHTTPBoundary(t *testing.T) {
+	cases := []string{
+		"https://user:secret@example.com/watch",
+		"ftp://example.com/watch",
+		"https://example.com/%zz",
+		"https://example.com/" + strings.Repeat("a", maxURLBytes),
+	}
+	for _, pageURL := range cases {
+		t.Run(fmt.Sprintf("length_%d", len(pageURL)), func(t *testing.T) {
+			srv, service, _, _, _ := newTestServer(t, nil)
+			body, err := json.Marshal(JobSpec{
+				URL: "https://media.example/video.mp4", PageURL: pageURL,
+				Title: "demo", MediaType: "mp4",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			rr := perform(t, srv.Handler(), http.MethodPost, "/v1/tasks", body, testToken, "")
+			if rr.Code != http.StatusBadRequest {
+				t.Fatalf("pageUrl %q status = %d, want 400: %s", pageURL, rr.Code, rr.Body.String())
+			}
+			if got := decodeObject(t, rr); got["code"] != "invalid_request" {
+				t.Fatalf("pageUrl error = %#v", got)
+			}
+			if len(service.startSpecs) != 0 {
+				t.Fatalf("invalid pageUrl reached task service: %#v", service.startSpecs)
+			}
+		})
 	}
 }
 

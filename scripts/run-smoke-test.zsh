@@ -54,7 +54,7 @@ for directory in "$fixture_root" "$fixture_root/hls/720" "$fixture_root/hls/1080
   fi
 done
 
-rm -f -- "$fixture_root/direct.mp4" \
+rm -f -- "$fixture_root/direct.mp4" "$fixture_root/direct.webm" \
   "$fixture_root/hls/720/generated.m3u8" \
   "$fixture_root/hls/1080/generated.m3u8" \
   "$results_path" "$browser_results_path"
@@ -62,6 +62,8 @@ find "$fixture_root/hls/720" -mindepth 1 -maxdepth 1 -type f -name 'segment*.ts'
 find "$fixture_root/hls/1080" -mindepth 1 -maxdepth 1 -type f -name 'segment*.ts' -delete
 find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '集成测试-*.mp4' -delete
 find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '网页视频港集成测试*.mp4' -delete
+find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '集成测试-*.webm' -delete
+find "$download_dir" -mindepth 1 -maxdepth 1 -type f -name '网页视频港集成测试*.webm' -delete
 
 ffmpeg -hide_banner -loglevel error -nostdin -y \
   -f lavfi -i 'color=c=0x2563eb:s=640x360:r=24' \
@@ -69,6 +71,13 @@ ffmpeg -hide_banner -loglevel error -nostdin -y \
   -t 2 -shortest -c:v libx264 -preset ultrafast -pix_fmt yuv420p \
   -g 24 -keyint_min 24 -sc_threshold 0 -c:a aac -b:a 64k \
   "$fixture_root/direct.mp4"
+
+ffmpeg -hide_banner -loglevel error -nostdin -y \
+  -f lavfi -i 'color=c=0x0891b2:s=640x360:r=24' \
+  -f lavfi -i 'sine=frequency=520:sample_rate=48000' \
+  -t 2 -shortest -c:v libvpx-vp9 -deadline realtime -cpu-used 8 -pix_fmt yuv420p \
+  -c:a libopus -b:a 64k \
+  "$fixture_root/direct.webm"
 
 ffmpeg -hide_banner -loglevel error -nostdin -y \
   -f lavfi -i 'color=c=0x16a34a:s=1280x720:r=24' \
@@ -133,7 +142,7 @@ done
   git diff --check
 )
 
-for result_key in direct single_hls master_1080 platform_720 platform_retry; do
+for result_key in direct webm single_hls master_1080 platform_720 platform_retry; do
   media_path="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8'))[process.argv[2]]" "$results_path" "$result_key")"
   probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name,width,height \
     -of json "$media_path")"
@@ -143,8 +152,10 @@ for result_key in direct single_hls master_1080 platform_720 platform_retry; do
     const duration = Number(probe.format && probe.format.duration);
     const codecs = new Map((probe.streams || []).map((stream) => [stream.codec_type, stream.codec_name]));
     if (!(duration >= 1.5 && duration <= 3.0)) throw new Error(`unexpected duration ${duration}`);
-    if (codecs.get("video") !== "h264") throw new Error(`unexpected video codec ${codecs.get("video")}`);
-    if (codecs.get("audio") !== "aac") throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
+    const expectedVideo = key === "webm" ? "vp9" : "h264";
+    const expectedAudio = key === "webm" ? "opus" : "aac";
+    if (codecs.get("video") !== expectedVideo) throw new Error(`unexpected video codec ${codecs.get("video")}`);
+    if (codecs.get("audio") !== expectedAudio) throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
     const video = (probe.streams || []).find((stream) => stream.codec_type === "video");
     if (key.startsWith("platform_") && (!video || video.height !== 720)) {
       throw new Error(`unexpected platform height ${video && video.height}`);
@@ -153,7 +164,7 @@ for result_key in direct single_hls master_1080 platform_720 platform_retry; do
   print -- "已验证 $result_key：$media_path"
 done
 
-for result_key in direct hls platform; do
+for result_key in direct webm hls platform; do
   media_path="$(node -p "JSON.parse(require('fs').readFileSync(process.argv[1], 'utf8')).outputs[process.argv[2]]" "$browser_results_path" "$result_key")"
   probe_json="$(ffprobe -v error -show_entries format=duration -show_entries stream=codec_type,codec_name,width,height \
     -of json "$media_path")"
@@ -163,8 +174,10 @@ for result_key in direct hls platform; do
     const duration = Number(probe.format && probe.format.duration);
     const codecs = new Map((probe.streams || []).map((stream) => [stream.codec_type, stream.codec_name]));
     if (!(duration >= 1.5 && duration <= 3.0)) throw new Error(`unexpected duration ${duration}`);
-    if (codecs.get("video") !== "h264") throw new Error(`unexpected video codec ${codecs.get("video")}`);
-    if (codecs.get("audio") !== "aac") throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
+    const expectedVideo = key === "webm" ? "vp9" : "h264";
+    const expectedAudio = key === "webm" ? "opus" : "aac";
+    if (codecs.get("video") !== expectedVideo) throw new Error(`unexpected video codec ${codecs.get("video")}`);
+    if (codecs.get("audio") !== expectedAudio) throw new Error(`unexpected audio codec ${codecs.get("audio")}`);
     const video = (probe.streams || []).find((stream) => stream.codec_type === "video");
     if (key === "platform" && (!video || video.height !== 720)) {
       throw new Error(`unexpected platform height ${video && video.height}`);

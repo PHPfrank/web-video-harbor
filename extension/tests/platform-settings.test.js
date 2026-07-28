@@ -262,3 +262,36 @@ test('a disable intent wins over an older pending enable response', async () => 
   assert.equal(renders.at(-1).enabled, false);
   assert.equal(renders.at(-1).status, 'disabled');
 });
+
+test('a concurrent reload cannot clear or overwrite a pending settings mutation', async () => {
+  const save = deferred();
+  const reload = deferred();
+  let getCount = 0;
+  const { controller, renders } = harness({
+    getSettings() {
+      getCount += 1;
+      return getCount === 1 ? Promise.resolve(settings(false)) : reload.promise;
+    },
+    setPlatformCompatibility() {
+      return save.promise;
+    },
+  });
+  await controller.load();
+  controller.requestEnable();
+  const mutation = controller.confirmEnable();
+  const overlappingLoad = controller.load();
+  await Promise.resolve();
+
+  assert.equal(renders.at(-1).busy, true);
+  assert.equal(renders.at(-1).pendingAction, 'enable');
+
+  save.resolve(settings(true));
+  await mutation;
+  reload.resolve(settings(false));
+  await overlappingLoad;
+
+  assert.equal(renders.at(-1).enabled, true);
+  assert.equal(renders.at(-1).status, 'enabled');
+  assert.equal(renders.at(-1).busy, false);
+  assert.equal(renders.at(-1).pendingAction, '');
+});

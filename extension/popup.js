@@ -72,20 +72,13 @@
         helper.getSettings().catch(() => null),
       ]);
       if (!response || !response.ok) throw new Error('无法读取页面中的视频');
-      const candidates = Array.isArray(response.candidates) ? response.candidates : [];
       const experimentalEnabled = Boolean(localSettings
         && localSettings.experimentalPlatformCompatibilityEnabled === true);
-      const gated = platformApi.candidatesForPage({
-        url: tab.url,
-        title: tab.title,
-        candidates,
+      return platformApi.candidatesForCoordinatedPage({
+        tab,
+        response,
         experimentalEnabled,
       });
-      return {
-        pageUrl: typeof tab.url === 'string' ? tab.url : (response.pageUrl || ''),
-        candidates: gated.candidates,
-        experimentalPlatformBlocked: gated.experimentalPlatformBlocked,
-      };
     },
     async rescan() {
       if (!Number.isInteger(activeTabId)) throw new Error('无法读取当前标签页');

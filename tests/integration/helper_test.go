@@ -341,6 +341,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 
 	directURL := fixture.URL + "/direct.mp4"
+	webmURL := fixture.URL + "/direct.webm"
 	wechatURL := fixture.URL + "/wechat-stream?id=fixture"
 	singleHLSURL := fixture.URL + "/extensionless.m3u8"
 	masterURL := fixture.URL + "/master.m3u8"
@@ -371,6 +372,12 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	direct := createTask(t, helperURL, api.JobSpec{URL: directURL, Title: "集成测试-直接视频", MediaType: "mp4"})
 	direct = waitForStatus(t, helperURL, direct.ID, tasks.Completed, 15*time.Second)
 	assertCompletedOutput(t, direct, downloadDir)
+	webm := createTask(t, helperURL, api.JobSpec{URL: webmURL, Title: "集成测试-WebM", MediaType: "webm"})
+	webm = waitForStatus(t, helperURL, webm.ID, tasks.Completed, 15*time.Second)
+	assertCompletedOutput(t, webm, downloadDir)
+	if filepath.Ext(webm.OutputPath) != ".webm" {
+		t.Fatalf("WebM output extension = %q, want .webm", filepath.Ext(webm.OutputPath))
+	}
 	platformSpec := api.JobSpec{
 		URL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", PageURL: "https://www.youtube.com/watch?v=_mVb1D8wHxg",
 		Title: "集成测试-平台-720p", MediaType: "platform", Quality: "720",
@@ -382,7 +389,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	for _, spec := range []api.JobSpec{platformSpec, wechatPageSpec} {
 		assertErrorCode(t, postJSON(t, helperURL+"/v1/tasks", spec), http.StatusConflict, "platform_compatibility_disabled")
 	}
-	if len(manager.List()) != 1 {
+	if len(manager.List()) != 2 {
 		t.Fatalf("disabled compatibility created tasks: %d", len(manager.List()))
 	}
 	assertErrorCode(t, requestJSON(t, http.MethodPut, helperURL+"/v1/settings/platform-compatibility", map[string]any{
@@ -482,12 +489,13 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 
 	var listed []tasks.Task
 	getJSON(t, helperURL+"/v1/tasks", true, &listed)
-	if len(listed) != 9 {
-		t.Fatalf("task count = %d, want 9", len(listed))
+	if len(listed) != 10 {
+		t.Fatalf("task count = %d, want 10", len(listed))
 	}
 
 	results := map[string]string{
 		"direct":         direct.OutputPath,
+		"webm":           webm.OutputPath,
 		"single_hls":     single.OutputPath,
 		"master_1080":    multi.OutputPath,
 		"platform_720":   platformTask.OutputPath,
@@ -636,6 +644,9 @@ func newFixtureServer(t *testing.T, siteRoot, generatedRoot string) *httptest.Se
 		case r.URL.Path == "/direct.mp4":
 			w.Header().Set("Content-Type", "video/mp4")
 			http.ServeFile(w, r, filepath.Join(generatedRoot, "direct.mp4"))
+		case r.URL.Path == "/direct.webm":
+			w.Header().Set("Content-Type", "video/webm")
+			http.ServeFile(w, r, filepath.Join(generatedRoot, "direct.webm"))
 		case r.URL.Path == "/wechat-stream":
 			w.Header().Set("Content-Type", "video/mp4")
 			http.ServeFile(w, r, filepath.Join(generatedRoot, "direct.mp4"))

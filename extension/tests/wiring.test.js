@@ -60,5 +60,6 @@ test('popup loads the platform classifier before popup state and controllers', (
   const popup = fs.readFileSync(path.join(extensionDir, 'popup.js'), 'utf8');
   const getMedia = popup.slice(popup.indexOf('async getTabMedia'), popup.indexOf('async rescan'));
   assert.match(getMedia, /helper\.getSettings\s*\(/);
-  assert.match(getMedia, /candidatesForPage\s*\(/);
+  assert.match(getMedia, /candidatesForCoordinatedPage\s*\(/);
+  assert.doesNotMatch(getMedia, /url:\s*tab\.url/);
 });

@@ -31,6 +31,10 @@ const capturedCandidates = media.mergeCandidates([
     source: 'dom', pageUrl: ordinaryPageUrl,
   },
   {
+    url: `${fixtureURL}/direct.webm`, contentType: 'video/webm', title: '网页视频港集成测试-扩展WebM',
+    source: 'dom', pageUrl: ordinaryPageUrl,
+  },
+  {
     url: `${fixtureURL}/master.m3u8`, contentType: 'application/vnd.apple.mpegurl', title: '网页视频港集成测试-扩展HLS',
     source: 'dom', pageUrl: ordinaryPageUrl,
   },
@@ -46,7 +50,8 @@ let activePage = {
   candidates: capturedCandidates,
 };
 
-assert.equal(capturedCandidates.length, 3);
+assert.equal(capturedCandidates.length, 4);
+assert.equal(capturedCandidates.find((candidate) => candidate.url.endsWith('/direct.webm')).kind, 'webm');
 assert.equal(capturedCandidates.find((candidate) => candidate.url.includes('/wechat-stream')).kind, 'mp4');
 
 const bridge = {
@@ -94,7 +99,7 @@ async function waitCompleted(task) {
     await controller.start();
     const started = controller.snapshot();
     assert.equal(started.connection, 'connected');
-    assert.equal(started.candidates.length, 3);
+    assert.equal(started.candidates.length, 4);
     assert.equal(started.experimentalPlatformBlocked, false);
 
     const hlsURL = `${fixtureURL}/master.m3u8`;
@@ -104,6 +109,7 @@ async function waitCompleted(task) {
     assert.equal(inspected.variants[0].label, '1080p');
 
     const directTask = await controller.downloadCandidate(`${fixtureURL}/direct.mp4`);
+    const webmTask = await controller.downloadCandidate(`${fixtureURL}/direct.webm`);
     const hlsTask = await controller.downloadCandidate(hlsURL);
 
     activePage = { url: platformURL, title: '网页视频港集成测试-YouTube', candidates: [] };
@@ -124,18 +130,19 @@ async function waitCompleted(task) {
     assert.equal(platformSnapshot.candidates[0].url, platformURL);
     assert.equal(controller.selectQuality(platformURL, '720'), true);
     const platformTask = await controller.downloadCandidate(platformURL);
-    assert.ok(directTask && hlsTask && platformTask);
-    const [direct, hls, platformDownload] = await Promise.all([
-      waitCompleted(directTask), waitCompleted(hlsTask), waitCompleted(platformTask),
+    assert.ok(directTask && webmTask && hlsTask && platformTask);
+    const [direct, webm, hls, platformDownload] = await Promise.all([
+      waitCompleted(directTask), waitCompleted(webmTask), waitCompleted(hlsTask), waitCompleted(platformTask),
     ]);
 
-    for (const task of [direct, hls, platformDownload]) {
+    for (const task of [direct, webm, hls, platformDownload]) {
       const relative = path.relative(downloadDir, task.outputPath);
       assert.ok(relative && relative !== '..' && !relative.startsWith(`..${path.sep}`) && !path.isAbsolute(relative));
       assert.ok(fs.statSync(task.outputPath).size > 0);
     }
     fs.writeFileSync(resultsPath, `${JSON.stringify({
       direct: direct.outputPath,
+      webm: webm.outputPath,
       hls: hls.outputPath,
       platform: platformDownload.outputPath,
     }, null, 2)}\n`, { mode: 0o600 });

@@ -405,6 +405,7 @@ test('every created task carries candidate or trusted current-page context', asy
   const pageUrl = 'https://example.com/watch';
   const candidatePageUrl = 'https://example.com/embedded-player';
   const mp4URL = 'https://cdn.example/video.mp4';
+  const webmURL = 'https://cdn.example/video.webm';
   const platformURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
   const createdSpecs = [];
   const { controller } = harness({
@@ -413,6 +414,7 @@ test('every created task carries candidate or trusted current-page context', asy
         pageUrl,
         candidates: [
           { url: mp4URL, kind: 'mp4', title: 'MP4', pageUrl: candidatePageUrl },
+          { url: webmURL, kind: 'webm', title: 'WebM' },
           { url: platformURL, kind: 'platform', provider: 'youtube', title: '平台视频' },
         ],
       }),
@@ -428,10 +430,13 @@ test('every created task carries candidate or trusted current-page context', asy
   await controller.refreshTasks();
 
   await controller.downloadCandidate(mp4URL);
+  await controller.downloadCandidate(webmURL);
   await controller.downloadCandidate(platformURL);
 
   assert.equal(createdSpecs[0].pageUrl, candidatePageUrl);
+  assert.equal(createdSpecs[1].mediaType, 'webm');
   assert.equal(createdSpecs[1].pageUrl, pageUrl);
+  assert.equal(createdSpecs[2].pageUrl, pageUrl);
 });
 
 test('stale popup renders a fixed message after helper closes platform compatibility', async () => {

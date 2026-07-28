@@ -89,12 +89,14 @@
     function load() {
       const revision = ++loadRevision;
       const startedIntentRevision = intentRevision;
-      model.status = 'loading';
-      model.enabled = false;
-      model.available = false;
-      model.busy = false;
-      model.pendingAction = '';
-      model.noticeVersion = '';
+      if (!activeIntent) {
+        model.status = 'loading';
+        model.enabled = false;
+        model.available = false;
+        model.busy = false;
+        model.pendingAction = '';
+        model.noticeVersion = '';
+      }
       model.error = '';
       render();
       return Promise.resolve().then(() => client.getSettings()).then((result) => {
@@ -129,6 +131,7 @@
     function queueMutation(type, input, optimisticEnabled) {
       if (activeIntent && activeIntent.type === type) return activeIntent.promise;
       const revision = ++intentRevision;
+      loadRevision += 1;
       const previousAuthoritative = authoritative;
       model.error = '';
       model.busy = true;
@@ -143,11 +146,13 @@
       const operation = mutationQueue.then(() => client.setPlatformCompatibility(input));
       const completion = operation.then((result) => {
         if (revision !== intentRevision) return;
+        loadRevision += 1;
         applySettings(result);
         model.error = '';
         render();
       }, (error) => {
         if (revision !== intentRevision) return;
+        loadRevision += 1;
         authoritative = previousAuthoritative;
         restoreAuthoritative();
         model.error = safeErrorMessage(error, '无法保存平台兼容设置');

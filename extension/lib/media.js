@@ -46,11 +46,13 @@
 
     const mime = normalizeContentType(contentType);
     if (mime === 'video/mp4') return 'mp4';
+    if (mime === 'video/webm') return 'webm';
     if (HLS_MIME_TYPES.has(mime)) return 'hls';
     if (mime && mime !== 'application/octet-stream') return 'unknown';
 
     const pathname = new URL(urlValue).pathname.toLowerCase();
     if (pathname.endsWith('.mp4')) return 'mp4';
+    if (pathname.endsWith('.webm')) return 'webm';
     if (pathname.endsWith('.m3u8')) return 'hls';
     return 'unknown';
   }

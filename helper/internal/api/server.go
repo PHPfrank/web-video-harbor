@@ -456,12 +456,14 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	spec.Quality = strings.ToLower(strings.TrimSpace(spec.Quality))
 	validMediaQuality := false
 	switch spec.MediaType {
-	case "mp4", "hls":
+	case "mp4", "webm", "hls":
 		validMediaQuality = spec.Quality == ""
 	case "platform":
 		validMediaQuality = spec.Quality == "best" || spec.Quality == "1080" || spec.Quality == "720"
 	}
-	if !validInputURL(spec.URL) || spec.Title == "" || !utf8.ValidString(spec.Title) || utf8.RuneCountInString(spec.Title) > maxTitleRunes || !validMediaQuality {
+	if !validInputURL(spec.URL) || (spec.PageURL != "" && !validInputURL(spec.PageURL)) ||
+		spec.Title == "" || !utf8.ValidString(spec.Title) ||
+		utf8.RuneCountInString(spec.Title) > maxTitleRunes || !validMediaQuality {
 		writeError(w, http.StatusBadRequest, "invalid_request", "下载任务参数无效")
 		return
 	}

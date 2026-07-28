@@ -40,6 +40,10 @@ type directDownloader interface {
 	Download(context.Context, string, string) (string, error)
 }
 
+type directWebMDownloader interface {
+	DownloadWebM(context.Context, string, string) (string, error)
+}
+
 type hlsRunner interface {
 	Run(context.Context, ffmpeg.Request) (string, error)
 }
@@ -325,7 +329,7 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 	if ctx == nil {
 		return tasks.Task{}, errors.New("start task: nil context")
 	}
-	if spec.MediaType != "mp4" && spec.MediaType != "hls" && spec.MediaType != "platform" {
+	if spec.MediaType != "mp4" && spec.MediaType != "webm" && spec.MediaType != "hls" && spec.MediaType != "platform" {
 		return tasks.Task{}, fmt.Errorf("unsupported media type %q", spec.MediaType)
 	}
 	if strings.TrimSpace(spec.URL) == "" {
@@ -397,8 +401,8 @@ func (e *Engine) run(id string, spec JobSpec) {
 	}
 
 	switch spec.MediaType {
-	case "mp4":
-		e.runMP4(ctx, id, spec)
+	case "mp4", "webm":
+		e.runDirect(ctx, id, spec)
 	case "hls":
 		e.runHLS(ctx, id, spec)
 	case "platform":
@@ -516,7 +520,7 @@ func (e *Engine) runHLS(ctx context.Context, id string, spec JobSpec) {
 	}
 }
 
-func (e *Engine) runMP4(ctx context.Context, id string, spec JobSpec) {
+func (e *Engine) runDirect(ctx context.Context, id string, spec JobSpec) {
 	if e.newDownloader == nil {
 		e.fail(id, errors.New("direct downloader factory is unavailable"))
 		return
@@ -538,7 +542,17 @@ func (e *Engine) runMP4(ctx context.Context, id string, spec JobSpec) {
 		e.fail(id, err)
 		return
 	}
-	path, err := downloader.Download(ctx, spec.URL, spec.Title)
+	var path string
+	if spec.MediaType == "webm" {
+		webmDownloader, ok := downloader.(directWebMDownloader)
+		if !ok {
+			e.fail(id, errors.New("direct WebM downloader is unavailable"))
+			return
+		}
+		path, err = webmDownloader.DownloadWebM(ctx, spec.URL, spec.Title)
+	} else {
+		path, err = downloader.Download(ctx, spec.URL, spec.Title)
+	}
 	if publishedPath, ok := output.PublishedPath(err); ok {
 		path = publishedPath
 		err = nil

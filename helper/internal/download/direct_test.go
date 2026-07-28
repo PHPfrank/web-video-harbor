@@ -102,6 +102,27 @@ func TestDirectStreamsToPartAndPublishesOnlyWhenComplete(t *testing.T) {
 	assertNoPartFiles(t, dir)
 }
 
+func TestDirectWebMPublishesClosedWebMExtension(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "video/webm")
+		_, _ = w.Write([]byte("webm fixture"))
+	}))
+	defer server.Close()
+
+	dir := t.TempDir()
+	downloader := newTestDownloader(t, dir, server.Client(), RetryPolicy{MaxAttempts: 1}, nil, nil)
+	path, err := downloader.DownloadWebM(context.Background(), server.URL+"/opaque", "WebM video")
+	if err != nil {
+		t.Fatalf("DownloadWebM() error = %v", err)
+	}
+	if path != filepath.Join(dir, "WebM video.webm") {
+		t.Fatalf("DownloadWebM() path = %q", path)
+	}
+	if contents, readErr := os.ReadFile(path); readErr != nil || string(contents) != "webm fixture" {
+		t.Fatalf("WebM contents = %q, %v", contents, readErr)
+	}
+}
+
 func TestDirectReportsProgressWithKnownAndUnknownLength(t *testing.T) {
 	tests := []struct {
 		name           string

@@ -518,14 +518,16 @@ test('authoritative response MIME replaces conflicting suffix inference in both 
     tabUrls: {
       41: 'https://example.com/one',
       42: 'https://example.com/two',
+      43: 'https://example.com/three',
     },
   });
   const cases = [
-    { tabId: 41, url: 'https://cdn.example/stream.mp4', mime: 'application/vnd.apple.mpegurl', kind: 'hls' },
-    { tabId: 42, url: 'https://cdn.example/stream.m3u8', mime: 'video/mp4', kind: 'mp4' },
+    { tabId: 41, page: 'one', url: 'https://cdn.example/stream.mp4', mime: 'application/vnd.apple.mpegurl', kind: 'hls' },
+    { tabId: 42, page: 'two', url: 'https://cdn.example/stream.m3u8', mime: 'video/mp4', kind: 'mp4' },
+    { tabId: 43, page: 'three', url: 'https://cdn.example/stream.mp4', mime: 'video/webm', kind: 'webm' },
   ];
   for (const item of cases) {
-    const pageUrl = `https://example.com/${item.tabId === 41 ? 'one' : 'two'}`;
+    const pageUrl = `https://example.com/${item.page}`;
     const details = {
       tabId: item.tabId,
       frameId: 0,
@@ -691,20 +693,31 @@ test('hydrate rebuilds authoritative MIME state before accepting content candida
         contentType: 'application/vnd.apple.mpegurl',
         source: 'webRequest',
       }],
+      74: [{
+        url: 'https://cdn.example/webm.mp4',
+        pageUrl,
+        contentType: 'video/webm',
+        source: 'webRequest',
+      }],
     },
   });
-  const result = await harness.dispatch({
-    type: 'ADD_CANDIDATES',
-    pageUrl,
-    candidates: [{
-      url: 'https://cdn.example/stream.mp4',
+  for (const item of [
+    { tabId: 73, url: 'https://cdn.example/stream.mp4', kind: 'hls' },
+    { tabId: 74, url: 'https://cdn.example/webm.mp4', kind: 'webm' },
+  ]) {
+    const result = await harness.dispatch({
+      type: 'ADD_CANDIDATES',
       pageUrl,
-      source: 'performance',
-    }],
-  }, { tab: { id: 73 }, frameId: 0, documentId: 'restored-document' });
+      candidates: [{
+        url: item.url,
+        pageUrl,
+        source: 'performance',
+      }],
+    }, { tab: { id: item.tabId }, frameId: 0, documentId: `restored-document-${item.tabId}` });
 
-  assert.equal(result.candidates.length, 1);
-  assert.equal(result.candidates[0].kind, 'hls');
+    assert.equal(result.candidates.length, 1);
+    assert.equal(result.candidates[0].kind, item.kind);
+  }
 });
 
 test('headers HLS result invalidates a slower before suffix inference for the same request', async () => {

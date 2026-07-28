@@ -155,6 +155,20 @@
     return title ? title.slice(0, MAX_TITLE_LENGTH) : DEFAULT_TITLE;
   }
 
+  function normalizeCoordinatedPageUrl(value) {
+    if (typeof value !== 'string' || value === '' || CONTROL_CHARACTER_PATTERN.test(value)) return '';
+    if (new TextEncoder().encode(value).byteLength > MAX_URL_LENGTH) return '';
+    let url;
+    try {
+      url = new URL(value);
+    } catch (_error) {
+      return '';
+    }
+    if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) return '';
+    url.hash = '';
+    return url.href;
+  }
+
   function candidateForPage(page) {
     if (!page || typeof page !== 'object' || Array.isArray(page)) return null;
     const classified = classifyPlatformUrl(page.url);
@@ -184,11 +198,33 @@
     return { candidates: combined, experimentalPlatformBlocked: false };
   }
 
+  function candidatesForCoordinatedPage(input) {
+    const source = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    const response = source.response && typeof source.response === 'object'
+      && !Array.isArray(source.response) ? source.response : null;
+    const pageUrl = normalizeCoordinatedPageUrl(response && response.pageUrl);
+    const candidates = response && Array.isArray(response.candidates) ? response.candidates : [];
+    if (!pageUrl || candidates.some((candidate) => (
+      !candidate || normalizeCoordinatedPageUrl(candidate.pageUrl) !== pageUrl
+    ))) {
+      return { pageUrl: '', candidates: [], experimentalPlatformBlocked: false };
+    }
+    const tabUrl = normalizeCoordinatedPageUrl(source.tab && source.tab.url);
+    const gated = candidatesForPage({
+      url: pageUrl,
+      title: tabUrl === pageUrl ? source.tab.title : '',
+      candidates,
+      experimentalEnabled: source.experimentalEnabled === true,
+    });
+    return { pageUrl, ...gated };
+  }
+
   return Object.freeze({
     classifyPlatformUrl,
     isExperimentalPlatformPage,
     candidateForPage,
     candidatesForPage,
+    candidatesForCoordinatedPage,
     QUALITY_OPTIONS,
   });
 }));

@@ -83,6 +83,50 @@ test('enabled candidate gating keeps canonical page cards and captured WeChat me
   assert.deepEqual(wechat, { candidates: captured, experimentalPlatformBlocked: false });
 });
 
+test('coordinated popup gating trusts the background page after a tab navigation race', () => {
+  const staleTab = {
+    url: 'https://example.com/old-page',
+    title: '旧页面标题',
+  };
+  const result = platform.candidatesForCoordinatedPage({
+    tab: staleTab,
+    response: {
+      pageUrl: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+      candidates: [{
+        url: 'https://cdn.example/video.mp4', kind: 'mp4',
+        pageUrl: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+      }],
+    },
+    experimentalEnabled: false,
+  });
+
+  assert.deepEqual(result, {
+    pageUrl: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+    candidates: [],
+    experimentalPlatformBlocked: true,
+  });
+});
+
+test('coordinated popup gating fails closed without consistent background page context', () => {
+  const candidate = {
+    url: 'https://cdn.example/video.mp4', kind: 'mp4', pageUrl: 'https://example.com/watch',
+  };
+  for (const response of [
+    null,
+    { pageUrl: null, candidates: [candidate] },
+    { pageUrl: 'https://user:secret@example.com/watch', candidates: [candidate] },
+    { pageUrl: 'https://example.com/other', candidates: [candidate] },
+  ]) {
+    assert.deepEqual(platform.candidatesForCoordinatedPage({
+      tab: { url: 'https://example.com/watch', title: '旧标题' },
+      response,
+      experimentalEnabled: true,
+    }), {
+      pageUrl: '', candidates: [], experimentalPlatformBlocked: false,
+    });
+  }
+});
+
 test('candidateForPage recognizes and canonicalizes supported single-video pages', () => {
   const cases = [
     {

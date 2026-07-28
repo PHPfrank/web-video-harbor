@@ -182,6 +182,16 @@ func newSafeHTTPClient(resolver safety.Resolver, dialer safety.ContextDialer) *h
 // Download streams rawURL into a private part file and atomically publishes a
 // unique MP4 output after the complete body has been synchronized to disk.
 func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path string, returnErr error) {
+	return d.download(ctx, rawURL, title, ".mp4")
+}
+
+// DownloadWebM uses the same closed direct-download path while publishing the
+// completed media with a WebM extension.
+func (d *Downloader) DownloadWebM(ctx context.Context, rawURL, title string) (path string, returnErr error) {
+	return d.download(ctx, rawURL, title, ".webm")
+}
+
+func (d *Downloader) download(ctx context.Context, rawURL, title, extension string) (path string, returnErr error) {
 	if ctx == nil {
 		return "", &Error{Code: CodeCanceled, Message: "下载已取消", cause: context.Canceled}
 	}
@@ -244,7 +254,7 @@ func (d *Downloader) Download(ctx context.Context, rawURL, title string) (path s
 				return "", outputError("无法关闭下载文件", err)
 			}
 			partClosed = true
-			published, err := publishNoReplace(partPath, d.outputDir, title)
+			published, err := publishNoReplace(partPath, d.outputDir, title, extension)
 			if err != nil {
 				return "", outputError("无法保存下载文件", err)
 			}
@@ -428,16 +438,16 @@ func resetPart(part *os.File) error {
 	return err
 }
 
-func publishNoReplace(partPath, dir, title string) (string, error) {
+func publishNoReplace(partPath, dir, title, extension string) (string, error) {
 	base := output.SanitizeBaseName(title)
 	for index := 1; ; index++ {
 		suffix := ""
 		if index > 1 {
 			suffix = fmt.Sprintf(" (%d)", index)
 		}
-		nameBudget := maxFileNameBytes - len(suffix) - len(".mp4")
+		nameBudget := maxFileNameBytes - len(suffix) - len(extension)
 		candidateBase := truncateUTF8(base, nameBudget)
-		candidate := filepath.Join(dir, candidateBase+suffix+".mp4")
+		candidate := filepath.Join(dir, candidateBase+suffix+extension)
 		err := os.Link(partPath, candidate)
 		switch {
 		case err == nil:

@@ -29,6 +29,16 @@ func (f directDownloaderFunc) Download(ctx context.Context, rawURL, title string
 	return f(ctx, rawURL, title)
 }
 
+type webMDownloaderFunc func(context.Context, string, string) (string, error)
+
+func (f webMDownloaderFunc) Download(context.Context, string, string) (string, error) {
+	return "", errors.New("unexpected MP4 download")
+}
+
+func (f webMDownloaderFunc) DownloadWebM(ctx context.Context, rawURL, title string) (string, error) {
+	return f(ctx, rawURL, title)
+}
+
 type hlsRunnerFunc func(context.Context, ffmpeg.Request) (string, error)
 
 func (f hlsRunnerFunc) Run(ctx context.Context, request ffmpeg.Request) (string, error) {
@@ -137,6 +147,33 @@ func TestEngineCompatibilityDisabledAllowsOrdinaryDirectMedia(t *testing.T) {
 	}
 	if completed := waitStatus(t, manager, task.ID, tasks.Completed); completed.OutputPath != "/downloads/ordinary.mp4" {
 		t.Fatalf("ordinary output = %#v", completed)
+	}
+}
+
+func TestEngineDownloadsWebMThroughClosedDirectPath(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newTestEngine(engineDeps{
+		manager: manager,
+		newDownloader: func(download.ProgressFunc) (directDownloader, error) {
+			return webMDownloaderFunc(func(_ context.Context, rawURL, title string) (string, error) {
+				if rawURL != "https://media.example/video.webm" || title != "WebM" {
+					t.Fatalf("WebM download = %q %q", rawURL, title)
+				}
+				return "/downloads/video.webm", nil
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://media.example/video.webm", Title: "WebM", MediaType: "webm",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed := waitStatus(t, manager, task.ID, tasks.Completed); completed.OutputPath != "/downloads/video.webm" {
+		t.Fatalf("WebM output = %#v", completed)
 	}
 }
 
