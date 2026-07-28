@@ -47,6 +47,179 @@ func (f platformRunnerFunc) Run(ctx context.Context, request ytdlp.Request) (str
 	return f(ctx, request)
 }
 
+type compatibilityFlag struct {
+	mu      sync.RWMutex
+	enabled bool
+}
+
+func newTestEngine(deps engineDeps) (*Engine, error) {
+	if deps.compatibility == nil {
+		deps.compatibility = &compatibilityFlag{enabled: true}
+	}
+	return newEngine(deps)
+}
+
+func (f *compatibilityFlag) Enabled() bool {
+	f.mu.RLock()
+	defer f.mu.RUnlock()
+	return f.enabled
+}
+
+func (f *compatibilityFlag) Set(enabled bool) {
+	f.mu.Lock()
+	f.enabled = enabled
+	f.mu.Unlock()
+}
+
+func TestEngineCompatibilityDisabledRejectsExperimentalJobsBeforeTaskOrRunner(t *testing.T) {
+	manager := tasks.NewManager()
+	compatibility := &compatibilityFlag{}
+	factoryCalls := 0
+	engine, err := newTestEngine(engineDeps{
+		manager:       manager,
+		compatibility: compatibility,
+		newDownloader: func(download.ProgressFunc) (directDownloader, error) {
+			factoryCalls++
+			return directDownloaderFunc(func(context.Context, string, string) (string, error) { return "/downloads/x.mp4", nil }), nil
+		},
+		newHLSRunner: func(ffmpeg.ProgressFunc) (hlsRunner, error) {
+			factoryCalls++
+			return nil, errors.New("must not run")
+		},
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			factoryCalls++
+			return nil, errors.New("must not run")
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, spec := range []JobSpec{
+		{URL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", MediaType: "platform", Quality: "best"},
+		{URL: "https://cdn.example/video.mp4", PageURL: "https://www.youtube.com/watch?v=x", MediaType: "mp4"},
+		{URL: "https://cdn.example/master.m3u8", PageURL: "https://www.bilibili.com/video/x", MediaType: "hls"},
+	} {
+		_, startErr := engine.Start(context.Background(), spec)
+		var disabled *PlatformCompatibilityDisabledError
+		if !errors.As(startErr, &disabled) {
+			t.Fatalf("Start(%#v) error = %v, want compatibility disabled", spec, startErr)
+		}
+	}
+	if len(manager.List()) != 0 || factoryCalls != 0 {
+		t.Fatalf("disabled jobs created state: tasks=%#v factoryCalls=%d", manager.List(), factoryCalls)
+	}
+}
+
+func TestNewEngineRejectsNilCompatibilityProvider(t *testing.T) {
+	_, err := NewEngine(tasks.NewManager(), t.TempDir(), nil, "", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, nil)
+	if err == nil || !strings.Contains(err.Error(), "compatibility provider") {
+		t.Fatalf("NewEngine() error = %v, want missing compatibility provider", err)
+	}
+}
+
+func TestEngineCompatibilityDisabledAllowsOrdinaryDirectMedia(t *testing.T) {
+	manager := tasks.NewManager()
+	engine, err := newTestEngine(engineDeps{
+		manager:       manager,
+		compatibility: &compatibilityFlag{},
+		newDownloader: func(download.ProgressFunc) (directDownloader, error) {
+			return directDownloaderFunc(func(context.Context, string, string) (string, error) { return "/downloads/ordinary.mp4", nil }), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://media.example/video.mp4", PageURL: "https://example.com/watch", MediaType: "mp4",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if completed := waitStatus(t, manager, task.ID, tasks.Completed); completed.OutputPath != "/downloads/ordinary.mp4" {
+		t.Fatalf("ordinary output = %#v", completed)
+	}
+}
+
+func TestEngineRetryRechecksCompatibilityBeforeCreatingAttempt(t *testing.T) {
+	manager := tasks.NewManager()
+	compatibility := &compatibilityFlag{enabled: true}
+	factoryCalls := 0
+	engine, err := newTestEngine(engineDeps{
+		manager: manager, compatibility: compatibility,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			factoryCalls++
+			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
+				return "", errors.New("injected failure")
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	original, err := engine.Start(context.Background(), JobSpec{
+		URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "best",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	waitStatus(t, manager, original.ID, tasks.Failed)
+	compatibility.Set(false)
+	before := len(manager.List())
+	_, retryErr := engine.Retry(context.Background(), original.ID)
+	var disabled *PlatformCompatibilityDisabledError
+	if !errors.As(retryErr, &disabled) {
+		t.Fatalf("Retry() error = %v, want compatibility disabled", retryErr)
+	}
+	if len(manager.List()) != before || factoryCalls != 1 {
+		t.Fatalf("disabled retry created work: tasks=%d want=%d factories=%d", len(manager.List()), before, factoryCalls)
+	}
+}
+
+func TestEngineRunningPlatformJobContinuesWhenCompatibilityTurnsOff(t *testing.T) {
+	manager := tasks.NewManager()
+	compatibility := &compatibilityFlag{enabled: true}
+	started := make(chan struct{})
+	release := make(chan struct{})
+	canceled := make(chan struct{}, 1)
+	engine, err := newTestEngine(engineDeps{
+		manager: manager, compatibility: compatibility,
+		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
+			return platformRunnerFunc(func(ctx context.Context, _ ytdlp.Request) (string, error) {
+				close(started)
+				select {
+				case <-release:
+					return "/downloads/running.mp4", nil
+				case <-ctx.Done():
+					canceled <- struct{}{}
+					return "", ctx.Err()
+				}
+			}), nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	task, err := engine.Start(context.Background(), JobSpec{URL: "https://youtu.be/_mVb1D8wHxg", MediaType: "platform", Quality: "720"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-started:
+	case <-time.After(time.Second):
+		t.Fatal("platform runner did not start")
+	}
+	compatibility.Set(false)
+	select {
+	case <-canceled:
+		t.Fatal("running task was canceled when compatibility changed")
+	case <-time.After(100 * time.Millisecond):
+	}
+	close(release)
+	if completed := waitStatus(t, manager, task.ID, tasks.Completed); completed.OutputPath != "/downloads/running.mp4" {
+		t.Fatalf("running task = %#v", completed)
+	}
+}
+
 type publishedTestError struct {
 	path string
 	err  error
@@ -61,7 +234,7 @@ func TestEngineStartsMP4AsynchronouslyAndReportsProgress(t *testing.T) {
 	started := make(chan struct{})
 	release := make(chan struct{})
 
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(progress download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(ctx context.Context, rawURL, title string) (string, error) {
@@ -107,7 +280,7 @@ func TestEngineStartsMP4AsynchronouslyAndReportsProgress(t *testing.T) {
 
 func TestEngineStartPlatformCanonicalizesBeforeCreatingTask(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{manager: manager})
+	engine, err := newTestEngine(engineDeps{manager: manager})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -128,7 +301,7 @@ func TestEngineStartPlatformCanonicalizesBeforeCreatingTask(t *testing.T) {
 
 func TestEngineStartPlatformRejectsUnsupportedURLBeforeCreatingTask(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{manager: manager})
+	engine, err := newTestEngine(engineDeps{manager: manager})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -147,7 +320,7 @@ func TestEngineStartPlatformRejectsUnsupportedURLBeforeCreatingTask(t *testing.T
 
 func TestEngineStartPlatformRejectsUnknownQualityBeforeCreatingTask(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{manager: manager})
+	engine, err := newTestEngine(engineDeps{manager: manager})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -163,7 +336,7 @@ func TestEngineStartPlatformRejectsUnknownQualityBeforeCreatingTask(t *testing.T
 
 func TestEnginePlatformDownloaderMissingRejectsSynchronously(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{manager: manager, platformUnavailable: true})
+	engine, err := newTestEngine(engineDeps{manager: manager, platformUnavailable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -184,7 +357,7 @@ func TestEnginePlatformDownloaderMissingRejectsSynchronously(t *testing.T) {
 
 func TestEnginePlatformFFmpegMissingRejectsSynchronously(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := NewEngine(manager, t.TempDir(), nil, "", ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos"}, ytdlp.RuntimeResult{})
+	engine, err := NewEngine(manager, t.TempDir(), nil, "", ytdlp.ProbeResult{Path: "/Applications/WebVideoHarbor/yt-dlp_macos"}, ytdlp.RuntimeResult{}, &compatibilityFlag{enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -205,7 +378,7 @@ func TestEnginePlatformFFmpegMissingRejectsSynchronously(t *testing.T) {
 
 func TestEnginePlatformRuntimeMissingRejectsSynchronously(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{manager: manager, platformRuntimeUnavailable: true})
+	engine, err := newTestEngine(engineDeps{manager: manager, platformRuntimeUnavailable: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -226,7 +399,7 @@ func TestNewEngineRejectsPathOnlyPlatformIdentity(t *testing.T) {
 	engine, err := NewEngine(manager, t.TempDir(), nil, "/usr/local/bin/ffmpeg", ytdlp.ProbeResult{
 		Path:    "/Applications/WebVideoHarbor/yt-dlp_macos",
 		Version: "2026.07.04",
-	}, ytdlp.RuntimeResult{})
+	}, ytdlp.RuntimeResult{}, &compatibilityFlag{enabled: true})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -246,7 +419,7 @@ func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testin
 	manager := tasks.NewManager()
 	requests := make(chan ytdlp.Request, 1)
 	factoryCalls := 0
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			factoryCalls++
@@ -288,7 +461,7 @@ func TestEnginePlatformPassesCanonicalRequestToFreshRunnerAndCompletes(t *testin
 
 func TestEnginePlatformNilRunnerFailsSafely(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return nil, nil
@@ -312,7 +485,7 @@ func TestEnginePlatformNilRunnerFailsSafely(t *testing.T) {
 func TestEnginePlatformFactoryErrorFailsSafelyWithoutRunning(t *testing.T) {
 	manager := tasks.NewManager()
 	runCalled := false
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -341,7 +514,7 @@ func TestEnginePlatformFactoryErrorFailsSafelyWithoutRunning(t *testing.T) {
 
 func TestEnginePlatformEmptySuccessPathFailsSafely(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -368,7 +541,7 @@ func TestEnginePlatformProgressIsMonotonicAndEntersMergingAt99BeforeCompletion(t
 	manager := tasks.NewManager()
 	progressReady := make(chan struct{})
 	release := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -412,7 +585,7 @@ func TestEnginePlatformProgressRejectsNonFiniteValues(t *testing.T) {
 	manager := tasks.NewManager()
 	progressReady := make(chan struct{})
 	release := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -449,7 +622,7 @@ func TestEnginePlatformProgressHandlesConcurrentOutOfOrderCallbacks(t *testing.T
 	manager := tasks.NewManager()
 	progressReady := make(chan struct{})
 	release := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(progress ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -493,7 +666,7 @@ func TestEnginePlatformProgressHandlesConcurrentOutOfOrderCallbacks(t *testing.T
 func TestEnginePlatformCancelSignalsRunnerContext(t *testing.T) {
 	manager := tasks.NewManager()
 	canceled := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(ctx context.Context, _ ytdlp.Request) (string, error) {
@@ -528,7 +701,7 @@ func TestEnginePlatformRetryUsesCanonicalStoredSpecAndFreshRunner(t *testing.T) 
 	manager := tasks.NewManager()
 	requests := make(chan ytdlp.Request, 2)
 	factoryCalls := 0
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			factoryCalls++
@@ -580,7 +753,7 @@ func TestEnginePlatformRetryUsesCanonicalStoredSpecAndFreshRunner(t *testing.T) 
 
 func TestEnginePlatformPublishedPathCompletesDespiteCleanupWarning(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -609,7 +782,7 @@ func TestEnginePlatformJoinedPublishedPathWinsCancelAndReturnedPath(t *testing.T
 	published := make(chan struct{})
 	returnResult := make(chan struct{})
 	const realPath = "/downloads/actually-published-platform.mp4"
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newPlatformRunner: func(ytdlp.ProgressFunc) (platformRunner, error) {
 			return platformRunnerFunc(func(context.Context, ytdlp.Request) (string, error) {
@@ -654,7 +827,7 @@ func TestEngineHLSUsesExactInspectedManifestAndMergingState(t *testing.T) {
 	runnerStarted := make(chan ffmpeg.Request, 1)
 	release := make(chan struct{})
 
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		inspector: manifestInspectorFunc(func(_ context.Context, rawURL string) (ManifestInspection, error) {
 			if rawURL != originalURL {
@@ -713,7 +886,7 @@ func TestEngineHLSRetryUsesFreshFinalManifestURL(t *testing.T) {
 	inspectCalls := 0
 	runCalls := 0
 	requests := make(chan ffmpeg.Request, 2)
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		inspector: manifestInspectorFunc(func(_ context.Context, rawURL string) (ManifestInspection, error) {
 			if rawURL != "https://origin.example/old/master.m3u8" {
@@ -763,7 +936,7 @@ func TestEngineHLSRetryUsesFreshFinalManifestURL(t *testing.T) {
 func TestEngineCancelSignalsTaskContext(t *testing.T) {
 	manager := tasks.NewManager()
 	workerCanceled := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) {
@@ -796,7 +969,7 @@ func TestEngineShutdownCancelsAndWaitsForWorkerCleanup(t *testing.T) {
 	manager := tasks.NewManager()
 	started := make(chan struct{})
 	cleaned := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) {
@@ -838,7 +1011,7 @@ func TestEngineShutdownHonorsTimeoutThenCanFinish(t *testing.T) {
 	manager := tasks.NewManager()
 	started := make(chan struct{})
 	release := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(context.Context, string, string) (string, error) {
@@ -868,7 +1041,7 @@ func TestEngineShutdownHonorsTimeoutThenCanFinish(t *testing.T) {
 
 func TestEngineStartRacingShutdownIsSafe(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) { <-ctx.Done(); return "", ctx.Err() }), nil
@@ -902,7 +1075,7 @@ func TestPublishedMP4WinsConcurrentCancel(t *testing.T) {
 	manager := tasks.NewManager()
 	published := make(chan struct{})
 	returnPath := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(context.Context, string, string) (string, error) {
@@ -934,7 +1107,7 @@ func TestPublishedHLSWinsConcurrentCancel(t *testing.T) {
 	manager := tasks.NewManager()
 	published := make(chan struct{})
 	returnPath := make(chan struct{})
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		inspector: manifestInspectorFunc(func(context.Context, string) (ManifestInspection, error) {
 			return ManifestInspection{Playlist: &hls.Playlist{}, Manifest: []byte("#EXTM3U\n#EXTINF:1,\na.ts\n"), SourceURL: "https://cdn.example/final.m3u8"}, nil
@@ -1017,7 +1190,7 @@ func TestPublishedCleanupWarningsCompleteDirectAndHLSJobs(t *testing.T) {
 			manager := tasks.NewManager()
 			deps := engineDeps{manager: manager}
 			tt.configure(&deps, path, published, release)
-			engine, err := newEngine(deps)
+			engine, err := newTestEngine(deps)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -1056,7 +1229,7 @@ func TestPublishedCleanupWarningsCompleteDirectAndHLSJobs(t *testing.T) {
 func TestShutdownCancellationNeverCompletesWithoutPublishedPath(t *testing.T) {
 	manager := tasks.NewManager()
 	started := make(chan struct{})
-	engine, err := newEngine(engineDeps{manager: manager, newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
+	engine, err := newTestEngine(engineDeps{manager: manager, newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 		return directDownloaderFunc(func(ctx context.Context, _, _ string) (string, error) {
 			close(started)
 			<-ctx.Done()
@@ -1085,7 +1258,7 @@ func TestShutdownCancellationNeverCompletesWithoutPublishedPath(t *testing.T) {
 
 func TestEngineFailureStoresOnlySafeChineseMessage(t *testing.T) {
 	manager := tasks.NewManager()
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			return directDownloaderFunc(func(context.Context, string, string) (string, error) {
@@ -1176,7 +1349,7 @@ func TestEngineRetryUsesStoredSpecAndFreshWorker(t *testing.T) {
 	var mu sync.Mutex
 	factoryCalls := 0
 	seen := make([]JobSpec, 0, 2)
-	engine, err := newEngine(engineDeps{
+	engine, err := newTestEngine(engineDeps{
 		manager: manager,
 		newDownloader: func(_ download.ProgressFunc) (directDownloader, error) {
 			mu.Lock()
@@ -1232,7 +1405,7 @@ func TestEngineRetryRejectsTaskWithoutStoredSpec(t *testing.T) {
 	if _, err := manager.Fail(task.ID, "失败", errors.New("failure")); err != nil {
 		t.Fatalf("fail manager task: %v", err)
 	}
-	engine, err := newEngine(engineDeps{manager: manager})
+	engine, err := newTestEngine(engineDeps{manager: manager})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}
@@ -1250,7 +1423,7 @@ func TestEngineRetryRejectsTaskWithoutStoredSpec(t *testing.T) {
 }
 
 func TestEngineRejectsUnnormalizedMediaType(t *testing.T) {
-	engine, err := newEngine(engineDeps{manager: tasks.NewManager()})
+	engine, err := newTestEngine(engineDeps{manager: tasks.NewManager()})
 	if err != nil {
 		t.Fatalf("new engine: %v", err)
 	}

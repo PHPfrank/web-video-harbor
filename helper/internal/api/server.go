@@ -450,6 +450,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	spec.URL = strings.TrimSpace(spec.URL)
+	spec.PageURL = strings.TrimSpace(spec.PageURL)
 	spec.Title = strings.TrimSpace(spec.Title)
 	spec.MediaType = strings.ToLower(strings.TrimSpace(spec.MediaType))
 	spec.Quality = strings.ToLower(strings.TrimSpace(spec.Quality))
@@ -613,6 +614,11 @@ func (s *Server) writeServiceError(w http.ResponseWriter, err error) {
 	var platformRuntimeMissing *PlatformRuntimeUnavailableError
 	if errors.As(err, &platformRuntimeMissing) {
 		writeError(w, http.StatusConflict, "javascript_runtime", platformRuntimeMissing.SafeMessage())
+		return
+	}
+	var compatibilityDisabled *PlatformCompatibilityDisabledError
+	if errors.As(err, &compatibilityDisabled) {
+		writeError(w, http.StatusConflict, "platform_compatibility_disabled", compatibilityDisabled.SafeMessage())
 		return
 	}
 	var safe interface{ SafeMessage() string }

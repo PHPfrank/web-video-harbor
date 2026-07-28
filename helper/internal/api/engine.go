@@ -16,6 +16,7 @@ import (
 	"web-video-harbor/helper/internal/hls"
 	"web-video-harbor/helper/internal/media"
 	"web-video-harbor/helper/internal/output"
+	"web-video-harbor/helper/internal/platformscope"
 	"web-video-harbor/helper/internal/platformurl"
 	"web-video-harbor/helper/internal/safety"
 	"web-video-harbor/helper/internal/tasks"
@@ -29,6 +30,7 @@ const maxManifestBytes = 2 * 1024 * 1024
 // part of the model.
 type JobSpec struct {
 	URL       string `json:"url"`
+	PageURL   string `json:"pageUrl,omitempty"`
 	Title     string `json:"title"`
 	MediaType string `json:"mediaType"`
 	Quality   string `json:"quality,omitempty"`
@@ -50,6 +52,10 @@ type manifestInspector interface {
 	Inspect(context.Context, string) (ManifestInspection, error)
 }
 
+type platformCompatibility interface {
+	Enabled() bool
+}
+
 // ManifestInspection binds the exact fetched bytes to the final URL after
 // redirects. Relative playlist references must be resolved from SourceURL.
 type ManifestInspection struct {
@@ -64,6 +70,7 @@ type engineDeps struct {
 	newDownloader              func(download.ProgressFunc) (directDownloader, error)
 	newHLSRunner               func(ffmpeg.ProgressFunc) (hlsRunner, error)
 	newPlatformRunner          func(ytdlp.ProgressFunc) (platformRunner, error)
+	compatibility              platformCompatibility
 	platformUnavailable        bool
 	platformFFmpegUnavailable  bool
 	platformRuntimeUnavailable bool
@@ -77,6 +84,7 @@ type Engine struct {
 	newDownloader              func(download.ProgressFunc) (directDownloader, error)
 	newHLSRunner               func(ffmpeg.ProgressFunc) (hlsRunner, error)
 	newPlatformRunner          func(ytdlp.ProgressFunc) (platformRunner, error)
+	compatibility              platformCompatibility
 	platformUnavailable        bool
 	platformFFmpegUnavailable  bool
 	platformRuntimeUnavailable bool
@@ -95,6 +103,16 @@ type EngineClosedError struct{}
 func (*EngineClosedError) Error() string { return "task engine is shutting down" }
 func (*EngineClosedError) SafeMessage() string {
 	return "本地助手正在退出，无法创建新任务"
+}
+
+// PlatformCompatibilityDisabledError reports that the local consent gate is off.
+type PlatformCompatibilityDisabledError struct{}
+
+func (*PlatformCompatibilityDisabledError) Error() string {
+	return "experimental platform compatibility is disabled"
+}
+func (*PlatformCompatibilityDisabledError) SafeMessage() string {
+	return "实验性平台兼容尚未开启"
 }
 
 // PlatformDownloaderUnavailableError reports a damaged or incomplete helper
@@ -233,6 +251,9 @@ func newEngine(deps engineDeps) (*Engine, error) {
 	if deps.manager == nil {
 		return nil, errors.New("task manager is required")
 	}
+	if deps.compatibility == nil {
+		return nil, errors.New("platform compatibility provider is required")
+	}
 	rootCtx, cancel := context.WithCancel(context.Background())
 	return &Engine{
 		manager:                    deps.manager,
@@ -240,6 +261,7 @@ func newEngine(deps engineDeps) (*Engine, error) {
 		newDownloader:              deps.newDownloader,
 		newHLSRunner:               deps.newHLSRunner,
 		newPlatformRunner:          deps.newPlatformRunner,
+		compatibility:              deps.compatibility,
 		platformUnavailable:        deps.platformUnavailable,
 		platformFFmpegUnavailable:  deps.platformFFmpegUnavailable,
 		platformRuntimeUnavailable: deps.platformRuntimeUnavailable,
@@ -251,9 +273,12 @@ func newEngine(deps engineDeps) (*Engine, error) {
 
 // NewEngine constructs a production engine. A new downloader or FFmpeg runner
 // is created for every attempt.
-func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult) (*Engine, error) {
+func NewEngine(manager *tasks.Manager, outputDir string, resolver safety.Resolver, ffmpegPath string, platform ytdlp.ProbeResult, runtime ytdlp.RuntimeResult, compatibility platformCompatibility) (*Engine, error) {
+	if compatibility == nil {
+		return nil, errors.New("platform compatibility provider is required")
+	}
 	deps := engineDeps{
-		manager:   manager,
+		manager: manager, compatibility: compatibility,
 		inspector: NewManifestInspector(resolver),
 		newDownloader: func(progress download.ProgressFunc) (directDownloader, error) {
 			return download.New(download.Config{
@@ -305,6 +330,12 @@ func (e *Engine) Start(ctx context.Context, spec JobSpec) (tasks.Task, error) {
 	}
 	if strings.TrimSpace(spec.URL) == "" {
 		return tasks.Task{}, errors.New("video URL is required")
+	}
+	if spec.PageURL != "" && !validInputURL(spec.PageURL) {
+		return tasks.Task{}, errors.New("page URL is invalid")
+	}
+	if (spec.MediaType == "platform" || platformscope.IsExperimentalPage(spec.PageURL)) && !e.compatibility.Enabled() {
+		return tasks.Task{}, &PlatformCompatibilityDisabledError{}
 	}
 	if spec.MediaType == "platform" {
 		switch ytdlp.Quality(spec.Quality) {
@@ -649,6 +680,9 @@ func (e *Engine) Retry(ctx context.Context, id string) (tasks.Task, error) {
 	}
 	if source.Status != tasks.Failed && source.Status != tasks.Canceled {
 		return tasks.Task{}, &tasks.TransitionError{ID: id, From: source.Status, To: tasks.Queued}
+	}
+	if (spec.MediaType == "platform" || platformscope.IsExperimentalPage(spec.PageURL)) && !e.compatibility.Enabled() {
+		return tasks.Task{}, &PlatformCompatibilityDisabledError{}
 	}
 
 	retry, err := e.manager.CreateWithContext(e.rootCtx, spec.URL, spec.Title)
