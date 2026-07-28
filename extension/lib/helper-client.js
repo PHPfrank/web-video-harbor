@@ -11,6 +11,7 @@
   const TOKEN_KEY = 'videoHelperToken';
   const DEFAULT_TIMEOUT_MS = 8000;
   const HEALTH_VERSION_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._+-]{0,63}$/;
+  const NOTICE_VERSION_PATTERN = /^\d{4}-\d{2}-\d{2}-v[1-9]\d{0,2}$/;
   const ERROR_MESSAGES = {
     unauthorized: '配对密钥无效，请重新配对',
     unsafe_source: '视频地址不安全或无效',
@@ -27,6 +28,10 @@
     verification_required: 'YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息',
     network_filtered: '当前网络阻止了本地下载连接，请联系网络管理员或更换网络',
     javascript_runtime: '视频解析组件不完整，请重新安装网页视频港',
+    platform_compatibility_disabled: '实验性平台兼容尚未开启',
+    invalid_acknowledgment: '请先阅读并确认实验性平台兼容使用边界',
+    notice_outdated: '使用提示已更新，请重新阅读后确认',
+    settings_unavailable: '无法保存本地设置',
     not_revealable: '任务文件尚不可显示',
     reveal_failed: '无法在 Finder 中显示文件',
   };
@@ -124,6 +129,25 @@
     };
   }
 
+  function safeNoticeVersion(value) {
+    return typeof value === 'string' && value.length <= 32 && NOTICE_VERSION_PATTERN.test(value)
+      ? value : '';
+  }
+
+  function normalizeSettings(value) {
+    const raw = value && typeof value === 'object' && !Array.isArray(value) ? value : {};
+    const currentPlatformNoticeVersion = safeNoticeVersion(raw.currentPlatformNoticeVersion);
+    const acknowledgedVersion = safeNoticeVersion(raw.platformNoticeVersion);
+    const enabled = raw.experimentalPlatformCompatibilityEnabled === true
+      && currentPlatformNoticeVersion !== ''
+      && acknowledgedVersion === currentPlatformNoticeVersion;
+    return {
+      experimentalPlatformCompatibilityEnabled: enabled,
+      platformNoticeVersion: enabled ? acknowledgedVersion : '',
+      currentPlatformNoticeVersion,
+    };
+  }
+
   function createHelperClient(options) {
     const settings = options || {};
     const fetchImpl = settings.fetchImpl || (typeof fetch === 'function' ? fetch.bind(globalThis) : null);
@@ -187,8 +211,32 @@
       return request(`/v1/tasks/${encodeURIComponent(id)}/${action}`, { method: 'POST', authenticated: true });
     }
 
+    async function setPlatformCompatibility(input) {
+      const value = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+      let body;
+      if (value.enabled === true) {
+        if (value.acknowledged !== true) {
+          throw new HelperClientError(ERROR_MESSAGES.invalid_acknowledgment, 'invalid_acknowledgment');
+        }
+        const noticeVersion = safeNoticeVersion(value.noticeVersion);
+        if (!noticeVersion) {
+          throw new HelperClientError(ERROR_MESSAGES.notice_outdated, 'notice_outdated');
+        }
+        body = { enabled: true, acknowledged: true, noticeVersion };
+      } else if (value.enabled === false) {
+        body = { enabled: false };
+      } else {
+        throw new HelperClientError(ERROR_MESSAGES.invalid_request, 'invalid_request');
+      }
+      return normalizeSettings(await request('/v1/settings/platform-compatibility', {
+        method: 'PUT', authenticated: true, body,
+      }));
+    }
+
     return {
       async health() { return normalizeHealth(await request('/health')); },
+      async getSettings() { return normalizeSettings(await request('/v1/settings', { authenticated: true })); },
+      setPlatformCompatibility,
       inspect(url) { return request('/v1/inspect', { method: 'POST', authenticated: true, body: { url } }); },
       listTasks() { return request('/v1/tasks', { authenticated: true }); },
       createTask(spec) { return request('/v1/tasks', { method: 'POST', authenticated: true, body: spec }); },
@@ -208,6 +256,7 @@
     HelperClientError,
     createHelperClient,
     describeHealth,
+    normalizeSettings,
     readToken,
     saveToken,
   };

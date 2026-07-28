@@ -182,6 +182,125 @@ test('inspect and task actions match the Go API request shape', async () => {
   ]);
 });
 
+test('settings GET is authenticated and normalizes only a complete current acknowledgment', async () => {
+  const calls = [];
+  const responses = [
+    {
+      experimentalPlatformCompatibilityEnabled: true,
+      platformNoticeVersion: '2026-07-28-v1',
+      currentPlatformNoticeVersion: '2026-07-28-v1',
+      path: '/Users/person/settings.json',
+    },
+    {
+      experimentalPlatformCompatibilityEnabled: true,
+      platformNoticeVersion: 'stale',
+      currentPlatformNoticeVersion: '2026-07-28-v1',
+    },
+    {
+      experimentalPlatformCompatibilityEnabled: 'true',
+      platformNoticeVersion: '2026-07-28-v1',
+      currentPlatformNoticeVersion: '/Users/person/private',
+    },
+    null,
+  ];
+  const client = helper.createHelperClient({
+    storageLocal: localStorage('pairing-token'),
+    async fetchImpl(url, options) {
+      calls.push({ url, options });
+      return jsonResponse(200, responses.shift());
+    },
+  });
+
+  assert.deepEqual(await client.getSettings(), {
+    experimentalPlatformCompatibilityEnabled: true,
+    platformNoticeVersion: '2026-07-28-v1',
+    currentPlatformNoticeVersion: '2026-07-28-v1',
+  });
+  for (let index = 0; index < 3; index += 1) {
+    const settings = await client.getSettings();
+    assert.equal(settings.experimentalPlatformCompatibilityEnabled, false);
+    assert.equal(settings.platformNoticeVersion, '');
+    if (index >= 1) assert.equal(settings.currentPlatformNoticeVersion, '');
+    assert.doesNotMatch(JSON.stringify(settings), /Users|private|path/);
+  }
+  assert.equal(calls.every((call) => call.url === 'http://127.0.0.1:17432/v1/settings'), true);
+  assert.equal(calls.every((call) => call.options.headers['X-Video-Helper-Token'] === 'pairing-token'), true);
+});
+
+test('settings normalizer accepts bounded notice versions and fails closed otherwise', () => {
+  assert.deepEqual(helper.normalizeSettings({
+    experimentalPlatformCompatibilityEnabled: false,
+    platformNoticeVersion: '',
+    currentPlatformNoticeVersion: '2026-07-28-v1',
+  }), {
+    experimentalPlatformCompatibilityEnabled: false,
+    platformNoticeVersion: '',
+    currentPlatformNoticeVersion: '2026-07-28-v1',
+  });
+  for (const unsafe of ['', ' old', '2026-07-28-v1\n/private', 'x'.repeat(33), '/Users/person']) {
+    assert.deepEqual(helper.normalizeSettings({
+      experimentalPlatformCompatibilityEnabled: true,
+      platformNoticeVersion: unsafe,
+      currentPlatformNoticeVersion: unsafe,
+    }), {
+      experimentalPlatformCompatibilityEnabled: false,
+      platformNoticeVersion: '',
+      currentPlatformNoticeVersion: '',
+    });
+  }
+});
+
+test('settings PUT constructs the exact authenticated enable and disable bodies', async () => {
+  const calls = [];
+  const client = helper.createHelperClient({
+    storageLocal: localStorage('pairing-token'),
+    async fetchImpl(url, options) {
+      calls.push({ url, options });
+      const body = JSON.parse(options.body);
+      return jsonResponse(200, {
+        experimentalPlatformCompatibilityEnabled: body.enabled,
+        platformNoticeVersion: body.enabled ? body.noticeVersion : '',
+        currentPlatformNoticeVersion: '2026-07-28-v1',
+      });
+    },
+  });
+
+  await client.setPlatformCompatibility({
+    enabled: true,
+    acknowledged: true,
+    noticeVersion: '2026-07-28-v1',
+    ignored: '/Users/person/private',
+  });
+  await client.setPlatformCompatibility({ enabled: false, acknowledged: true, noticeVersion: 'stale' });
+
+  assert.deepEqual(calls.map((call) => JSON.parse(call.options.body)), [
+    { enabled: true, acknowledged: true, noticeVersion: '2026-07-28-v1' },
+    { enabled: false },
+  ]);
+  assert.equal(calls.every((call) => call.options.method === 'PUT'), true);
+  assert.equal(calls.every((call) => call.options.headers['X-Video-Helper-Token'] === 'pairing-token'), true);
+  assert.equal(calls.every((call) => call.url === 'http://127.0.0.1:17432/v1/settings/platform-compatibility'), true);
+});
+
+test('settings PUT refuses unsafe local enable requests before fetching', async () => {
+  let fetchCalls = 0;
+  const client = helper.createHelperClient({
+    storageLocal: localStorage('pairing-token'),
+    async fetchImpl() { fetchCalls += 1; return jsonResponse(200, {}); },
+  });
+  await assert.rejects(client.setPlatformCompatibility({ enabled: true, acknowledged: false, noticeVersion: '2026-07-28-v1' }), {
+    code: 'invalid_acknowledgment',
+    message: '请先阅读并确认实验性平台兼容使用边界',
+  });
+  for (const noticeVersion of ['', 'stale', '/Users/person/private', 'x'.repeat(33)]) {
+    await assert.rejects(client.setPlatformCompatibility({ enabled: true, acknowledged: true, noticeVersion }), {
+      code: 'notice_outdated',
+      message: '使用提示已更新，请重新阅读后确认',
+    });
+  }
+  assert.equal(fetchCalls, 0);
+});
+
 test('v1 calls fail locally when no pairing token is stored', async () => {
   let fetched = false;
   const client = helper.createHelperClient({
@@ -251,6 +370,10 @@ test('platform compatibility errors use fixed safe Chinese messages', async () =
     ['verification_required', 'YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息'],
     ['network_filtered', '当前网络阻止了本地下载连接，请联系网络管理员或更换网络'],
     ['javascript_runtime', '视频解析组件不完整，请重新安装网页视频港'],
+    ['platform_compatibility_disabled', '实验性平台兼容尚未开启'],
+    ['invalid_acknowledgment', '请先阅读并确认实验性平台兼容使用边界'],
+    ['notice_outdated', '使用提示已更新，请重新阅读后确认'],
+    ['settings_unavailable', '无法保存本地设置'],
   ];
 
   for (const [code, message] of cases) {
