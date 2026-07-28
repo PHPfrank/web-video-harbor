@@ -28,7 +28,7 @@ M3U8/HLS 合并需要 FFmpeg。默认下载目录为 `~/Downloads/WebVideoHarbor
 
 ## 可选推荐资源
 
-项目官网提供一页独立的[推荐资源](https://phpfrank.github.io/web-video-harbor/recommendations.html)，供有需要的用户自行查看存储设备和云服务。该页面会清晰披露推广链接；扩展只提供入口，不保存推广参数，也不跟踪点击。
+项目官网提供一页独立的[推荐资源](https://phpfrank.github.io/web-video-harbor/recommendations.html)，供有需要的用户自行查看存储设备和云服务。该页面会清晰披露推广链接；如果用户通过链接购买，项目维护者可能获得佣金，但推荐与购买都不影响 WebVideoHarbor 的免费功能。扩展只提供入口，不保存推广参数，也不跟踪点击。
 
 ## 兼容性与使用边界
 

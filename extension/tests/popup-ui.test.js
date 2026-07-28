@@ -113,6 +113,7 @@ test('options page requires explicit accessible consent for experimental platfor
 
 test('options page offers a disclosed recommendation link without embedding affiliate destinations', () => {
   const html = source('options.html');
+  const css = source('popup.css');
   const extensionSources = fs.readdirSync(extensionDir, { recursive: true })
     .filter((name) => !name.startsWith(`tests${path.sep}`))
     .filter((name) => fs.statSync(path.join(extensionDir, name)).isFile())
@@ -124,6 +125,9 @@ test('options page offers a disclosed recommendation link without embedding affi
   assert.match(html, /页面可能包含推广链接/);
   assert.match(html, /target=["']_blank["']/);
   assert.match(html, /rel=["']noopener noreferrer["']/);
+  assert.match(html, /在新窗口打开/);
+  assert.match(css, /\.recommendations-link\s*\{[^}]*display:\s*inline-flex/s);
+  assert.match(css, /@media\s*\(max-width:\s*560px\)/);
   assert.doesNotMatch(extensionSources, /s\.click\.taobao\.com/);
   assert.doesNotMatch(extensionSources, /userCode=c5z9bjlt/);
 });

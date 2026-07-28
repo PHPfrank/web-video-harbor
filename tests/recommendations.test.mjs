@@ -44,6 +44,12 @@ test('GitHub Pages site provides its homepage and recommendation entry point', a
     [...recommendations.matchAll(/class=["'][^"']*\brecommendation-card\b[^"']*["']/g)].length,
     2,
   );
+
+  for (const document of [homepage, recommendations]) {
+    assert.doesNotMatch(document, /<(?:script|iframe|object|embed)\b/i);
+    assert.doesNotMatch(document, /<(?:img|link|source|video|audio)\b[^>]*(?:src|href)=["']https?:\/\//i);
+    assert.doesNotMatch(document, /<form\b[^>]*action=["']https?:\/\//i);
+  }
 });
 
 test('recommendation links are disclosed, current, and free of tracking claims', async () => {
@@ -58,7 +64,7 @@ test('recommendation links are disclosed, current, and free of tracking claims',
     assert.match(
       recommendations,
       new RegExp(
-        `<a\\s+[^>]*href=["']${escapedUrl}["'][^>]*rel=["']sponsored noopener noreferrer["'][^>]*>`,
+        `<a\\s+[^>]*href=["']${escapedUrl}["'][^>]*target=["']_blank["'][^>]*rel=["']sponsored noopener noreferrer["'][^>]*>`,
       ),
     );
   }
@@ -71,6 +77,7 @@ test('recommendation links are disclosed, current, and free of tracking claims',
     recommendations,
     /具体品牌、型号、容量、价格和售后以商家页面实时信息为准/,
   );
+  assert.match(recommendations, /WebVideoHarbor 未添加访问统计或点击跟踪/);
 
   const forbiddenContent = [
     /1082\.05/i,

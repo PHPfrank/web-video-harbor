@@ -55,6 +55,8 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   assert.match(readme, /\[安装使用说明\]\(docs\/安装使用说明\.md\)/);
   assert.match(readme, /\[第三方组件说明\]\(THIRD_PARTY_NOTICES\.md\)/);
   assert.match(readme, /\[推荐资源\]\(https:\/\/phpfrank\.github\.io\/web-video-harbor\/recommendations\.html\)/);
+  assert.match(readme, /项目维护者可能获得佣金/);
+  assert.match(readme, /不影响.*免费功能|免费功能.*不受影响/);
   assert.doesNotMatch(readme, /s\.click\.taobao\.com|userCode=c5z9bjlt/);
 
   const opening = readme.split(/^## /m, 1)[0];
@@ -70,9 +72,13 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
     '商家',
     '不增加自己的点击跟踪',
     '不使用中转服务',
+    '不会把当前网页地址、媒体地址、下载记录或配对密钥发送到推荐页',
   ]) {
     assert.match(privacy, new RegExp(topic), `affiliate disclosure is missing: ${topic}`);
   }
+  assert.match(guide, /扩展和本地助手不包含广告 SDK/);
+  assert.match(guide, /官网可能包含清晰标注的联盟推荐/);
+  assert.doesNotMatch(guide, /项目不包含分析、遥测、广告或远程授权服务/);
 
   const productionExtension = filesUnder(path.join(repoRoot, 'extension'))
     .filter((file) => !file.includes(`${path.sep}tests${path.sep}`))

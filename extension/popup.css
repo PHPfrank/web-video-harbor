@@ -373,14 +373,16 @@ h2 {
   line-height: 1.6;
 }
 .recommendations-link {
+  display: inline-flex;
   flex: 0 0 auto;
+  align-items: center;
+  gap: 5px;
   padding: 8px 0;
   color: var(--color-accent);
   font-weight: 650;
-  text-decoration-thickness: 1px;
-  text-underline-offset: 3px;
+  text-decoration: none;
 }
-.recommendations-link:hover { color: var(--color-accent-hover); }
+.recommendations-link:hover { color: var(--color-accent-hover); text-decoration: underline; }
 .recommendations-link:focus-visible {
   border-radius: 4px;
   outline: 3px solid color-mix(in srgb, var(--color-focus) 38%, transparent);
@@ -451,7 +453,7 @@ h2 {
 .dialog-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 20px; }
 .privacy-card ul { margin: 12px 0 0; padding-left: 20px; color: var(--color-muted); line-height: 1.65; }
 
-@media (max-width: 520px) {
+@media (max-width: 560px) {
   .options-shell { width: calc(100% - 24px); margin: 20px auto; }
   .settings-card, .privacy-card, .recommendations-card { padding: 17px; }
   .token-row, .settings-actions { align-items: stretch; flex-direction: column; }
