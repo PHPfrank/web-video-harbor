@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/settings"
 	"web-video-harbor/helper/internal/tasks"
 )
 
@@ -110,6 +111,43 @@ type fakeRevealer struct {
 	err   error
 }
 
+type fakeSettings struct {
+	mu       sync.Mutex
+	snapshot settings.Snapshot
+	calls    []struct {
+		enabled bool
+		version string
+	}
+	err error
+}
+
+func (f *fakeSettings) Snapshot() settings.Snapshot {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return f.snapshot
+}
+
+func (f *fakeSettings) SetPlatformCompatibility(enabled bool, version string) (settings.Snapshot, error) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.calls = append(f.calls, struct {
+		enabled bool
+		version string
+	}{enabled: enabled, version: version})
+	if f.err != nil {
+		return f.snapshot, f.err
+	}
+	if enabled {
+		f.snapshot = settings.Snapshot{
+			ExperimentalPlatformCompatibilityEnabled: true,
+			PlatformNoticeVersion:                    settings.CurrentPlatformNoticeVersion,
+		}
+	} else {
+		f.snapshot = settings.Snapshot{}
+	}
+	return f.snapshot, nil
+}
+
 func (f *fakeRevealer) Reveal(_ context.Context, path string) error {
 	f.paths = append(f.paths, path)
 	return f.err
@@ -121,11 +159,12 @@ func newTestServer(t *testing.T, mutate func(*Options)) (*Server, *fakeTasks, *f
 	service := newFakeTasks()
 	inspector := &fakeInspector{result: Inspection{MediaType: "mp4"}}
 	revealer := &fakeRevealer{}
+	settingsService := &fakeSettings{}
 	opts := Options{
 		Token: testToken, Version: "1.2.3", FFmpegAvailable: true,
 		PlatformDownloaderAvailable: true, PlatformDownloaderVersion: "2026.07.04",
 		JavaScriptRuntimeAvailable: true, JavaScriptRuntimeVersion: "2.4.5",
-		DownloadDir: dir, Inspector: inspector, Tasks: service, Revealer: revealer,
+		DownloadDir: dir, Inspector: inspector, Tasks: service, Revealer: revealer, Settings: settingsService,
 	}
 	if mutate != nil {
 		mutate(&opts)
@@ -135,6 +174,149 @@ func newTestServer(t *testing.T, mutate func(*Options)) (*Server, *fakeTasks, *f
 		t.Fatalf("New() error = %v", err)
 	}
 	return srv, service, inspector, revealer, dir
+}
+
+func TestSettingsGETIsAuthenticatedAndUsesBrowserDTO(t *testing.T) {
+	srv, _, _, _, _ := newTestServer(t, nil)
+	if rr := perform(t, srv.Handler(), http.MethodGet, "/v1/settings", nil, "", ""); rr.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated GET status = %d", rr.Code)
+	}
+	rr := perform(t, srv.Handler(), http.MethodGet, "/v1/settings", nil, testToken, "")
+	if rr.Code != http.StatusOK {
+		t.Fatalf("GET settings status = %d: %s", rr.Code, rr.Body.String())
+	}
+	var got map[string]any
+	if err := json.Unmarshal(rr.Body.Bytes(), &got); err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]any{
+		"experimentalPlatformCompatibilityEnabled": false,
+		"platformNoticeVersion":                    "",
+		"currentPlatformNoticeVersion":             settings.CurrentPlatformNoticeVersion,
+	}
+	if !mapsEqual(got, want) || strings.Contains(rr.Body.String(), "experimental_platform") {
+		t.Fatalf("GET settings = %#v, want %#v", got, want)
+	}
+}
+
+func TestSettingsPUTRequiresCurrentAcknowledgmentBeforeStore(t *testing.T) {
+	for _, tc := range []struct {
+		name, body, code string
+		status           int
+	}{
+		{"not acknowledged", `{"enabled":true,"acknowledged":false,"noticeVersion":"2026-07-28-v1"}`, "invalid_acknowledgment", http.StatusBadRequest},
+		{"stale notice", `{"enabled":true,"acknowledged":true,"noticeVersion":"old"}`, "notice_outdated", http.StatusConflict},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			store := &fakeSettings{}
+			srv, _, _, _, _ := newTestServer(t, func(o *Options) { o.Settings = store })
+			rr := perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", []byte(tc.body), testToken, "")
+			if rr.Code != tc.status || decodeObject(t, rr)["code"] != tc.code {
+				t.Fatalf("PUT status=%d body=%s", rr.Code, rr.Body.String())
+			}
+			if len(store.calls) != 0 {
+				t.Fatalf("invalid acknowledgment reached store: %#v", store.calls)
+			}
+		})
+	}
+}
+
+func TestSettingsPUTEnablesAndDisablesIdempotently(t *testing.T) {
+	store := &fakeSettings{}
+	srv, _, _, _, _ := newTestServer(t, func(o *Options) { o.Settings = store })
+	enable := []byte(`{"enabled":true,"acknowledged":true,"noticeVersion":"2026-07-28-v1"}`)
+	rr := perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", enable, testToken, "")
+	if rr.Code != http.StatusOK || decodeObject(t, rr)["experimentalPlatformCompatibilityEnabled"] != true {
+		t.Fatalf("enable status=%d body=%s", rr.Code, rr.Body.String())
+	}
+	for range 2 {
+		rr = perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", []byte(`{"enabled":false}`), testToken, "")
+		if rr.Code != http.StatusOK || decodeObject(t, rr)["platformNoticeVersion"] != "" {
+			t.Fatalf("disable status=%d body=%s", rr.Code, rr.Body.String())
+		}
+	}
+	if len(store.calls) != 3 || store.calls[0].version != settings.CurrentPlatformNoticeVersion || store.calls[1].enabled || store.calls[1].version != "" || store.calls[2].enabled || store.calls[2].version != "" {
+		t.Fatalf("store calls = %#v", store.calls)
+	}
+}
+
+func TestSettingsRoutesAreStrictSafeAndPreflighted(t *testing.T) {
+	store := &fakeSettings{err: errors.New("write /Users/person/settings.json: secret")}
+	srv, _, _, _, _ := newTestServer(t, func(o *Options) { o.Settings = store })
+	if unauthorized := perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", []byte(`{"enabled":false}`), "", ""); unauthorized.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated PUT status=%d", unauthorized.Code)
+	}
+	rr := perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", []byte(`{"enabled":false}`), testToken, "")
+	if rr.Code != http.StatusInternalServerError || decodeObject(t, rr)["code"] != "settings_unavailable" || strings.Contains(rr.Body.String(), "/Users/person") || strings.Contains(rr.Body.String(), "secret") {
+		t.Fatalf("unsafe store error = %d %s", rr.Code, rr.Body.String())
+	}
+
+	for _, body := range [][]byte{
+		[]byte(`{}`),
+		[]byte(`{"enabled":false,"extra":true}`),
+		[]byte(`{"enabled":false} {}`),
+		bytes.Repeat([]byte("x"), maxJSONBody+1),
+	} {
+		rr = perform(t, srv.Handler(), http.MethodPut, "/v1/settings/platform-compatibility", body, testToken, "")
+		if rr.Code != http.StatusBadRequest && rr.Code != http.StatusRequestEntityTooLarge {
+			t.Fatalf("strict body len=%d status=%d body=%s", len(body), rr.Code, rr.Body.String())
+		}
+	}
+	req := httptest.NewRequest(http.MethodPut, "/v1/settings/platform-compatibility", strings.NewReader(`{"enabled":false}`))
+	req.Header.Set("X-Video-Helper-Token", testToken)
+	rr = httptest.NewRecorder()
+	srv.Handler().ServeHTTP(rr, req)
+	if rr.Code != http.StatusUnsupportedMediaType {
+		t.Fatalf("missing content type status=%d", rr.Code)
+	}
+
+	for _, tc := range []struct {
+		method, path, allow string
+	}{{http.MethodPost, "/v1/settings", http.MethodGet}, {http.MethodGet, "/v1/settings/platform-compatibility", http.MethodPut}} {
+		rr = perform(t, srv.Handler(), tc.method, tc.path, nil, testToken, "")
+		if rr.Code != http.StatusMethodNotAllowed || rr.Header().Get("Allow") != tc.allow {
+			t.Fatalf("%s %s status=%d allow=%q", tc.method, tc.path, rr.Code, rr.Header().Get("Allow"))
+		}
+	}
+
+	origin := "chrome-extension://abcdefghijklmnopabcdefghijklmnop"
+	for _, tc := range []struct{ path, method string }{{"/v1/settings", http.MethodGet}, {"/v1/settings/platform-compatibility", http.MethodPut}} {
+		req = httptest.NewRequest(http.MethodOptions, tc.path, nil)
+		req.Header.Set("Origin", origin)
+		req.Header.Set("Access-Control-Request-Method", tc.method)
+		req.Header.Set("Access-Control-Request-Headers", "content-type, x-video-helper-token")
+		rr = httptest.NewRecorder()
+		srv.Handler().ServeHTTP(rr, req)
+		if rr.Code != http.StatusNoContent || !methodListed(tc.method, rr.Header().Get("Access-Control-Allow-Methods")) {
+			t.Fatalf("preflight %s status=%d methods=%q", tc.path, rr.Code, rr.Header().Get("Access-Control-Allow-Methods"))
+		}
+	}
+}
+
+func TestNewRejectsNilSettingsService(t *testing.T) {
+	_, err := New(Options{
+		Token:       testToken,
+		Version:     "1.2.3",
+		DownloadDir: t.TempDir(),
+		Inspector:   &fakeInspector{},
+		Tasks:       newFakeTasks(),
+		Revealer:    &fakeRevealer{},
+	})
+	if err == nil || !strings.Contains(err.Error(), "settings service") {
+		t.Fatalf("New() error = %v, want missing settings service", err)
+	}
+}
+
+func mapsEqual(left, right map[string]any) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range right {
+		if left[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 func perform(t *testing.T, handler http.Handler, method, path string, body []byte, token, origin string) *httptest.ResponseRecorder {

@@ -22,6 +22,7 @@ import (
 	"unicode/utf8"
 
 	"web-video-harbor/helper/internal/hls"
+	"web-video-harbor/helper/internal/settings"
 	"web-video-harbor/helper/internal/tasks"
 )
 
@@ -79,6 +80,12 @@ type TaskService interface {
 	Retry(context.Context, string) (tasks.Task, error)
 }
 
+// SettingsService is the narrow local-consent settings surface used by the API.
+type SettingsService interface {
+	Snapshot() settings.Snapshot
+	SetPlatformCompatibility(bool, string) (settings.Snapshot, error)
+}
+
 // Revealer displays a completed file in the platform file manager.
 type Revealer interface {
 	Reveal(context.Context, string) error
@@ -116,6 +123,7 @@ type Options struct {
 	Inspector                   MediaInspector
 	Tasks                       TaskService
 	Revealer                    Revealer
+	Settings                    SettingsService
 }
 
 type platformDownloaderStatus struct {
@@ -135,6 +143,7 @@ type Server struct {
 	inspector          MediaInspector
 	tasks              TaskService
 	revealer           Revealer
+	settings           SettingsService
 	handler            http.Handler
 }
 
@@ -151,6 +160,9 @@ func New(options Options) (*Server, error) {
 	}
 	if options.Revealer == nil {
 		return nil, errors.New("file revealer is required")
+	}
+	if options.Settings == nil {
+		return nil, errors.New("settings service is required")
 	}
 	absDir, err := filepath.Abs(options.DownloadDir)
 	if err != nil {
@@ -189,6 +201,7 @@ func New(options Options) (*Server, error) {
 		},
 		downloadDir: filepath.Clean(absDir),
 		inspector:   options.Inspector, tasks: options.Tasks, revealer: options.Revealer,
+		settings: options.Settings,
 	}
 	s.handler = http.HandlerFunc(s.serveHTTP)
 	return s, nil
@@ -310,6 +323,10 @@ func methodListed(method, list string) bool {
 
 func allowedMethods(path string) string {
 	switch {
+	case path == "/v1/settings":
+		return http.MethodGet
+	case path == "/v1/settings/platform-compatibility":
+		return http.MethodPut
 	case path == "/v1/inspect":
 		return http.MethodPost
 	case path == "/v1/tasks":
@@ -328,6 +345,18 @@ func allowedMethods(path string) string {
 
 func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 	switch r.URL.Path {
+	case "/v1/settings":
+		if r.Method != http.MethodGet {
+			methodNotAllowed(w, http.MethodGet)
+			return
+		}
+		writeJSON(w, http.StatusOK, settingsDTO(s.settings.Snapshot()))
+	case "/v1/settings/platform-compatibility":
+		if r.Method != http.MethodPut {
+			methodNotAllowed(w, http.MethodPut)
+			return
+		}
+		s.handlePlatformCompatibilitySettings(w, r)
 	case "/v1/inspect":
 		if r.Method != http.MethodPost {
 			methodNotAllowed(w, http.MethodPost)
@@ -346,6 +375,53 @@ func (s *Server) routeV1(w http.ResponseWriter, r *http.Request) {
 	default:
 		s.handleTaskRoute(w, r)
 	}
+}
+
+type settingsResponse struct {
+	ExperimentalPlatformCompatibilityEnabled bool   `json:"experimentalPlatformCompatibilityEnabled"`
+	PlatformNoticeVersion                    string `json:"platformNoticeVersion"`
+	CurrentPlatformNoticeVersion             string `json:"currentPlatformNoticeVersion"`
+}
+
+func settingsDTO(snapshot settings.Snapshot) settingsResponse {
+	return settingsResponse{
+		ExperimentalPlatformCompatibilityEnabled: snapshot.ExperimentalPlatformCompatibilityEnabled,
+		PlatformNoticeVersion:                    snapshot.PlatformNoticeVersion,
+		CurrentPlatformNoticeVersion:             settings.CurrentPlatformNoticeVersion,
+	}
+}
+
+func (s *Server) handlePlatformCompatibilitySettings(w http.ResponseWriter, r *http.Request) {
+	var input struct {
+		Enabled       *bool   `json:"enabled"`
+		Acknowledged  *bool   `json:"acknowledged,omitempty"`
+		NoticeVersion *string `json:"noticeVersion,omitempty"`
+	}
+	if !decodeStrictJSON(w, r, &input) {
+		return
+	}
+	if input.Enabled == nil {
+		writeError(w, http.StatusBadRequest, "invalid_json", "请求 JSON 格式无效")
+		return
+	}
+	noticeVersion := ""
+	if *input.Enabled {
+		if input.Acknowledged == nil || !*input.Acknowledged {
+			writeError(w, http.StatusBadRequest, "invalid_acknowledgment", "请先阅读并确认实验性平台兼容使用边界")
+			return
+		}
+		if input.NoticeVersion == nil || *input.NoticeVersion != settings.CurrentPlatformNoticeVersion {
+			writeError(w, http.StatusConflict, "notice_outdated", "使用提示已更新，请重新阅读后确认")
+			return
+		}
+		noticeVersion = *input.NoticeVersion
+	}
+	snapshot, err := s.settings.SetPlatformCompatibility(*input.Enabled, noticeVersion)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "settings_unavailable", "无法保存本地设置")
+		return
+	}
+	writeJSON(w, http.StatusOK, settingsDTO(snapshot))
 }
 
 func (s *Server) handleInspect(w http.ResponseWriter, r *http.Request) {
