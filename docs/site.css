@@ -1,0 +1,674 @@
+:root {
+  color-scheme: light;
+  --canvas: #eeece5;
+  --surface: #fbfaf6;
+  --surface-strong: #ffffff;
+  --ink: #1d2521;
+  --ink-soft: #58625d;
+  --line: #cfd1c8;
+  --line-dark: #9aa29c;
+  --accent: #176a4b;
+  --accent-dark: #0d4933;
+  --accent-pale: #dcebe3;
+  --content-width: 65rem;
+  --shadow: 0 16px 40px rgba(31, 42, 36, 0.07);
+  font-family: "Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif;
+  font-synthesis: none;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--canvas);
+  scroll-behavior: smooth;
+}
+
+body {
+  min-width: 20rem;
+  margin: 0;
+  color: var(--ink);
+  background-color: var(--canvas);
+  line-height: 1.65;
+}
+
+a {
+  color: inherit;
+  text-decoration-thickness: 0.08em;
+  text-underline-offset: 0.2em;
+}
+
+a:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 4px;
+}
+
+.page-shell {
+  width: min(calc(100% - 2rem), var(--content-width));
+  margin-inline: auto;
+}
+
+.site-header {
+  border-bottom: 1px solid var(--line);
+  background: rgba(238, 236, 229, 0.96);
+}
+
+.header-row,
+.footer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1.5rem;
+}
+
+.header-row {
+  min-height: 4.75rem;
+}
+
+.wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.75rem;
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-decoration: none;
+  text-transform: uppercase;
+}
+
+.wordmark-mark {
+  display: grid;
+  width: 2.1rem;
+  height: 2.1rem;
+  border: 1px solid var(--ink);
+  place-items: center;
+  color: var(--surface);
+  background: var(--ink);
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+}
+
+.site-nav {
+  display: flex;
+  align-items: center;
+  gap: clamp(0.8rem, 3vw, 1.75rem);
+  color: var(--ink-soft);
+  font-size: 0.86rem;
+}
+
+.site-nav a {
+  padding-block: 0.45rem;
+  text-decoration: none;
+}
+
+.site-nav a:hover {
+  color: var(--accent-dark);
+  text-decoration: underline;
+}
+
+.hero {
+  padding-block: clamp(4rem, 9vw, 7.5rem) clamp(4rem, 8vw, 6.5rem);
+  border-bottom: 1px solid var(--line);
+}
+
+.eyebrow,
+.section-index {
+  margin: 0;
+  color: var(--accent-dark);
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.eyebrow {
+  display: flex;
+  align-items: center;
+  gap: 0.65rem;
+}
+
+.eyebrow span {
+  width: 2rem;
+  height: 0.15rem;
+  background: var(--accent);
+}
+
+.hero-grid {
+  display: grid;
+  gap: 3rem;
+  margin-top: 1.4rem;
+}
+
+h1,
+h2,
+h3,
+p {
+  overflow-wrap: break-word;
+}
+
+h1,
+h2,
+h3 {
+  text-wrap: balance;
+}
+
+h1,
+.resources-heading h1 {
+  margin: 0;
+  font-family: "Songti SC", STSong, "Noto Serif CJK SC", Georgia, serif;
+  font-weight: 600;
+  letter-spacing: -0.035em;
+  line-height: 1.06;
+}
+
+.hero h1 {
+  max-width: 13ch;
+  font-size: clamp(3.2rem, 9vw, 6.7rem);
+}
+
+.hero h1 span {
+  display: inline-block;
+  color: var(--accent);
+  font-family: "Avenir Next", Avenir, "Helvetica Neue", Arial, sans-serif;
+  font-size: 0.36em;
+  font-weight: 650;
+  letter-spacing: 0.035em;
+}
+
+.hero-lead {
+  max-width: 39rem;
+  margin: 2rem 0 0;
+  color: var(--ink-soft);
+  font-size: clamp(1rem, 2vw, 1.2rem);
+}
+
+.action-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 2rem;
+}
+
+.button {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: center;
+  gap: 0.65rem;
+  padding: 0.72rem 1.15rem;
+  border: 1px solid var(--ink);
+  font-size: 0.86rem;
+  font-weight: 700;
+  letter-spacing: 0.025em;
+  line-height: 1.25;
+  text-align: center;
+  text-decoration: none;
+  transition: background-color 160ms ease, color 160ms ease, transform 160ms ease;
+}
+
+.button:hover {
+  transform: translateY(-2px);
+}
+
+.button-primary {
+  border-color: var(--accent-dark);
+  color: var(--surface-strong);
+  background: var(--accent-dark);
+}
+
+.button-primary:hover {
+  background: var(--accent);
+}
+
+.button-secondary {
+  background: transparent;
+}
+
+.button-secondary:hover {
+  color: var(--surface-strong);
+  background: var(--ink);
+}
+
+.status-card {
+  align-self: end;
+  padding: 1.5rem;
+  border: 1px solid var(--line-dark);
+  background: var(--surface);
+  box-shadow: var(--shadow);
+}
+
+.status-label,
+.card-number,
+.card-code {
+  margin: 0;
+  color: var(--ink-soft);
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 0.7rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.status-value {
+  display: flex;
+  align-items: center;
+  gap: 0.6rem;
+  margin: 0.5rem 0 1rem;
+  font-family: "Songti SC", STSong, Georgia, serif;
+  font-size: 1.7rem;
+  font-weight: 600;
+}
+
+.status-value span {
+  width: 0.65rem;
+  height: 0.65rem;
+  border: 2px solid var(--surface-strong);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
+}
+
+.status-card > p:not([class]) {
+  margin: 0;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+.status-list {
+  margin: 1.5rem 0 0;
+  border-top: 1px solid var(--line);
+}
+
+.status-list div {
+  display: flex;
+  justify-content: space-between;
+  gap: 1rem;
+  padding-block: 0.65rem;
+  border-bottom: 1px solid var(--line);
+  font-size: 0.78rem;
+}
+
+.status-list dt {
+  color: var(--ink-soft);
+}
+
+.status-list dd {
+  margin: 0;
+  font-weight: 700;
+}
+
+.project-notes {
+  padding-block: clamp(4rem, 7vw, 6rem);
+}
+
+.section-heading {
+  display: grid;
+  gap: 0.7rem;
+  margin-bottom: 2rem;
+}
+
+.section-heading h2,
+.recommendation-entry h2,
+.privacy-note h2 {
+  margin: 0;
+  font-family: "Songti SC", STSong, Georgia, serif;
+  font-size: clamp(1.8rem, 4vw, 2.7rem);
+  line-height: 1.2;
+}
+
+.note-grid {
+  display: grid;
+  border-top: 1px solid var(--ink);
+}
+
+.note-card {
+  padding: 1.5rem 0;
+  border-bottom: 1px solid var(--line-dark);
+}
+
+.note-card h3 {
+  margin: 1rem 0 0.5rem;
+  font-family: "Songti SC", STSong, Georgia, serif;
+  font-size: 1.35rem;
+}
+
+.note-card > p:not(.card-number) {
+  max-width: 31rem;
+  margin: 0;
+  color: var(--ink-soft);
+}
+
+.text-link {
+  display: inline-flex;
+  min-height: 44px;
+  align-items: center;
+  gap: 0.5rem;
+  margin-top: 1rem;
+  color: var(--accent-dark);
+  font-size: 0.84rem;
+  font-weight: 700;
+}
+
+.recommendation-entry {
+  display: grid;
+  gap: 1.5rem;
+  align-items: end;
+  margin-bottom: clamp(4rem, 8vw, 7rem);
+  padding: clamp(1.5rem, 4vw, 2.5rem);
+  border: 1px solid var(--line-dark);
+  background: var(--accent-pale);
+}
+
+.recommendation-entry h2 {
+  margin-top: 0.5rem;
+}
+
+.recommendation-entry p:not(.section-index) {
+  max-width: 43rem;
+  margin: 0.7rem 0 0;
+  color: var(--ink-soft);
+}
+
+.resources-main {
+  padding-block: clamp(3.5rem, 7vw, 6rem);
+}
+
+.resources-heading {
+  max-width: 48rem;
+}
+
+.resources-heading h1 {
+  margin-top: 0.8rem;
+  font-size: clamp(2.8rem, 7vw, 5.6rem);
+}
+
+.resources-intro {
+  max-width: 42rem;
+  margin: 1.5rem 0 0;
+  color: var(--ink-soft);
+  font-size: 1.05rem;
+}
+
+.disclosure {
+  display: grid;
+  grid-template-columns: auto 1fr;
+  gap: 1rem;
+  margin-block: clamp(2.5rem, 6vw, 4.5rem) 2rem;
+  padding: 1.25rem;
+  border: 1px solid var(--accent);
+  background: var(--accent-pale);
+}
+
+.disclosure-mark {
+  display: grid;
+  width: 2rem;
+  height: 2rem;
+  border-radius: 50%;
+  color: var(--surface-strong);
+  background: var(--accent-dark);
+  font-family: Georgia, serif;
+  font-style: italic;
+  place-items: center;
+}
+
+.disclosure h2 {
+  margin: 0;
+  font-size: 1rem;
+}
+
+.disclosure p {
+  margin: 0.35rem 0 0;
+  color: #394a42;
+  font-size: 0.9rem;
+}
+
+.recommendation-grid {
+  display: grid;
+  gap: 1rem;
+}
+
+.recommendation-card {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  padding: clamp(1.25rem, 3vw, 2rem);
+  border: 1px solid var(--line-dark);
+  background: var(--surface-strong);
+  box-shadow: var(--shadow);
+}
+
+.card-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
+.affiliate-badge {
+  padding: 0.25rem 0.55rem;
+  border: 1px solid var(--accent);
+  color: var(--accent-dark);
+  background: var(--accent-pale);
+  font-size: 0.7rem;
+  font-weight: 800;
+  letter-spacing: 0.12em;
+}
+
+.resource-symbol {
+  position: relative;
+  width: 5rem;
+  height: 5rem;
+  margin-block: 2.5rem 1.75rem;
+  border: 1px solid var(--line-dark);
+  background-color: var(--canvas);
+}
+
+.resource-symbol-drive::before,
+.resource-symbol-drive::after,
+.resource-symbol-drive span,
+.resource-symbol-cloud::before,
+.resource-symbol-cloud::after,
+.resource-symbol-cloud span {
+  position: absolute;
+  content: "";
+}
+
+.resource-symbol-drive::before {
+  inset: 1.1rem 0.95rem;
+  border: 2px solid var(--accent-dark);
+}
+
+.resource-symbol-drive::after {
+  right: 1.25rem;
+  bottom: 1.45rem;
+  width: 0.38rem;
+  height: 0.38rem;
+  border-radius: 50%;
+  background: var(--accent);
+}
+
+.resource-symbol-drive span {
+  right: 2rem;
+  bottom: 1.5rem;
+  width: 1rem;
+  height: 1px;
+  background: var(--line-dark);
+}
+
+.resource-symbol-cloud::before {
+  right: 0.9rem;
+  bottom: 1.35rem;
+  left: 0.9rem;
+  height: 1.8rem;
+  border: 2px solid var(--accent-dark);
+  border-radius: 1.3rem;
+}
+
+.resource-symbol-cloud::after {
+  top: 1.25rem;
+  left: 1.85rem;
+  width: 1.8rem;
+  height: 1.8rem;
+  border: 2px solid var(--accent-dark);
+  border-radius: 50%;
+  background: var(--canvas);
+}
+
+.resource-symbol-cloud span {
+  right: 1rem;
+  bottom: 1.1rem;
+  left: 1rem;
+  height: 0.7rem;
+  background: var(--canvas);
+}
+
+.recommendation-card h2 {
+  margin: 0;
+  font-family: "Songti SC", STSong, Georgia, serif;
+  font-size: clamp(1.5rem, 3vw, 2rem);
+  line-height: 1.25;
+}
+
+.card-summary {
+  margin: 1rem 0 0;
+  color: var(--ink-soft);
+}
+
+.card-limit {
+  margin: 1.5rem 0;
+  padding-top: 1rem;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.82rem;
+}
+
+.external-link {
+  width: 100%;
+  margin-top: auto;
+}
+
+.privacy-note {
+  display: grid;
+  gap: 1rem;
+  margin-top: clamp(3rem, 7vw, 5rem);
+  padding-top: 2rem;
+  border-top: 1px solid var(--line-dark);
+}
+
+.privacy-note h2 {
+  font-size: clamp(1.5rem, 3vw, 2.1rem);
+}
+
+.privacy-note p:not(.section-index) {
+  max-width: 43rem;
+  margin: 0.7rem 0 0;
+  color: var(--ink-soft);
+}
+
+.site-footer {
+  padding-block: 1.75rem;
+  border-top: 1px solid var(--line);
+  color: var(--ink-soft);
+  font-size: 0.78rem;
+}
+
+.site-footer p {
+  margin: 0;
+}
+
+.site-footer a {
+  min-height: 44px;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  padding: 0;
+  margin: -1px;
+  overflow: hidden;
+  clip: rect(0, 0, 0, 0);
+  white-space: nowrap;
+  border: 0;
+}
+
+@media (min-width: 720px) {
+  .hero-grid {
+    grid-template-columns: minmax(0, 1.75fr) minmax(17rem, 0.7fr);
+    align-items: start;
+  }
+
+  .note-grid {
+    grid-template-columns: repeat(3, 1fr);
+  }
+
+  .note-card {
+    padding: 1.6rem;
+    border-right: 1px solid var(--line-dark);
+  }
+
+  .note-card:first-child {
+    padding-left: 0;
+  }
+
+  .note-card:last-child {
+    padding-right: 0;
+    border-right: 0;
+  }
+
+  .recommendation-entry {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .recommendation-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .privacy-note {
+    grid-template-columns: minmax(9rem, 0.4fr) minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 719px) {
+  .header-row,
+  .footer-row {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .header-row {
+    padding-block: 1rem;
+  }
+
+  .site-nav {
+    width: 100%;
+    flex-wrap: wrap;
+  }
+
+  .hero h1 {
+    font-size: clamp(2.85rem, 15vw, 4.5rem);
+  }
+
+  .action-row,
+  .action-row .button,
+  .recommendation-entry .button {
+    width: 100%;
+  }
+
+  .footer-row {
+    gap: 0.5rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  html {
+    scroll-behavior: auto;
+  }
+
+  *,
+  *::before,
+  *::after {
+    scroll-behavior: auto !important;
+    transition-duration: 0.01ms !important;
+  }
+}
