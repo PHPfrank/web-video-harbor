@@ -33,6 +33,25 @@
       <p id="settings-status" class="settings-status" aria-live="polite"></p>
     </section>
 
+    <section class="settings-card platform-settings-card" aria-labelledby="platform-settings-title">
+      <div class="settings-heading">
+        <div>
+          <p class="section-kicker">默认关闭</p>
+          <h2 id="platform-settings-title">实验性平台兼容</h2>
+        </div>
+        <label class="switch-control" for="platform-compatibility-toggle">
+          <span class="visually-hidden">开启实验性平台兼容</span>
+          <input type="checkbox" id="platform-compatibility-toggle" role="switch"
+            aria-describedby="platform-settings-description platform-settings-status" disabled>
+          <span class="switch-track" aria-hidden="true"><span class="switch-thumb"></span></span>
+        </label>
+      </div>
+      <p id="platform-settings-description" class="platform-settings-description">
+        为部分复杂公开网页提供兼容尝试。普通 MP4、WebM 和非加密 M3U8 无需开启。
+      </p>
+      <p id="platform-settings-status" class="settings-status" aria-live="polite">正在读取本地设置…</p>
+    </section>
+
     <section class="privacy-card" aria-labelledby="privacy-title">
       <h2 id="privacy-title">隐私与安全</h2>
       <ul>
@@ -43,7 +62,24 @@
     </section>
   </main>
 
+  <dialog id="platform-notice-dialog" class="platform-notice-dialog"
+    aria-labelledby="platform-notice-title" aria-describedby="platform-notice-description">
+    <div class="dialog-body">
+      <p class="section-kicker">开启前请确认</p>
+      <h2 id="platform-notice-title">实验性平台兼容使用提示</h2>
+      <div id="platform-notice-description" class="dialog-copy">
+        <p>此兼容功能仅用于技术研究，以及处理您拥有版权、已获授权或平台明确允许下载的内容。</p>
+        <p>请勿用于会员、付费、私有、加密、DRM 内容，也不要规避登录、地区或访问限制。</p>
+      </div>
+      <div class="dialog-actions">
+        <button id="platform-notice-cancel" class="button button-secondary" type="button">取消</button>
+        <button id="platform-notice-confirm" class="button button-primary" type="button">我已了解并继续</button>
+      </div>
+    </div>
+  </dialog>
+
   <script src="lib/helper-client.js"></script>
+  <script src="lib/platform-settings.js"></script>
   <script src="options.js"></script>
 </body>
 </html>

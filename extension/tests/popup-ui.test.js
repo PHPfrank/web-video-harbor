@@ -18,7 +18,7 @@ test('manifest wires a popup and options page with existing local resources', ()
   assert.deepEqual(manifest.action, { default_popup: 'popup.html', default_title: '网页视频港' });
   assert.deepEqual(manifest.options_ui, { page: 'options.html', open_in_tab: true });
   assert.deepEqual(manifest.permissions, ['storage', 'webRequest']);
-  for (const name of ['popup.html', 'popup.css', 'popup.js', 'options.html', 'options.js', 'lib/popup-state.js', 'lib/helper-client.js']) {
+  for (const name of ['popup.html', 'popup.css', 'popup.js', 'options.html', 'options.js', 'lib/popup-state.js', 'lib/helper-client.js', 'lib/platform-settings.js']) {
     assert.equal(fs.existsSync(path.join(extensionDir, name)), true, name);
   }
 });
@@ -90,6 +90,27 @@ test('options page stores only a token locally and offers connection testing and
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
 });
 
+test('options page requires explicit accessible consent for experimental platform compatibility', () => {
+  const html = source('options.html');
+  const javascript = source('options.js');
+  const controller = source('lib/platform-settings.js');
+  const manifest = JSON.parse(source('manifest.json'));
+
+  assert.match(html, /实验性平台兼容/);
+  assert.match(html, /type=["']checkbox["'][^>]*id=["']platform-compatibility-toggle["']/);
+  assert.match(html, /<dialog\b[^>]*id=["']platform-notice-dialog["']/);
+  assert.match(html, /仅用于技术研究/);
+  assert.match(html, /请勿用于会员、付费、私有、加密、DRM/);
+  assert.match(html, /我已了解并继续/);
+  assert.match(html, /aria-live=["']polite["']/);
+  assert.match(html, /<script src=["']lib\/platform-settings\.js["']><\/script>\s*<script src=["']options\.js["']><\/script>/);
+  assert.match(javascript, /createPlatformSettingsController\s*\(/);
+  assert.match(controller, /\.getSettings\s*\(/);
+  assert.doesNotMatch(javascript, /currentPlatformNoticeVersion\s*:\s*["']/);
+  assert.deepEqual(manifest.permissions, ['storage', 'webRequest']);
+  assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
+});
+
 test('popup visual system stays compact, distinct, and accessible', () => {
   const css = source('popup.css');
 
@@ -100,5 +121,7 @@ test('popup visual system stays compact, distinct, and accessible', () => {
   assert.match(css, /\.visually-hidden\b/);
   assert.match(css, /:focus-visible/);
   assert.match(css, /prefers-reduced-motion/);
+  assert.match(css, /\.settings-card\s+form\s*>\s*label/);
+  assert.doesNotMatch(css, /\.settings-card\s+label\s*\{/);
   assert.doesNotMatch(css, /backdrop-filter|linear-gradient|radial-gradient/);
 });
