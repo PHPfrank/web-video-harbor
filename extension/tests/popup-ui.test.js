@@ -111,6 +111,23 @@ test('options page requires explicit accessible consent for experimental platfor
   assert.doesNotMatch(javascript, /innerHTML|insertAdjacentHTML|document\.write/);
 });
 
+test('options page offers a disclosed recommendation link without embedding affiliate destinations', () => {
+  const html = source('options.html');
+  const extensionSources = fs.readdirSync(extensionDir, { recursive: true })
+    .filter((name) => !name.startsWith(`tests${path.sep}`))
+    .filter((name) => fs.statSync(path.join(extensionDir, name)).isFile())
+    .map((name) => source(name))
+    .join('\n');
+
+  assert.match(html, /id=["']recommendations-link["']/);
+  assert.match(html, /href=["']https:\/\/phpfrank\.github\.io\/web-video-harbor\/recommendations\.html["']/);
+  assert.match(html, /页面可能包含推广链接/);
+  assert.match(html, /target=["']_blank["']/);
+  assert.match(html, /rel=["']noopener noreferrer["']/);
+  assert.doesNotMatch(extensionSources, /s\.click\.taobao\.com/);
+  assert.doesNotMatch(extensionSources, /userCode=c5z9bjlt/);
+});
+
 test('popup visual system stays compact, distinct, and accessible', () => {
   const css = source('popup.css');
 

@@ -346,7 +346,8 @@ h2 {
 .options-header > p:last-child { max-width: 560px; margin: 10px 0 0; color: var(--color-muted); line-height: 1.6; }
 
 .settings-card,
-.privacy-card {
+.privacy-card,
+.recommendations-card {
   padding: 22px;
   border: 1px solid var(--color-border);
   border-radius: 10px;
@@ -356,6 +357,35 @@ h2 {
 
 .platform-settings-card { margin-top: 14px; box-shadow: none; }
 .privacy-card { margin-top: 14px; box-shadow: none; }
+.recommendations-card {
+  display: flex;
+  gap: 24px;
+  align-items: center;
+  justify-content: space-between;
+  margin-top: 14px;
+  box-shadow: none;
+}
+.recommendations-copy { min-width: 0; }
+.recommendations-copy > p:last-child {
+  max-width: 440px;
+  margin: 8px 0 0;
+  color: var(--color-muted);
+  line-height: 1.6;
+}
+.recommendations-link {
+  flex: 0 0 auto;
+  padding: 8px 0;
+  color: var(--color-accent);
+  font-weight: 650;
+  text-decoration-thickness: 1px;
+  text-underline-offset: 3px;
+}
+.recommendations-link:hover { color: var(--color-accent-hover); }
+.recommendations-link:focus-visible {
+  border-radius: 4px;
+  outline: 3px solid color-mix(in srgb, var(--color-focus) 38%, transparent);
+  outline-offset: 3px;
+}
 .settings-card form > label { display: block; margin: 18px 0 7px; font-weight: 620; }
 .token-row { gap: 8px; }
 
@@ -423,8 +453,9 @@ h2 {
 
 @media (max-width: 520px) {
   .options-shell { width: calc(100% - 24px); margin: 20px auto; }
-  .settings-card, .privacy-card { padding: 17px; }
+  .settings-card, .privacy-card, .recommendations-card { padding: 17px; }
   .token-row, .settings-actions { align-items: stretch; flex-direction: column; }
+  .recommendations-card { align-items: flex-start; flex-direction: column; gap: 10px; }
   .dialog-actions { align-items: stretch; flex-direction: column-reverse; }
 }
 
