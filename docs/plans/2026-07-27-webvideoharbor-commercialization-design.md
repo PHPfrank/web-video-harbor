@@ -1,5 +1,7 @@
 # WebVideoHarbor 商业化设计
 
+> **状态：已废弃。** 本商业化方案已由 [2026-07-28 WebVideoHarbor 社区开源版设计](2026-07-28-webvideoharbor-community-open-source-design.md) 取代，仅作为历史决策记录保留，不是当前产品方向。
+
 日期：2026-07-27
 
 目标版本：v0.3.0 商业验证版

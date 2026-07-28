@@ -1,5 +1,7 @@
 # WebVideoHarbor v0.3 Commercial Editions Implementation Plan
 
+> **状态：已废弃。** 本商业版实施计划已由 [2026-07-28 WebVideoHarbor 社区开源版设计](2026-07-28-webvideoharbor-community-open-source-design.md) 取代，仅作为历史记录保留，不得作为当前实施依据。
+
 > **For Claude:** REQUIRED SUB-SKILL: Use superpowers:executing-plans to implement this plan task-by-task.
 
 **Goal:** Release a public Free macOS edition that downloads only direct MP4 files and a privately distributed Pro macOS edition that unlocks M3U8 and supported public platform downloads with offline, device-bound activation.
