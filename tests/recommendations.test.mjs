@@ -27,6 +27,7 @@ test('GitHub Pages site provides its homepage and recommendation entry point', a
 
   const homepage = await readDocument('index.html');
   const recommendations = await readDocument('recommendations.html');
+  const stylesheet = await readDocument('site.css');
 
   assert.match(homepage, /WebVideoHarbor/);
   assert.match(homepage, /网页视频港/);
@@ -50,6 +51,7 @@ test('GitHub Pages site provides its homepage and recommendation entry point', a
     assert.doesNotMatch(document, /<(?:img|link|source|video|audio)\b[^>]*(?:src|href)=["']https?:\/\//i);
     assert.doesNotMatch(document, /<form\b[^>]*action=["']https?:\/\//i);
   }
+  assert.doesNotMatch(stylesheet, /@import\b|url\(\s*["']?https?:\/\//i);
 });
 
 test('recommendation links are disclosed, current, and free of tracking claims', async () => {
