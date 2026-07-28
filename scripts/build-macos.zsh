@@ -8,6 +8,18 @@ helper_source="$repo_root/helper/cmd/web-video-harbor-helper"
 dist_dir="$repo_root/work/dist"
 build_cache="$repo_root/work/build-cache/go"
 build_tmp="$repo_root/work/build-tmp"
+version_file="$repo_root/VERSION"
+
+[[ -f "$version_file" && ! -L "$version_file" ]] || {
+  print -u2 -- "VERSION 无效：缺少安全的根目录版本文件"
+  exit 1
+}
+release_version="$(<"$version_file")"
+version_lines="$(/usr/bin/wc -l <"$version_file" | /usr/bin/tr -d ' ')"
+if [[ "$version_lines" != "1" || ! "$release_version" =~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' ]]; then
+  print -u2 -- "VERSION 无效：必须是带单个换行符的 x.y.z"
+  exit 1
+fi
 
 for required_command in brew lipo file; do
   if ! command -v "$required_command" >/dev/null 2>&1; then
@@ -50,7 +62,7 @@ fi
 trap 'rm -f -- "$universal_temp"' EXIT
 
 print -- "使用 Homebrew Go：$("$go_command" version)"
-release_ldflags='-X main.version=0.2.1'
+release_ldflags="-X main.version=$release_version"
 (
   cd "$repo_root/helper"
   env GOCACHE="$build_cache" GOTMPDIR="$build_tmp" CGO_ENABLED=0 \

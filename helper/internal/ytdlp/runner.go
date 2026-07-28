@@ -608,7 +608,7 @@ func canceledError(cause error) error {
 func runError(code Code) *Error {
 	messages := map[Code]string{
 		CodeCanceled:             "下载已取消",
-		CodeLoginRequired:        "当前视频需要登录，v0.2.1 暂不支持",
+		CodeLoginRequired:        "当前视频需要登录，当前版本不读取登录信息",
 		CodeVerificationRequired: "YouTube 要求浏览器验证；为保护账号隐私，网页视频港不会读取登录信息",
 		CodeAccessLimited:        "当前内容受会员、付费或私有访问限制",
 		CodeGeoRestricted:        "当前网络所在地区无法访问此视频",

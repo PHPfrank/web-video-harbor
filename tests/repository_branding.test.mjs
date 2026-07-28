@@ -20,12 +20,19 @@ test('Makefile builds the renamed WebVideoHarbor helper command', () => {
 });
 
 test('community edition licensing, privacy, and usage boundaries stay aligned', () => {
+  const version = fs.readFileSync(path.join(repoRoot, 'VERSION'), 'utf8');
+  const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'extension', 'manifest.json'), 'utf8'));
   const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
   const guide = fs.readFileSync(path.join(repoRoot, 'docs', '安装使用说明.md'), 'utf8');
   const privacy = fs.readFileSync(path.join(repoRoot, 'PRIVACY.md'), 'utf8');
   const boundary = fs.readFileSync(path.join(repoRoot, 'docs', '使用边界.md'), 'utf8');
   const license = fs.readFileSync(path.join(repoRoot, 'LICENSE'), 'utf8');
   const notices = fs.readFileSync(path.join(repoRoot, 'THIRD_PARTY_NOTICES.md'), 'utf8');
+
+  assert.equal(version, '1.0.0\n');
+  assert.equal(manifest.version, '1.0.0');
+  assert.match(manifest.description, /Community Edition/);
+  assert.doesNotMatch(manifest.description, /YouTube|哔哩哔哩|Bilibili|微信视频号/);
 
   assert.match(license, /^MIT License\n/);
   assert.match(license, /Copyright \(c\) 2026 PHPfrank/);
@@ -34,6 +41,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
 
   assert.match(readme, /^# WebVideoHarbor（网页视频港）\n/);
   assert.match(readme, /Community Edition/);
+  assert.match(readme, /v1\.0\.0/);
   assert.match(readme, /完全免费/);
   assert.match(readme, /开源/);
   assert.match(readme, /本地运行/);

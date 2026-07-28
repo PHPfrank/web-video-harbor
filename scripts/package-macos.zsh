@@ -5,8 +5,19 @@ unsetopt BG_NICE
 script_dir="${0:A:h}"
 repo_root="${script_dir:h}"
 repo_real="${repo_root:A}"
+version_file="$repo_root/VERSION"
+[[ -f "$version_file" && ! -L "$version_file" ]] || {
+  print -u2 -- "VERSION 无效：缺少安全的根目录版本文件"
+  exit 1
+}
+release_version="$(<"$version_file")"
+version_lines="$(/usr/bin/wc -l <"$version_file" | /usr/bin/tr -d ' ')"
+if [[ "$version_lines" != "1" || ! "$release_version" =~ '^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$' ]]; then
+  print -u2 -- "VERSION 无效：必须是带单个换行符的 x.y.z"
+  exit 1
+fi
 package_name="WebVideoHarbor-macOS"
-archive_name="$package_name-v0.2.1.zip"
+archive_name="$package_name-v$release_version.zip"
 central_output_helper="/Users/frank/.codex/scripts/ensure-central-outputs.zsh"
 
 fail() {
@@ -26,8 +37,12 @@ if [[ "$package_testing" != "1" ]]; then
 fi
 
 [[ -f "$repo_root/README.md" && ! -L "$repo_root/README.md" ]] || fail "缺少安全的 README.md"
+[[ -f "$repo_root/LICENSE" && ! -L "$repo_root/LICENSE" ]] || fail "缺少安全的 LICENSE"
+[[ -f "$repo_root/PRIVACY.md" && ! -L "$repo_root/PRIVACY.md" ]] || fail "缺少安全的 PRIVACY.md"
 [[ -f "$repo_root/docs/安装使用说明.md" && ! -L "$repo_root/docs/安装使用说明.md" ]] || \
   fail "缺少安全的 docs/安装使用说明.md"
+[[ -f "$repo_root/docs/使用边界.md" && ! -L "$repo_root/docs/使用边界.md" ]] || \
+  fail "缺少安全的 docs/使用边界.md"
 [[ -f "$repo_root/THIRD_PARTY_NOTICES.md" && ! -L "$repo_root/THIRD_PARTY_NOTICES.md" ]] || \
   fail "缺少安全的 THIRD_PARTY_NOTICES.md"
 
@@ -195,8 +210,12 @@ copy_regular_file() {
   /bin/cp -p "$source_path" "$destination_path"
 }
 
+copy_regular_file "$version_file" "$stage_root/VERSION"
+copy_regular_file "$repo_root/LICENSE" "$stage_root/LICENSE"
+copy_regular_file "$repo_root/PRIVACY.md" "$stage_root/PRIVACY.md"
 copy_regular_file "$repo_root/README.md" "$stage_root/README.md"
 copy_regular_file "$repo_root/docs/安装使用说明.md" "$stage_root/docs/安装使用说明.md"
+copy_regular_file "$repo_root/docs/使用边界.md" "$stage_root/docs/使用边界.md"
 copy_regular_file "$repo_root/THIRD_PARTY_NOTICES.md" "$stage_root/THIRD_PARTY_NOTICES.md"
 copy_regular_file "$go_license" "$stage_root/licenses/Go-LICENSE.txt"
 
@@ -205,7 +224,7 @@ if /usr/bin/find "$repo_root/extension" "$repo_root/helper/cmd" "$repo_root/help
   fail "源码目录包含符号链接"
 fi
 
-expected_extension_files=$'background.js\ncontent.js\nlib/helper-client.js\nlib/media.js\nlib/platform.js\nlib/popup-controller.js\nlib/popup-state.js\nmanifest.json\noptions.html\noptions.js\npopup.css\npopup.html\npopup.js'
+expected_extension_files=$'background.js\ncontent.js\nlib/helper-client.js\nlib/media.js\nlib/platform-settings.js\nlib/platform.js\nlib/popup-controller.js\nlib/popup-state.js\nmanifest.json\noptions.html\noptions.js\npopup.css\npopup.html\npopup.js'
 actual_extension_files="$(
   cd "$repo_root/extension"
   /usr/bin/find . -type f ! -path './tests/*' -print | sed 's#^\./##' | /usr/bin/sort
@@ -273,7 +292,7 @@ validate_package_tree() {
     cd "$tree_root"
     /usr/bin/find . -mindepth 1 -maxdepth 1 -print | sed 's#^\./##' | /usr/bin/sort
   )"
-  expected_entries=$'README.md\nTHIRD_PARTY_NOTICES.md\ndocs\nextension\nhelper\nlicenses\nscripts\nwork'
+  expected_entries=$'LICENSE\nPRIVACY.md\nREADME.md\nTHIRD_PARTY_NOTICES.md\nVERSION\ndocs\nextension\nhelper\nlicenses\nscripts\nwork'
   [[ "$top_entries" == "$expected_entries" ]] || fail "$tree_label 顶层不符合白名单：$top_entries"
 
   path_listing="$(
@@ -298,8 +317,10 @@ validate_manifest_and_sources() {
     const path = require("node:path");
     const manifestPath = process.argv[1];
     const extensionRoot = process.argv[2];
+    const expectedVersion = process.argv[3];
     const manifest = JSON.parse(fs.readFileSync(manifestPath, "utf8"));
     if (manifest.manifest_version !== 3) throw new Error("manifest_version 不是 3");
+    if (manifest.version !== expectedVersion) throw new Error("manifest 版本与 VERSION 不一致");
     const references = [
       manifest.background?.service_worker,
       manifest.action?.default_popup,
@@ -313,7 +334,9 @@ validate_manifest_and_sources() {
         throw new Error(`manifest 本地引用无效：${reference}`);
       }
     }
-  ' "$package_root/extension/manifest.json" "${package_root:A}/extension"
+  ' "$package_root/extension/manifest.json" "${package_root:A}/extension" "$release_version"
+
+  [[ "$(<"$package_root/VERSION")" == "$release_version" ]] || fail "包内 VERSION 与发布版本不一致"
 
   while IFS= read -r -d '' js_path; do
     node --check "$js_path"
@@ -325,6 +348,8 @@ validate_manifest_and_sources() {
   rg -Fq '[安装使用说明](docs/安装使用说明.md)' "$package_root/README.md" || \
     fail "README 没有引用包内安装说明"
   [[ -f "$package_root/docs/安装使用说明.md" ]] || fail "README 引用的安装说明不存在"
+  [[ -f "$package_root/LICENSE" && -f "$package_root/PRIVACY.md" && \
+    -f "$package_root/docs/使用边界.md" ]] || fail "包内缺少许可、隐私或使用边界"
   for documented_script in build-macos.zsh start-helper.zsh helper-status.zsh stop-helper.zsh; do
     rg -Fq "./scripts/$documented_script" "$package_root/docs/安装使用说明.md" || \
       fail "安装说明缺少脚本命令：$documented_script"
@@ -391,7 +416,7 @@ done
 [[ ! -x "$unpacked_root/scripts/helper-common.zsh" ]] || fail "共享脚本权限意外变为可执行"
 
 unpacked_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($unpacked_binary --version)" == "web-video-harbor-helper 0.2.1" ]] || fail "解包助手版本输出异常"
+[[ "$($unpacked_binary --version)" == "web-video-harbor-helper $release_version" ]] || fail "解包助手版本输出异常"
 /usr/bin/file "$unpacked_binary"
 /usr/bin/lipo -info "$unpacked_binary"
 /usr/bin/lipo "$unpacked_binary" -verify_arch arm64 x86_64 || fail "解包助手缺少 universal 架构"
@@ -427,7 +452,7 @@ rg -Fq 'licenses/Deno-LICENSE.md' "$unpacked_root/THIRD_PARTY_NOTICES.md" || \
   /bin/zsh ./scripts/build-macos.zsh
 )
 rebuilt_binary="$unpacked_root/work/dist/web-video-harbor-helper"
-[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper 0.2.1" ]] || fail "解包源码重建后的版本输出异常"
+[[ "$($rebuilt_binary --version)" == "web-video-harbor-helper $release_version" ]] || fail "解包源码重建后的版本输出异常"
 /usr/bin/file "$rebuilt_binary"
 /usr/bin/lipo -info "$rebuilt_binary"
 /usr/bin/lipo "$rebuilt_binary" -verify_arch arm64 x86_64 || fail "解包源码无法重建 universal 助手"

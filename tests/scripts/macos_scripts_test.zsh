@@ -142,6 +142,23 @@ dist_dir="$repo_root/work/dist"
 arm_binary="$dist_dir/web-video-harbor-helper-arm64"
 intel_binary="$dist_dir/web-video-harbor-helper-amd64"
 universal_binary="$dist_dir/web-video-harbor-helper"
+version_file="$repo_root/VERSION"
+[[ -f "$version_file" && ! -L "$version_file" ]] || fail "缺少安全的 VERSION"
+release_version="$(<"$version_file")"
+[[ "$release_version" == "1.0.0" ]] || fail "VERSION 不是预期的 1.0.0：$release_version"
+[[ "$(/usr/bin/wc -l <"$version_file" | tr -d ' ')" == "1" ]] || fail "VERSION 必须只有一行"
+version_fixture_root="$(/usr/bin/mktemp -d "$repo_root/work/script-tests/version.XXXXXX")"
+mkdir -p "$version_fixture_root/scripts"
+/bin/cp -p "$repo_root/scripts/build-macos.zsh" "$version_fixture_root/scripts/build-macos.zsh"
+for invalid_version in '1.0.0 ' $'1.0.0\n2.0.0' 'v1.0.0'; do
+  print -r -- "$invalid_version" >"$version_fixture_root/VERSION"
+  if /bin/zsh "$version_fixture_root/scripts/build-macos.zsh" \
+    >"$version_fixture_root/rejected.txt" 2>&1; then
+    fail "构建脚本接受了无效 VERSION：$invalid_version"
+  fi
+  rg -Fq 'VERSION 无效' "$version_fixture_root/rejected.txt" || \
+    fail "构建脚本没有明确拒绝无效 VERSION：$invalid_version"
+done
 mkdir -p "$dist_dir"
 rm -f -- "$arm_binary" "$intel_binary" "$universal_binary"
 
@@ -154,14 +171,15 @@ architecture_info="$(/usr/bin/lipo -info "$universal_binary")"
 [[ "$architecture_info" == *"arm64"* && "$architecture_info" == *"x86_64"* ]] || \
   fail "universal 助手缺少 arm64 或 x86_64：$architecture_info"
 version_output="$("$universal_binary" --version)"
-[[ "$version_output" == "web-video-harbor-helper 0.2.1" ]] || fail "助手版本输出异常：$version_output"
+[[ "$version_output" == "web-video-harbor-helper $release_version" ]] || fail "助手版本输出异常：$version_output"
 rg -Fq -- '-ldflags' "$repo_root/scripts/build-macos.zsh" && \
-  rg -Fq -- '-X main.version=0.2.1' "$repo_root/scripts/build-macos.zsh" || \
-  fail "构建脚本没有注入 v0.2.1 助手版本"
+  rg -Fq -- 'release_ldflags="-X main.version=$release_version"' "$repo_root/scripts/build-macos.zsh" || \
+  fail "构建脚本没有从 VERSION 注入助手版本"
 rg -Fq 'var version = "dev"' "$repo_root/helper/cmd/web-video-harbor-helper/main.go" || \
   fail "助手版本变量不能由 release 构建注入"
 rg -Fq '$("$go_command" version)' "$repo_root/scripts/build-macos.zsh" || \
   fail "构建脚本执行 Homebrew Go 时没有完整引用路径"
+finish_focused_case version
 
 readme_path="$repo_root/README.md"
 guide_path="$repo_root/docs/安装使用说明.md"

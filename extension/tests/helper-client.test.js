@@ -120,7 +120,7 @@ test('health normalizes missing or malformed JavaScript runtime status safely', 
       async fetchImpl() {
         return jsonResponse(200, {
           ready: true,
-          version: '0.2.1',
+          version: '1.0.0',
           ffmpeg: true,
           pid: 4321,
           path: '/Users/person/helper',
