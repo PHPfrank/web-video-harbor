@@ -24,10 +24,18 @@ test('empty and scanning views explain what the popup is doing', () => {
     candidates: [],
     pageUrl: 'https://channels.weixin.qq.com/watch/abc',
   });
+  const blocked = state.buildViewModel({
+    connection: 'connected',
+    scanning: true,
+    candidates: [],
+    experimentalPlatformBlocked: true,
+    pageUrl: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
+  });
 
   assert.equal(empty.emptyMessage, '尚未发现可下载的视频');
   assert.equal(scanning.emptyMessage, '正在重新扫描当前页面…');
   assert.equal(wechat.emptyMessage, '请先在浏览器中播放视频几秒，再重新扫描');
+  assert.equal(blocked.emptyMessage, '实验性平台兼容尚未开启，可在设置中阅读说明后开启');
 });
 
 test('candidate view distinguishes MP4 and HLS and keeps useful metadata', () => {

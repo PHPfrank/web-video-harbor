@@ -41,6 +41,7 @@
       candidates: [],
       tasks: [],
       pageUrl: '',
+      experimentalPlatformBlocked: false,
     };
     const selectedVariants = new Map();
     const selectedQualities = new Map();
@@ -158,6 +159,7 @@
       return Promise.resolve().then(() => bridge.getTabMedia()).then((response) => {
         model.pageUrl = response && response.pageUrl ? response.pageUrl : '';
         model.candidates = response && Array.isArray(response.candidates) ? response.candidates : [];
+        model.experimentalPlatformBlocked = Boolean(response && response.experimentalPlatformBlocked);
         const currentURLs = new Set(model.candidates.map((candidate) => candidate.url));
         for (const url of selectedVariants.keys()) {
           if (!currentURLs.has(url)) selectedVariants.delete(url);
@@ -349,6 +351,7 @@
             url: sourceURL,
             title: candidate.title || '未命名视频',
             mediaType: candidate.kind,
+            pageUrl: candidate.pageUrl || model.pageUrl,
           };
           if (candidate.kind === 'platform') {
             const quality = selectedQualities.get(candidate.url);

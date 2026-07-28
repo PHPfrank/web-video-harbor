@@ -16,6 +16,13 @@
   const BILIBILI_ID_PATTERN = /^(?:BV[A-Za-z0-9]{10}|av[1-9][0-9]*)$/;
   const PART_PATTERN = /^[0-9]+$/;
   const CONTROL_CHARACTER_PATTERN = /[\u0000-\u001F\u007F]/;
+  const ASCII_HOST_PATTERN = /^[A-Za-z0-9.-]+$/;
+  const EXPERIMENTAL_ROOTS = Object.freeze([
+    'youtube.com',
+    'bilibili.com',
+    'weixin.qq.com',
+    'wechat.com',
+  ]);
   const SUPPORTED_AUTHORITIES = new Set([
     'www.youtube.com',
     'youtube.com',
@@ -122,6 +129,26 @@
     return classifyYouTube(url, rawQuery);
   }
 
+  function isExperimentalPlatformPage(value) {
+    if (typeof value !== 'string' || value === '' || CONTROL_CHARACTER_PATTERN.test(value)) return false;
+    const authorityMatch = /^https:\/\/([^/?#]+)(?:[/?#]|$)/i.exec(value);
+    if (!authorityMatch) return false;
+    const rawHost = authorityMatch[1];
+    if (!ASCII_HOST_PATTERN.test(rawHost) || rawHost.includes(':') || rawHost.endsWith('.')) return false;
+
+    let url;
+    try {
+      url = new URL(value);
+    } catch (_error) {
+      return false;
+    }
+    if (url.protocol !== 'https:' || url.username || url.password || url.port) return false;
+    const host = rawHost.toLowerCase();
+    if (url.hostname.toLowerCase() !== host || url.host.toLowerCase() !== host) return false;
+    if (host === 'youtu.be') return true;
+    return EXPERIMENTAL_ROOTS.some((root) => host === root || host.endsWith(`.${root}`));
+  }
+
   function normalizeTitle(value) {
     if (typeof value !== 'string') return DEFAULT_TITLE;
     const title = value.trim();
@@ -140,5 +167,28 @@
     };
   }
 
-  return Object.freeze({ classifyPlatformUrl, candidateForPage, QUALITY_OPTIONS });
+  function candidatesForPage(input) {
+    const page = input && typeof input === 'object' && !Array.isArray(input) ? input : {};
+    const candidates = Array.isArray(page.candidates) ? page.candidates.slice() : [];
+    const experimentalPage = isExperimentalPlatformPage(page.url);
+    if (experimentalPage && page.experimentalEnabled !== true) {
+      return { candidates: [], experimentalPlatformBlocked: true };
+    }
+    if (page.experimentalEnabled !== true) {
+      return { candidates, experimentalPlatformBlocked: false };
+    }
+    const platformCandidate = candidateForPage({ url: page.url, title: page.title });
+    const combined = platformCandidate
+      && !candidates.some((candidate) => candidate && candidate.url === platformCandidate.url)
+      ? [platformCandidate, ...candidates] : candidates;
+    return { candidates: combined, experimentalPlatformBlocked: false };
+  }
+
+  return Object.freeze({
+    classifyPlatformUrl,
+    isExperimentalPlatformPage,
+    candidateForPage,
+    candidatesForPage,
+    QUALITY_OPTIONS,
+  });
 }));

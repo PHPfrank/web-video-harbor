@@ -5,6 +5,84 @@ const assert = require('node:assert/strict');
 
 const platform = require('../lib/platform.js');
 
+test('experimental page classifier matches only trusted HTTPS platform hosts', () => {
+  const accepted = [
+    'https://youtube.com/watch?v=x',
+    'https://www.youtube.com/watch?v=x',
+    'https://m.youtube.com/shorts/x',
+    'https://youtu.be/x',
+    'https://bilibili.com/video/x',
+    'https://www.bilibili.com/video/x',
+    'https://channels.weixin.qq.com/',
+    'https://weixin.qq.com/',
+    'https://www.wechat.com/',
+    'https://WWW.YOUTUBE.COM/watch?v=x',
+  ];
+  const rejected = [
+    '',
+    'not a url',
+    '//youtube.com/watch?v=x',
+    'http://youtube.com/watch?v=x',
+    'https://user:secret@youtube.com/watch?v=x',
+    'https://youtube.com:443/watch?v=x',
+    'https://youtube.com:/watch?v=x',
+    'https://youtube.com.example/watch?v=x',
+    'https://notyoutube.com/watch?v=x',
+    'https://sub.youtu.be/x',
+    'https://例子.youtube.com/watch?v=x',
+    'https://yоutube.com/watch?v=x',
+    'https://xn--youtube-9jg.com/watch?v=x',
+    'https://youtube.com./watch?v=x',
+    'https://example.com/watch?next=https://youtube.com/x',
+  ];
+
+  for (const value of accepted) assert.equal(platform.isExperimentalPlatformPage(value), true, value);
+  for (const value of rejected) assert.equal(platform.isExperimentalPlatformPage(value), false, value);
+});
+
+test('candidate gating hides every experimental-page candidate only while disabled', () => {
+  const captured = [
+    { url: 'https://cdn.example/video.mp4', kind: 'mp4', title: 'MP4' },
+    { url: 'https://cdn.example/master.m3u8', kind: 'hls', title: 'HLS' },
+  ];
+  const ordinary = platform.candidatesForPage({
+    url: 'https://example.com/watch', title: '普通页面', candidates: captured, experimentalEnabled: false,
+  });
+  const youtubeDisabled = platform.candidatesForPage({
+    url: 'https://www.youtube.com/watch?v=_mVb1D8wHxg', title: 'YouTube',
+    candidates: captured, experimentalEnabled: false,
+  });
+  const bilibiliDisabled = platform.candidatesForPage({
+    url: 'https://www.bilibili.com/video/BV1K3Gz6pEoo', title: 'Bilibili',
+    candidates: captured, experimentalEnabled: false,
+  });
+  const wechatDisabled = platform.candidatesForPage({
+    url: 'https://channels.weixin.qq.com/', title: '视频号', candidates: captured, experimentalEnabled: false,
+  });
+
+  assert.deepEqual(ordinary, { candidates: captured, experimentalPlatformBlocked: false });
+  assert.deepEqual(youtubeDisabled, { candidates: [], experimentalPlatformBlocked: true });
+  assert.deepEqual(bilibiliDisabled, { candidates: [], experimentalPlatformBlocked: true });
+  assert.deepEqual(wechatDisabled, { candidates: [], experimentalPlatformBlocked: true });
+});
+
+test('enabled candidate gating keeps canonical page cards and captured WeChat media', () => {
+  const captured = [{ url: 'https://cdn.example/video.mp4', kind: 'mp4', title: 'MP4' }];
+  const youtube = platform.candidatesForPage({
+    url: 'https://www.youtube.com/watch?v=_mVb1D8wHxg&list=ignored',
+    title: 'YouTube', candidates: captured, experimentalEnabled: true,
+  });
+  const wechat = platform.candidatesForPage({
+    url: 'https://channels.weixin.qq.com/', title: '视频号',
+    candidates: captured, experimentalEnabled: true,
+  });
+
+  assert.equal(youtube.experimentalPlatformBlocked, false);
+  assert.deepEqual(youtube.candidates.map((candidate) => candidate.kind), ['platform', 'mp4']);
+  assert.equal(youtube.candidates[0].url, 'https://www.youtube.com/watch?v=_mVb1D8wHxg');
+  assert.deepEqual(wechat, { candidates: captured, experimentalPlatformBlocked: false });
+});
+
 test('candidateForPage recognizes and canonicalizes supported single-video pages', () => {
   const cases = [
     {

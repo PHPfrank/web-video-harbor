@@ -146,7 +146,9 @@
     const candidates = Array.isArray(source.candidates) ? source.candidates.map(candidateView).filter((item) => item.url) : [];
     const tasks = Array.isArray(source.tasks) ? source.tasks.map(taskView).filter((item) => item.id) : [];
     let emptyMessage = '尚未发现可下载的视频';
-    if (source.scanning) emptyMessage = '正在重新扫描当前页面…';
+    if (source.experimentalPlatformBlocked === true) {
+      emptyMessage = '实验性平台兼容尚未开启，可在设置中阅读说明后开启';
+    } else if (source.scanning) emptyMessage = '正在重新扫描当前页面…';
     else if (isWeChatPage(source.pageUrl)) emptyMessage = '请先在浏览器中播放视频几秒，再重新扫描';
     const connection = { ...CONNECTIONS[connectionName] };
     if (connectionName === 'connected' && source.ffmpegAvailable === false) {
@@ -157,6 +159,7 @@
       candidates,
       tasks,
       scanning: Boolean(source.scanning),
+      experimentalPlatformBlocked: source.experimentalPlatformBlocked === true,
       emptyMessage,
       canDownload: connectionName === 'connected',
     };

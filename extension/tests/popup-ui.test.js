@@ -57,10 +57,10 @@ test('popup prepends one canonical platform page candidate while keeping capture
   const javascript = source('popup.js');
 
   assert.match(javascript, /VideoGrabberPlatform/);
-  assert.match(javascript, /candidateForPage\s*\(\s*\{\s*url:\s*tab\.url,\s*title:\s*tab\.title\s*\}\s*\)/s);
-  assert.match(javascript, /platformCandidate/);
-  assert.match(javascript, /candidates\.some\s*\(/);
-  assert.match(javascript, /\[platformCandidate,\s*\.\.\.candidates\]/);
+  assert.match(javascript, /\.getSettings\s*\(/);
+  assert.match(javascript, /experimentalPlatformCompatibilityEnabled/);
+  assert.match(javascript, /candidatesForPage\s*\(/);
+  assert.match(javascript, /experimentalPlatformBlocked/);
 });
 
 test('popup renders separate fixed platform-quality values and safe text-only titles', () => {

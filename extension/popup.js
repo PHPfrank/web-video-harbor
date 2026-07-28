@@ -67,16 +67,24 @@
       const tab = await currentTab();
       if (!tab || !Number.isInteger(tab.id)) throw new Error('无法读取当前标签页');
       activeTabId = tab.id;
-      const response = await runtimeMessage({ type: 'GET_TAB_MEDIA', tabId: activeTabId });
+      const [response, localSettings] = await Promise.all([
+        runtimeMessage({ type: 'GET_TAB_MEDIA', tabId: activeTabId }),
+        helper.getSettings().catch(() => null),
+      ]);
       if (!response || !response.ok) throw new Error('无法读取页面中的视频');
       const candidates = Array.isArray(response.candidates) ? response.candidates : [];
-      const platformCandidate = platformApi.candidateForPage({ url: tab.url, title: tab.title });
-      const combinedCandidates = platformCandidate
-        && !candidates.some((candidate) => candidate && candidate.url === platformCandidate.url)
-        ? [platformCandidate, ...candidates] : candidates;
+      const experimentalEnabled = Boolean(localSettings
+        && localSettings.experimentalPlatformCompatibilityEnabled === true);
+      const gated = platformApi.candidatesForPage({
+        url: tab.url,
+        title: tab.title,
+        candidates,
+        experimentalEnabled,
+      });
       return {
-        pageUrl: response.pageUrl || tab.url || '',
-        candidates: combinedCandidates,
+        pageUrl: typeof tab.url === 'string' ? tab.url : (response.pageUrl || ''),
+        candidates: gated.candidates,
+        experimentalPlatformBlocked: gated.experimentalPlatformBlocked,
       };
     },
     async rescan() {

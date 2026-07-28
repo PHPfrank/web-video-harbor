@@ -379,7 +379,81 @@ test('platform candidate defaults to best, skips inspection, and sends the selec
     title: '页面标题',
     mediaType: 'platform',
     quality: '1080',
+    pageUrl: candidateURL,
   }]);
+});
+
+test('candidate refresh carries the experimental blocked state into the empty view', async () => {
+  const pageUrl = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl,
+        candidates: [],
+        experimentalPlatformBlocked: true,
+      }),
+    },
+  });
+
+  await controller.refreshCandidates();
+
+  assert.equal(renderer.candidates.at(-1).experimentalPlatformBlocked, true);
+  assert.equal(renderer.candidates.at(-1).emptyMessage, '实验性平台兼容尚未开启，可在设置中阅读说明后开启');
+});
+
+test('every created task carries candidate or trusted current-page context', async () => {
+  const pageUrl = 'https://example.com/watch';
+  const candidatePageUrl = 'https://example.com/embedded-player';
+  const mp4URL = 'https://cdn.example/video.mp4';
+  const platformURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  const createdSpecs = [];
+  const { controller } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl,
+        candidates: [
+          { url: mp4URL, kind: 'mp4', title: 'MP4', pageUrl: candidatePageUrl },
+          { url: platformURL, kind: 'platform', provider: 'youtube', title: '平台视频' },
+        ],
+      }),
+    },
+    helper: {
+      createTask: async (spec) => {
+        createdSpecs.push(spec);
+        return { id: `task-${createdSpecs.length}`, title: spec.title, status: 'queued', progress: 0 };
+      },
+    },
+  });
+  await controller.refreshCandidates();
+  await controller.refreshTasks();
+
+  await controller.downloadCandidate(mp4URL);
+  await controller.downloadCandidate(platformURL);
+
+  assert.equal(createdSpecs[0].pageUrl, candidatePageUrl);
+  assert.equal(createdSpecs[1].pageUrl, pageUrl);
+});
+
+test('stale popup renders a fixed message after helper closes platform compatibility', async () => {
+  const platformURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+  const error = new Error('实验性平台兼容尚未开启');
+  error.name = 'HelperClientError';
+  error.code = 'platform_compatibility_disabled';
+  const { controller, renderer } = harness({
+    bridge: {
+      getTabMedia: async () => ({
+        pageUrl: platformURL,
+        candidates: [{ url: platformURL, kind: 'platform', provider: 'youtube', title: '平台视频' }],
+      }),
+    },
+    helper: { createTask: async () => { throw error; } },
+  });
+  await controller.refreshCandidates();
+  await controller.refreshTasks();
+
+  await controller.downloadCandidate(platformURL);
+
+  assert.deepEqual(renderer.notices.at(-1), { message: '实验性平台兼容尚未开启', tone: '' });
 });
 
 test('platform availability requires parser, JavaScript runtime, and FFmpeg without blocking MP4', async () => {
@@ -476,7 +550,12 @@ test('HLS selection remains a variant URL and never becomes a platform quality v
   assert.equal(controller.selectVariant(candidateURL, variantURL), true);
   await controller.downloadCandidate(candidateURL);
 
-  assert.deepEqual(createdSpecs, [{ url: variantURL, title: 'HLS', mediaType: 'hls' }]);
+  assert.deepEqual(createdSpecs, [{
+    url: variantURL,
+    title: 'HLS',
+    mediaType: 'hls',
+    pageUrl: 'https://example.com/watch',
+  }]);
 });
 
 test('rescan preserves platform quality and focused control when the canonical page URL remains', async () => {
