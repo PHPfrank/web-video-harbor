@@ -24,33 +24,42 @@ const storageLocal = {
   set(_value, callback) { callback(); },
 };
 const helper = helperApi.createHelperClient({ storageLocal, timeoutMs: 15000 });
-const pageUrl = `${fixtureURL}/wechat-like-page`;
-const candidates = media.mergeCandidates([
+const ordinaryPageUrl = `${fixtureURL}/ordinary-page`;
+const capturedCandidates = media.mergeCandidates([
   {
     url: `${fixtureURL}/direct.mp4`, contentType: 'video/mp4', title: '网页视频港集成测试-扩展直连',
-    source: 'dom', pageUrl,
+    source: 'dom', pageUrl: ordinaryPageUrl,
   },
   {
     url: `${fixtureURL}/master.m3u8`, contentType: 'application/vnd.apple.mpegurl', title: '网页视频港集成测试-扩展HLS',
-    source: 'dom', pageUrl,
+    source: 'dom', pageUrl: ordinaryPageUrl,
   },
   {
     url: `${fixtureURL}/wechat-stream?id=fixture`, contentType: 'video/mp4', title: '微信式无扩展名响应',
-    source: 'webRequest', pageUrl,
+    source: 'webRequest', pageUrl: ordinaryPageUrl,
   },
 ]);
-const platformCandidate = platform.candidateForPage({
-  url: 'https://www.youtube.com/watch?v=_mVb1D8wHxg',
-  title: '网页视频港集成测试-YouTube',
-});
-assert.ok(platformCandidate);
-candidates.unshift(platformCandidate);
+const platformURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
+let activePage = {
+  url: ordinaryPageUrl,
+  title: '普通集成测试页面',
+  candidates: capturedCandidates,
+};
 
-assert.equal(candidates.length, 4);
-assert.equal(candidates.find((candidate) => candidate.url.includes('/wechat-stream')).kind, 'mp4');
+assert.equal(capturedCandidates.length, 3);
+assert.equal(capturedCandidates.find((candidate) => candidate.url.includes('/wechat-stream')).kind, 'mp4');
 
 const bridge = {
-  async getTabMedia() { return { pageUrl, candidates }; },
+  async getTabMedia() {
+    const settings = await helper.getSettings().catch(() => null);
+    const gated = platform.candidatesForPage({
+      url: activePage.url,
+      title: activePage.title,
+      candidates: activePage.candidates,
+      experimentalEnabled: Boolean(settings && settings.experimentalPlatformCompatibilityEnabled),
+    });
+    return { pageUrl: activePage.url, ...gated };
+  },
   async rescan() { return { ok: true }; },
 };
 const renderer = {
@@ -78,10 +87,15 @@ async function waitCompleted(task) {
 
 (async () => {
   try {
+    const initialSettings = await helper.getSettings();
+    assert.equal(initialSettings.experimentalPlatformCompatibilityEnabled, false);
+    assert.ok(initialSettings.currentPlatformNoticeVersion);
+
     await controller.start();
     const started = controller.snapshot();
     assert.equal(started.connection, 'connected');
-    assert.equal(started.candidates.length, 4);
+    assert.equal(started.candidates.length, 3);
+    assert.equal(started.experimentalPlatformBlocked, false);
 
     const hlsURL = `${fixtureURL}/master.m3u8`;
     const inspected = await controller.inspectCandidate(hlsURL);
@@ -91,8 +105,25 @@ async function waitCompleted(task) {
 
     const directTask = await controller.downloadCandidate(`${fixtureURL}/direct.mp4`);
     const hlsTask = await controller.downloadCandidate(hlsURL);
-    assert.equal(controller.selectQuality(platformCandidate.url, '720'), true);
-    const platformTask = await controller.downloadCandidate(platformCandidate.url);
+
+    activePage = { url: platformURL, title: '网页视频港集成测试-YouTube', candidates: [] };
+    await controller.refreshCandidates();
+    let platformSnapshot = controller.snapshot();
+    assert.equal(platformSnapshot.candidates.length, 0);
+    assert.equal(platformSnapshot.experimentalPlatformBlocked, true);
+
+    await helper.setPlatformCompatibility({
+      enabled: true,
+      acknowledged: true,
+      noticeVersion: initialSettings.currentPlatformNoticeVersion,
+    });
+    await controller.refreshCandidates();
+    platformSnapshot = controller.snapshot();
+    assert.equal(platformSnapshot.experimentalPlatformBlocked, false);
+    assert.equal(platformSnapshot.candidates.length, 1);
+    assert.equal(platformSnapshot.candidates[0].url, platformURL);
+    assert.equal(controller.selectQuality(platformURL, '720'), true);
+    const platformTask = await controller.downloadCandidate(platformURL);
     assert.ok(directTask && hlsTask && platformTask);
     const [direct, hls, platformDownload] = await Promise.all([
       waitCompleted(directTask), waitCompleted(hlsTask), waitCompleted(platformTask),
@@ -108,8 +139,13 @@ async function waitCompleted(task) {
       hls: hls.outputPath,
       platform: platformDownload.outputPath,
     }, null, 2)}\n`, { mode: 0o600 });
+    await helper.setPlatformCompatibility({ enabled: false });
+    await controller.refreshCandidates();
+    assert.equal(controller.snapshot().experimentalPlatformBlocked, true);
+    assert.equal(controller.snapshot().candidates.length, 0);
     process.stdout.write('content/background unit coverage + popup/helper fallback smoke passed\n');
   } finally {
+    try { await helper.setPlatformCompatibility({ enabled: false }); } catch (_error) { /* best-effort test cleanup */ }
     controller.stop();
   }
 })().catch((error) => {

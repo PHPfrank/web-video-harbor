@@ -112,6 +112,15 @@ async function helperTasks() {
   return response.json();
 }
 
+async function helperSettings() {
+  const response = await fetch('http://127.0.0.1:17432/v1/settings', {
+    headers: { 'X-Video-Helper-Token': helperToken },
+    cache: 'no-store',
+  });
+  assert.equal(response.status, 200);
+  return response.json();
+}
+
 const profileDir = fs.mkdtempSync(path.join(browserRoot, 'chrome-profile-'));
 const chromeLogPath = path.join(browserRoot, 'chrome-cdp.log');
 const snapshotPath = path.join(browserRoot, 'popup-snapshot.txt');
@@ -235,6 +244,15 @@ try {
   const directCandidateIndex = discovered.findIndex((candidate) => candidate.kind === 'mp4' && new URL(candidate.url).pathname === '/direct.mp4');
   const masterCandidateIndex = discovered.findIndex((candidate) => candidate.kind === 'hls' && new URL(candidate.url).pathname === '/master.m3u8');
   await evaluate(cdp, messageSession, `chrome.storage.local.set({ videoHelperToken: ${JSON.stringify(helperToken)} })`);
+  await evaluate(cdp, messageSession, 'location.reload()');
+  const initialCompatibility = await poll('initial compatibility switch off', () => evaluate(cdp, messageSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    const status = document.getElementById('platform-settings-status');
+    if (!toggle || toggle.disabled || toggle.checked) return null;
+    return { checked: toggle.checked, status: status?.textContent || '' };
+  })()`));
+  assert.equal(initialCompatibility.checked, false);
+  assert.match(initialCompatibility.status, /已关闭/);
   await cdp.send('Target.closeTarget', { targetId: messageTarget.targetId });
 
   const beforeTaskIDs = new Set((await helperTasks()).map((task) => task.id));
@@ -331,6 +349,21 @@ try {
     }, 15000);
     return { target, session, view };
   }
+  async function openBlockedPlatformPopup(description) {
+    const target = await cdp.send('Target.createTarget', { url: `${extensionBase}/popup.html`, background: true });
+    const session = await attach(cdp, target.targetId);
+    const view = await poll(description, async () => {
+      const state = await evaluate(cdp, session, `({
+        text: document.body ? document.body.innerText : '',
+        cards: document.querySelectorAll('.candidate-card').length,
+        platformCards: document.querySelectorAll('.candidate-card-platform').length,
+        connected: document.body ? document.body.innerText.includes('本地助手已连接') : false
+      })`);
+      return state && state.connected && state.cards === 0 && state.platformCards === 0
+        && state.text.includes('实验性平台兼容尚未开启') ? state : null;
+    }, 15000);
+    return { target, session, view };
+  }
   async function clickPlatformDownload(session) {
     return evaluate(cdp, session, `(() => {
       const card = document.querySelector('.candidate-card-platform');
@@ -361,6 +394,43 @@ try {
 
   const youtubeURL = 'https://www.youtube.com/watch?v=_mVb1D8wHxg';
   const youtubeTarget = await activateOfflineYouTube(youtubeURL, 'offline YouTube watch target');
+
+  assert.equal((await helperSettings()).experimentalPlatformCompatibilityEnabled, false);
+  const { target: blockedPopupTarget, view: blockedView } =
+    await openBlockedPlatformPopup('disabled YouTube popup has no platform card');
+  assert.match(blockedView.text, /设置中阅读说明后开启/);
+  await cdp.send('Target.closeTarget', { targetId: blockedPopupTarget.targetId });
+
+  const consentTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/options.html`, background: false });
+  await cdp.send('Target.activateTarget', { targetId: consentTarget.targetId });
+  const consentSession = await attach(cdp, consentTarget.targetId);
+  await poll('compatibility options ready', () => evaluate(cdp, consentSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    return Boolean(toggle && !toggle.disabled && !toggle.checked);
+  })()`));
+  const consentNotice = await evaluate(cdp, consentSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    toggle.click();
+    const dialog = document.getElementById('platform-notice-dialog');
+    return {
+      open: Boolean(dialog?.open),
+      text: dialog?.innerText || '',
+      checked: toggle.checked,
+    };
+  })()`);
+  assert.equal(consentNotice.open, true);
+  assert.equal(consentNotice.checked, false);
+  assert.match(consentNotice.text, /仅用于技术研究/);
+  assert.match(consentNotice.text, /请勿用于会员、付费、私有、加密、DRM/);
+  await evaluate(cdp, consentSession, `document.getElementById('platform-notice-confirm').click()`);
+  await poll('compatibility switch enabled after consent', () => evaluate(cdp, consentSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    const status = document.getElementById('platform-settings-status');
+    return Boolean(toggle && !toggle.disabled && toggle.checked && status?.textContent.includes('已开启'));
+  })()`));
+  assert.equal((await helperSettings()).experimentalPlatformCompatibilityEnabled, true);
+  await cdp.send('Target.closeTarget', { targetId: consentTarget.targetId });
+  await cdp.send('Target.activateTarget', { targetId: youtubeTarget.targetId });
 
   const beforePlatformTaskIDs = new Set((await helperTasks()).map((task) => task.id));
   const { target: platformPopupTarget, session: platformPopupSession, view: platformView } =
@@ -438,6 +508,26 @@ try {
   assert.ok(fs.statSync(retriedPlatformTask.outputPath).size > 0);
   await cdp.send('Target.closeTarget', { targetId: retryPopupTarget.targetId });
   await cdp.send('Target.closeTarget', { targetId: retryTarget.targetId });
+
+  const disableTarget = await cdp.send('Target.createTarget', { url: `${extensionBase}/options.html`, background: false });
+  await cdp.send('Target.activateTarget', { targetId: disableTarget.targetId });
+  const disableSession = await attach(cdp, disableTarget.targetId);
+  await poll('enabled compatibility switch before disable', () => evaluate(cdp, disableSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    return Boolean(toggle && !toggle.disabled && toggle.checked);
+  })()`));
+  await evaluate(cdp, disableSession, `document.getElementById('platform-compatibility-toggle').click()`);
+  await poll('compatibility switch disabled again', () => evaluate(cdp, disableSession, `(() => {
+    const toggle = document.getElementById('platform-compatibility-toggle');
+    const status = document.getElementById('platform-settings-status');
+    return Boolean(toggle && !toggle.disabled && !toggle.checked && status?.textContent.includes('已关闭'));
+  })()`));
+  assert.equal((await helperSettings()).experimentalPlatformCompatibilityEnabled, false);
+  await cdp.send('Target.closeTarget', { targetId: disableTarget.targetId });
+  await cdp.send('Target.activateTarget', { targetId: youtubeTarget.targetId });
+  const { target: blockedAgainTarget } =
+    await openBlockedPlatformPopup('disabled-again YouTube popup has no platform card');
+  await cdp.send('Target.closeTarget', { targetId: blockedAgainTarget.targetId });
   await cdp.send('Target.closeTarget', { targetId: youtubeTarget.targetId });
 
   evidence = {
@@ -452,7 +542,7 @@ try {
       platform: platformTask.outputPath,
       platform_retry: retriedPlatformTask.outputPath,
     },
-    actions: { canceled: true, retried: true, revealed: true },
+    actions: { canceled: true, retried: true, revealed: true, consentEnabled: true, consentDisabled: true },
     artifacts: { snapshotPath, screenshotPath, chromeLogPath, profileDir },
   };
   fs.writeFileSync(resultsPath, `${JSON.stringify(evidence, null, 2)}\n`, { mode: 0o600 });

@@ -18,6 +18,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -79,7 +80,7 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	resolver := exactFixtureResolver{hostPort: parsed.Host}
 	downloadDir := t.TempDir()
 	manager := tasks.NewManager()
-	compatibility := settings.Open(filepath.Join(t.TempDir(), "settings.json"))
+	compatibility := privateCompatibilityStore(t)
 	engine, err := api.NewEngine(manager, downloadDir, resolver, "ffmpeg", ytdlp.ProbeResult{}, ytdlp.RuntimeResult{}, compatibility)
 	if err != nil {
 		t.Fatalf("create engine: %v", err)
@@ -131,6 +132,128 @@ func TestHelperAllowsOnlyInjectedExactFixtureHost(t *testing.T) {
 	}
 }
 
+func TestHelperCompatibilityConsentEnforcesHTTPTasksAndRetries(t *testing.T) {
+	var mediaRequests atomic.Int32
+	fixture := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mediaRequests.Add(1)
+		if r.URL.Path == "/fail.mp4" {
+			http.Error(w, "controlled failure", http.StatusServiceUnavailable)
+			return
+		}
+		w.Header().Set("Content-Type", "video/mp4")
+		_, _ = w.Write([]byte("integration fixture"))
+	}))
+	t.Cleanup(fixture.Close)
+	parsed, err := url.Parse(fixture.URL)
+	if err != nil {
+		t.Fatalf("parse fixture URL: %v", err)
+	}
+
+	downloadDir := t.TempDir()
+	compatibility := privateCompatibilityStore(t)
+	manager := tasks.NewManager()
+	engine, err := api.NewEngine(
+		manager,
+		downloadDir,
+		exactFixtureResolver{hostPort: parsed.Host},
+		"",
+		ytdlp.ProbeResult{},
+		ytdlp.RuntimeResult{},
+		compatibility,
+	)
+	if err != nil {
+		t.Fatalf("create engine: %v", err)
+	}
+	t.Cleanup(func() { _ = engine.Shutdown(context.Background()) })
+	helperAPI, err := api.New(api.Options{
+		Token: smokeToken, Version: "integration", FFmpegAvailable: false,
+		DownloadDir: downloadDir, Inspector: api.NewMediaInspector(exactFixtureResolver{hostPort: parsed.Host}),
+		Tasks: engine, Revealer: noReveal{}, Settings: compatibility,
+	})
+	if err != nil {
+		t.Fatalf("create helper API: %v", err)
+	}
+	helper := httptest.NewServer(helperAPI.Handler())
+	t.Cleanup(helper.Close)
+
+	var initial struct {
+		Enabled        bool   `json:"experimentalPlatformCompatibilityEnabled"`
+		NoticeVersion  string `json:"platformNoticeVersion"`
+		CurrentVersion string `json:"currentPlatformNoticeVersion"`
+	}
+	getJSON(t, helper.URL+"/v1/settings", true, &initial)
+	if initial.Enabled || initial.NoticeVersion != "" || initial.CurrentVersion != settings.CurrentPlatformNoticeVersion {
+		t.Fatalf("unexpected initial settings: %+v", initial)
+	}
+
+	ordinary := createTask(t, helper.URL, api.JobSpec{
+		URL: fixture.URL + "/ordinary.mp4", PageURL: "https://example.com/watch",
+		Title: "ordinary", MediaType: "mp4",
+	})
+	ordinary = waitForStatus(t, helper.URL, ordinary.ID, tasks.Completed, 5*time.Second)
+	assertCompletedOutput(t, ordinary, downloadDir)
+	requestsAfterOrdinary := mediaRequests.Load()
+
+	blockedSpecs := []api.JobSpec{
+		{
+			URL:     "https://www.youtube.com/watch?v=_mVb1D8wHxg",
+			PageURL: "https://www.youtube.com/watch?v=_mVb1D8wHxg",
+			Title:   "platform", MediaType: "platform", Quality: "best",
+		},
+		{
+			URL: fixture.URL + "/blocked.mp4", PageURL: "https://channels.weixin.qq.com/",
+			Title: "wechat generic", MediaType: "mp4",
+		},
+	}
+	for _, spec := range blockedSpecs {
+		assertErrorCode(t, postJSON(t, helper.URL+"/v1/tasks", spec), http.StatusConflict, "platform_compatibility_disabled")
+	}
+	if mediaRequests.Load() != requestsAfterOrdinary || len(manager.List()) != 1 {
+		t.Fatalf("disabled jobs reached workers: requests=%d tasks=%d", mediaRequests.Load(), len(manager.List()))
+	}
+
+	assertErrorCode(t, requestJSON(t, http.MethodPut, helper.URL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "acknowledged": true, "noticeVersion": "2026-07-27-v1",
+	}), http.StatusConflict, "notice_outdated")
+	assertErrorCode(t, requestJSON(t, http.MethodPut, helper.URL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "noticeVersion": settings.CurrentPlatformNoticeVersion,
+	}), http.StatusBadRequest, "invalid_acknowledgment")
+
+	var enabled struct {
+		Enabled       bool   `json:"experimentalPlatformCompatibilityEnabled"`
+		NoticeVersion string `json:"platformNoticeVersion"`
+	}
+	decodeStatus(t, requestJSON(t, http.MethodPut, helper.URL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "acknowledged": true, "noticeVersion": settings.CurrentPlatformNoticeVersion,
+	}), http.StatusOK, &enabled)
+	if !enabled.Enabled || enabled.NoticeVersion != settings.CurrentPlatformNoticeVersion {
+		t.Fatalf("compatibility was not enabled: %+v", enabled)
+	}
+
+	wechat := createTask(t, helper.URL, api.JobSpec{
+		URL: fixture.URL + "/wechat.mp4", PageURL: "https://channels.weixin.qq.com/",
+		Title: "wechat enabled", MediaType: "mp4",
+	})
+	wechat = waitForStatus(t, helper.URL, wechat.ID, tasks.Completed, 5*time.Second)
+	assertCompletedOutput(t, wechat, downloadDir)
+	assertErrorCode(t, postJSON(t, helper.URL+"/v1/tasks", blockedSpecs[0]), http.StatusConflict, "task_error")
+
+	failed := createTask(t, helper.URL, api.JobSpec{
+		URL: fixture.URL + "/fail.mp4", PageURL: "https://channels.weixin.qq.com/",
+		Title: "retry gate", MediaType: "mp4",
+	})
+	failed = waitForStatus(t, helper.URL, failed.ID, tasks.Failed, 10*time.Second)
+	decodeStatus(t, requestJSON(t, http.MethodPut, helper.URL+"/v1/settings/platform-compatibility", map[string]bool{
+		"enabled": false,
+	}), http.StatusOK, &map[string]any{})
+
+	for _, spec := range blockedSpecs {
+		assertErrorCode(t, postJSON(t, helper.URL+"/v1/tasks", spec), http.StatusConflict, "platform_compatibility_disabled")
+	}
+	assertErrorCode(t, postWithoutBody(t, helper.URL+"/v1/tasks/"+url.PathEscape(failed.ID)+"/retry"),
+		http.StatusConflict, "platform_compatibility_disabled")
+}
+
 func TestHelperDownloadWorkflow(t *testing.T) {
 	repoRoot := os.Getenv("SMOKE_REPO_ROOT")
 	generatedRoot := os.Getenv("SMOKE_FIXTURE_ROOT")
@@ -154,10 +277,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	}
 	resolver := exactFixtureResolver{hostPort: parsedFixture.Host}
 	manager := tasks.NewManager()
-	compatibility := settings.Open(filepath.Join(t.TempDir(), "settings.json"))
-	if _, err := compatibility.SetPlatformCompatibility(true, settings.CurrentPlatformNoticeVersion); err != nil {
-		t.Fatalf("enable platform compatibility: %v", err)
-	}
+	compatibility := privateCompatibilityStore(t)
 	platform := prepareFakePlatformDownloader(t, repoRoot, downloadDir, ffmpegPath)
 	t.Cleanup(func() {
 		if err := platform.Close(); err != nil {
@@ -209,6 +329,16 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		!health.JavaScriptRuntime.Available || health.JavaScriptRuntime.Version != "2.4.5" {
 		t.Fatalf("unexpected health response: %+v", health)
 	}
+	var initialSettings struct {
+		Enabled        bool   `json:"experimentalPlatformCompatibilityEnabled"`
+		NoticeVersion  string `json:"platformNoticeVersion"`
+		CurrentVersion string `json:"currentPlatformNoticeVersion"`
+	}
+	getJSON(t, helperURL+"/v1/settings", true, &initialSettings)
+	if initialSettings.Enabled || initialSettings.NoticeVersion != "" ||
+		initialSettings.CurrentVersion != settings.CurrentPlatformNoticeVersion {
+		t.Fatalf("unexpected initial compatibility settings: %+v", initialSettings)
+	}
 
 	directURL := fixture.URL + "/direct.mp4"
 	wechatURL := fixture.URL + "/wechat-stream?id=fixture"
@@ -241,6 +371,36 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	direct := createTask(t, helperURL, api.JobSpec{URL: directURL, Title: "集成测试-直接视频", MediaType: "mp4"})
 	direct = waitForStatus(t, helperURL, direct.ID, tasks.Completed, 15*time.Second)
 	assertCompletedOutput(t, direct, downloadDir)
+	platformSpec := api.JobSpec{
+		URL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", PageURL: "https://www.youtube.com/watch?v=_mVb1D8wHxg",
+		Title: "集成测试-平台-720p", MediaType: "platform", Quality: "720",
+	}
+	wechatPageSpec := api.JobSpec{
+		URL: wechatURL, PageURL: "https://channels.weixin.qq.com/",
+		Title: "集成测试-微信页面通用视频", MediaType: "mp4",
+	}
+	for _, spec := range []api.JobSpec{platformSpec, wechatPageSpec} {
+		assertErrorCode(t, postJSON(t, helperURL+"/v1/tasks", spec), http.StatusConflict, "platform_compatibility_disabled")
+	}
+	if len(manager.List()) != 1 {
+		t.Fatalf("disabled compatibility created tasks: %d", len(manager.List()))
+	}
+	assertErrorCode(t, requestJSON(t, http.MethodPut, helperURL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "acknowledged": true, "noticeVersion": "2026-07-27-v1",
+	}), http.StatusConflict, "notice_outdated")
+	assertErrorCode(t, requestJSON(t, http.MethodPut, helperURL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "noticeVersion": settings.CurrentPlatformNoticeVersion,
+	}), http.StatusBadRequest, "invalid_acknowledgment")
+	var enabledSettings struct {
+		Enabled       bool   `json:"experimentalPlatformCompatibilityEnabled"`
+		NoticeVersion string `json:"platformNoticeVersion"`
+	}
+	decodeStatus(t, requestJSON(t, http.MethodPut, helperURL+"/v1/settings/platform-compatibility", map[string]any{
+		"enabled": true, "acknowledged": true, "noticeVersion": settings.CurrentPlatformNoticeVersion,
+	}), http.StatusOK, &enabledSettings)
+	if !enabledSettings.Enabled || enabledSettings.NoticeVersion != settings.CurrentPlatformNoticeVersion {
+		t.Fatalf("compatibility was not enabled: %+v", enabledSettings)
+	}
 
 	single := createTask(t, helperURL, api.JobSpec{URL: singleHLSURL, Title: "集成测试-单清晰度", MediaType: "hls"})
 	single = waitForStatus(t, helperURL, single.ID, tasks.Completed, 20*time.Second)
@@ -255,10 +415,7 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 		}
 	}
 
-	platformTask := createTask(t, helperURL, api.JobSpec{
-		URL: "https://www.youtube.com/watch?v=_mVb1D8wHxg", Title: "集成测试-平台-720p",
-		MediaType: "platform", Quality: "720",
-	})
+	platformTask := createTask(t, helperURL, platformSpec)
 	platformTask, platformStatuses := waitForLifecycle(t, helperURL, platformTask, 20*time.Second)
 	assertCompletedOutput(t, platformTask, downloadDir)
 	for _, status := range []tasks.Status{tasks.Queued, tasks.Downloading, tasks.Merging, tasks.Completed} {
@@ -314,6 +471,14 @@ func TestHelperDownloadWorkflow(t *testing.T) {
 	decodeStatus(t, postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformRetry.ID)+"/retry"), http.StatusCreated, &retried)
 	retried = waitForStatus(t, helperURL, retried.ID, tasks.Completed, 20*time.Second)
 	assertCompletedOutput(t, retried, downloadDir)
+	decodeStatus(t, requestJSON(t, http.MethodPut, helperURL+"/v1/settings/platform-compatibility", map[string]bool{
+		"enabled": false,
+	}), http.StatusOK, &map[string]any{})
+	for _, spec := range []api.JobSpec{platformSpec, wechatPageSpec} {
+		assertErrorCode(t, postJSON(t, helperURL+"/v1/tasks", spec), http.StatusConflict, "platform_compatibility_disabled")
+	}
+	assertErrorCode(t, postWithoutBody(t, helperURL+"/v1/tasks/"+url.PathEscape(platformRetry.ID)+"/retry"),
+		http.StatusConflict, "platform_compatibility_disabled")
 
 	var listed []tasks.Task
 	getJSON(t, helperURL+"/v1/tasks", true, &listed)
@@ -366,6 +531,15 @@ func startFixedHelperServer(t *testing.T, helperAPI *api.Server) string {
 		}
 	})
 	return "http://" + listener.Addr().String()
+}
+
+func privateCompatibilityStore(t *testing.T) *settings.Store {
+	t.Helper()
+	directory := t.TempDir()
+	if err := os.Chmod(directory, 0o700); err != nil {
+		t.Fatalf("secure settings test directory: %v", err)
+	}
+	return settings.Open(filepath.Join(directory, "settings.json"))
 }
 
 func runExtensionHelperFallback(t *testing.T, repoRoot, fixtureURL, downloadDir string) {
@@ -425,9 +599,11 @@ func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir str
 	var evidence struct {
 		Outputs map[string]string `json:"outputs"`
 		Actions struct {
-			Canceled bool `json:"canceled"`
-			Retried  bool `json:"retried"`
-			Revealed bool `json:"revealed"`
+			Canceled        bool `json:"canceled"`
+			Retried         bool `json:"retried"`
+			Revealed        bool `json:"revealed"`
+			ConsentEnabled  bool `json:"consentEnabled"`
+			ConsentDisabled bool `json:"consentDisabled"`
 		} `json:"actions"`
 	}
 	encoded, err := os.ReadFile(resultsPath)
@@ -437,7 +613,8 @@ func runChromeExtensionSmoke(t *testing.T, repoRoot, fixtureURL, downloadDir str
 	if err := json.Unmarshal(encoded, &evidence); err != nil {
 		t.Fatalf("decode Chrome smoke evidence: %v", err)
 	}
-	if !evidence.Actions.Canceled || !evidence.Actions.Retried || !evidence.Actions.Revealed {
+	if !evidence.Actions.Canceled || !evidence.Actions.Retried || !evidence.Actions.Revealed ||
+		!evidence.Actions.ConsentEnabled || !evidence.Actions.ConsentDisabled {
 		t.Fatalf("Chrome popup actions were not all verified: %+v", evidence.Actions)
 	}
 	if evidence.Outputs["platform"] == "" || evidence.Outputs["platform_retry"] == "" {
@@ -690,11 +867,16 @@ func postWithoutBody(t *testing.T, endpoint string) *http.Response {
 
 func postJSON(t *testing.T, endpoint string, input any) *http.Response {
 	t.Helper()
+	return requestJSON(t, http.MethodPost, endpoint, input)
+}
+
+func requestJSON(t *testing.T, method, endpoint string, input any) *http.Response {
+	t.Helper()
 	body, err := json.Marshal(input)
 	if err != nil {
 		t.Fatalf("encode JSON: %v", err)
 	}
-	request, err := http.NewRequest(http.MethodPost, endpoint, bytes.NewReader(body))
+	request, err := http.NewRequest(method, endpoint, bytes.NewReader(body))
 	if err != nil {
 		t.Fatalf("create request: %v", err)
 	}
