@@ -7,7 +7,10 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 	"unicode/utf8"
+
+	"golang.org/x/sys/unix"
 )
 
 func TestCurrentPlatformNoticeVersionIsFixedBoundedASCII(t *testing.T) {
@@ -254,20 +257,15 @@ func TestUnsafePathsNeverEnableOrGetReplaced(t *testing.T) {
 func TestAtomicWriteUsesPrivateSameDirectoryTempAndSyncs(t *testing.T) {
 	parent := privateTempDir(t)
 	path := filepath.Join(parent, "settings.json")
-	originalWrite := writeSettingsData
-	originalSyncFile := syncSettingsFile
-	originalPublish := publishSettingsFile
-	originalSyncParent := syncSettingsParent
-	t.Cleanup(func() {
-		writeSettingsData = originalWrite
-		syncSettingsFile = originalSyncFile
-		publishSettingsFile = originalPublish
-		syncSettingsParent = originalSyncParent
-	})
+	ops := defaultStoreOps()
+	originalWrite := ops.writeData
+	originalSyncFile := ops.syncFile
+	originalPublish := ops.renameAt
+	originalSyncParent := ops.syncDir
 
-	var tempPath, publishedFrom, publishedTo, syncedParent string
-	var fileSynced bool
-	writeSettingsData = func(file *os.File, data []byte) (int, error) {
+	var tempPath, publishedFrom, publishedTo string
+	var fileSynced, parentSynced bool
+	ops.writeData = func(file *os.File, data []byte) (int, error) {
 		tempPath = file.Name()
 		info, err := file.Stat()
 		if err != nil {
@@ -278,20 +276,20 @@ func TestAtomicWriteUsesPrivateSameDirectoryTempAndSyncs(t *testing.T) {
 		}
 		return originalWrite(file, data)
 	}
-	syncSettingsFile = func(file *os.File) error {
+	ops.syncFile = func(file *os.File) error {
 		fileSynced = true
 		return originalSyncFile(file)
 	}
-	publishSettingsFile = func(oldPath, newPath string) error {
-		publishedFrom, publishedTo = oldPath, newPath
-		return originalPublish(oldPath, newPath)
+	ops.renameAt = func(dirFD int, oldName, newName string) error {
+		publishedFrom, publishedTo = oldName, newName
+		return originalPublish(dirFD, oldName, newName)
 	}
-	syncSettingsParent = func(parentPath string) error {
-		syncedParent = parentPath
-		return originalSyncParent(parentPath)
+	ops.syncDir = func(dirFD int) error {
+		parentSynced = true
+		return originalSyncParent(dirFD)
 	}
 
-	if _, err := Open(path).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
+	if _, err := openWithOps(path, ops).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
 		t.Fatalf("SetPlatformCompatibility() error = %v", err)
 	}
 	if filepath.Dir(tempPath) != parent || tempPath == path || !strings.Contains(filepath.Base(tempPath), ".settings.json-") {
@@ -300,11 +298,11 @@ func TestAtomicWriteUsesPrivateSameDirectoryTempAndSyncs(t *testing.T) {
 	if !fileSynced {
 		t.Fatal("temporary file was not synced")
 	}
-	if publishedFrom != tempPath || publishedTo != path {
-		t.Fatalf("publish = (%q, %q), want (%q, %q)", publishedFrom, publishedTo, tempPath, path)
+	if publishedFrom != filepath.Base(tempPath) || publishedTo != filepath.Base(path) {
+		t.Fatalf("publish = (%q, %q), want basename-only (%q, %q)", publishedFrom, publishedTo, filepath.Base(tempPath), filepath.Base(path))
 	}
-	if syncedParent != parent {
-		t.Fatalf("synced parent = %q, want %q", syncedParent, parent)
+	if !parentSynced {
+		t.Fatal("settings parent directory was not synced")
 	}
 	assertOnlyFinalFile(t, parent, path)
 }
@@ -312,12 +310,12 @@ func TestAtomicWriteUsesPrivateSameDirectoryTempAndSyncs(t *testing.T) {
 func TestWriteFailuresPreserveLastValidFileAndCleanTemps(t *testing.T) {
 	tests := []struct {
 		name   string
-		inject func()
+		inject func(*storeOps)
 	}{
 		{
 			name: "short write",
-			inject: func() {
-				writeSettingsData = func(file *os.File, data []byte) (int, error) {
+			inject: func(ops *storeOps) {
+				ops.writeData = func(file *os.File, data []byte) (int, error) {
 					if len(data) == 0 {
 						return 0, nil
 					}
@@ -327,20 +325,20 @@ func TestWriteFailuresPreserveLastValidFileAndCleanTemps(t *testing.T) {
 		},
 		{
 			name: "file sync",
-			inject: func() {
-				syncSettingsFile = func(*os.File) error { return errors.New("injected file sync failure") }
+			inject: func(ops *storeOps) {
+				ops.syncFile = func(*os.File) error { return errors.New("injected file sync failure") }
 			},
 		},
 		{
 			name: "publish",
-			inject: func() {
-				publishSettingsFile = func(string, string) error { return errors.New("injected publish failure") }
+			inject: func(ops *storeOps) {
+				ops.renameAt = func(int, string, string) error { return errors.New("injected publish failure") }
 			},
 		},
 		{
 			name: "parent sync",
-			inject: func() {
-				syncSettingsParent = func(string) error { return errors.New("injected parent sync failure") }
+			inject: func(ops *storeOps) {
+				ops.syncDir = func(int) error { return errors.New("injected parent sync failure") }
 			},
 		},
 	}
@@ -348,23 +346,13 @@ func TestWriteFailuresPreserveLastValidFileAndCleanTemps(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			parent := privateTempDir(t)
 			path := filepath.Join(parent, "settings.json")
-			store := Open(path)
 			want := Snapshot{true, CurrentPlatformNoticeVersion}
-			if _, err := store.SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
+			if _, err := Open(path).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
 				t.Fatal(err)
 			}
-
-			originalWrite := writeSettingsData
-			originalSyncFile := syncSettingsFile
-			originalPublish := publishSettingsFile
-			originalSyncParent := syncSettingsParent
-			t.Cleanup(func() {
-				writeSettingsData = originalWrite
-				syncSettingsFile = originalSyncFile
-				publishSettingsFile = originalPublish
-				syncSettingsParent = originalSyncParent
-			})
-			tc.inject()
+			ops := defaultStoreOps()
+			tc.inject(&ops)
+			store := openWithOps(path, ops)
 
 			if got, err := store.SetPlatformCompatibility(false, ""); err == nil || got != want {
 				t.Fatalf("failed update = %#v, %v; want preserved %#v and error", got, err, want)
@@ -372,15 +360,222 @@ func TestWriteFailuresPreserveLastValidFileAndCleanTemps(t *testing.T) {
 			if got := store.Snapshot(); got != want {
 				t.Fatalf("in-memory Snapshot() = %#v, want preserved %#v", got, want)
 			}
-			writeSettingsData = originalWrite
-			syncSettingsFile = originalSyncFile
-			publishSettingsFile = originalPublish
-			syncSettingsParent = originalSyncParent
 			if got := Open(path).Snapshot(); got != want {
 				t.Fatalf("persisted Snapshot() = %#v, want preserved %#v", got, want)
 			}
 			assertOnlyFinalFile(t, parent, path)
 		})
+	}
+}
+
+func TestPostCommitCleanupFailuresKeepCommittedState(t *testing.T) {
+	tests := []struct {
+		name   string
+		inject func(*storeOps)
+	}{
+		{
+			name: "backup unlink",
+			inject: func(ops *storeOps) {
+				original := ops.unlinkAt
+				failed := false
+				ops.unlinkAt = func(dirFD int, name string) error {
+					if !failed && strings.Contains(name, "-backup-") {
+						failed = true
+						return errors.New("injected backup unlink failure")
+					}
+					return original(dirFD, name)
+				}
+			},
+		},
+		{
+			name: "cleanup directory sync",
+			inject: func(ops *storeOps) {
+				original := ops.syncDir
+				calls := 0
+				ops.syncDir = func(dirFD int) error {
+					calls++
+					if calls == 2 {
+						return errors.New("injected cleanup directory sync failure")
+					}
+					return original(dirFD)
+				}
+			},
+		},
+	}
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			parent := privateTempDir(t)
+			path := filepath.Join(parent, "settings.json")
+			if _, err := Open(path).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
+				t.Fatal(err)
+			}
+			ops := defaultStoreOps()
+			tc.inject(&ops)
+			store := openWithOps(path, ops)
+
+			got, err := store.SetPlatformCompatibility(false, "")
+			if err != nil || got != (Snapshot{}) {
+				t.Fatalf("post-commit cleanup result = %#v, %v; want committed disabled snapshot", got, err)
+			}
+			if store.Snapshot() != (Snapshot{}) || Open(path).Snapshot() != (Snapshot{}) {
+				t.Fatalf("memory/disk diverged after commit: memory=%#v disk=%#v", store.Snapshot(), Open(path).Snapshot())
+			}
+			assertOnlyFinalFile(t, parent, path)
+		})
+	}
+}
+
+func TestRollbackRenameFailurePreservesRecoveryBackup(t *testing.T) {
+	parent := privateTempDir(t)
+	path := filepath.Join(parent, "settings.json")
+	wantOld := Snapshot{true, CurrentPlatformNoticeVersion}
+	if _, err := Open(path).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
+		t.Fatal(err)
+	}
+
+	ops := defaultStoreOps()
+	originalRename := ops.renameAt
+	renameCalls := 0
+	ops.renameAt = func(dirFD int, oldName, newName string) error {
+		renameCalls++
+		if renameCalls == 2 {
+			return errors.New("injected rollback rename failure")
+		}
+		return originalRename(dirFD, oldName, newName)
+	}
+	ops.syncDir = func(int) error { return errors.New("injected commit sync failure") }
+	store := openWithOps(path, ops)
+
+	got, err := store.SetPlatformCompatibility(false, "")
+	if err == nil || got != wantOld || store.Snapshot() != wantOld {
+		t.Fatalf("failed rollback = %#v, %v, memory %#v; want old snapshot and error", got, err, store.Snapshot())
+	}
+	entries, err := os.ReadDir(parent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var recoveryPath string
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "-backup-") {
+			recoveryPath = filepath.Join(parent, entry.Name())
+			break
+		}
+	}
+	if recoveryPath == "" {
+		t.Fatalf("rollback failure removed the only recovery backup; entries=%v", entries)
+	}
+	if recovered := Open(recoveryPath).Snapshot(); recovered != wantOld {
+		t.Fatalf("recovery backup Snapshot() = %#v, want %#v", recovered, wantOld)
+	}
+}
+
+func TestTargetReplacementRaceDoesNotReplaceSymlink(t *testing.T) {
+	parent := privateTempDir(t)
+	path := filepath.Join(parent, "settings.json")
+	victim := filepath.Join(parent, "victim.json")
+	wantOld := Snapshot{true, CurrentPlatformNoticeVersion}
+	if _, err := Open(path).SetPlatformCompatibility(true, CurrentPlatformNoticeVersion); err != nil {
+		t.Fatal(err)
+	}
+	writeRawSettings(t, victim, `{"experimental_platform_compatibility_enabled":true,"platform_notice_version":"2026-07-28-v1"}`, 0o600)
+
+	ops := defaultStoreOps()
+	ops.beforePublish = func(_ int, _ string) error {
+		if err := os.Remove(path); err != nil {
+			return err
+		}
+		return os.Symlink(victim, path)
+	}
+	store := openWithOps(path, ops)
+	got, err := store.SetPlatformCompatibility(false, "")
+	if err == nil || got != wantOld || store.Snapshot() != wantOld {
+		t.Fatalf("raced update = %#v, %v, memory %#v; want rejection and old memory", got, err, store.Snapshot())
+	}
+	info, statErr := os.Lstat(path)
+	if statErr != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("raced symlink was replaced: info=%v err=%v", info, statErr)
+	}
+	if victimSnapshot := Open(victim).Snapshot(); victimSnapshot != wantOld {
+		t.Fatalf("victim was modified: %#v", victimSnapshot)
+	}
+	entries, readErr := os.ReadDir(parent)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	var recoveryPath string
+	for _, entry := range entries {
+		if strings.Contains(entry.Name(), "-backup-") {
+			recoveryPath = filepath.Join(parent, entry.Name())
+			break
+		}
+	}
+	if recoveryPath == "" || Open(recoveryPath).Snapshot() != wantOld {
+		t.Fatalf("target race did not preserve the displaced valid settings; entries=%v", entries)
+	}
+}
+
+func TestSeparateStoresSerializeWritesOnParentDirectory(t *testing.T) {
+	path := filepath.Join(privateTempDir(t), "settings.json")
+	if _, err := Open(path).SetPlatformCompatibility(false, ""); err != nil {
+		t.Fatal(err)
+	}
+	firstEntered := make(chan struct{})
+	releaseFirst := make(chan struct{})
+	secondLockAttempted := make(chan struct{})
+	secondEntered := make(chan struct{})
+
+	firstOps := defaultStoreOps()
+	firstOps.beforePublish = func(int, string) error {
+		close(firstEntered)
+		<-releaseFirst
+		return nil
+	}
+	secondOps := defaultStoreOps()
+	originalSecondFlock := secondOps.flock
+	secondOps.flock = func(fd, how int) error {
+		if how == unix.LOCK_EX {
+			close(secondLockAttempted)
+		}
+		return originalSecondFlock(fd, how)
+	}
+	secondOps.beforePublish = func(int, string) error {
+		close(secondEntered)
+		return nil
+	}
+	first := openWithOps(path, firstOps)
+	second := openWithOps(path, secondOps)
+	firstDone := make(chan error, 1)
+	secondDone := make(chan error, 1)
+	go func() {
+		_, err := first.SetPlatformCompatibility(true, CurrentPlatformNoticeVersion)
+		firstDone <- err
+	}()
+	<-firstEntered
+	go func() {
+		_, err := second.SetPlatformCompatibility(false, "")
+		secondDone <- err
+	}()
+	select {
+	case <-secondLockAttempted:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Store did not attempt to acquire the directory write lock")
+	}
+	select {
+	case <-secondEntered:
+		t.Fatal("second Store entered publish while first Store still held the directory write lock")
+	default:
+	}
+	close(releaseFirst)
+	if err := <-firstDone; err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case <-secondEntered:
+	case <-time.After(2 * time.Second):
+		t.Fatal("second Store did not resume after directory write lock release")
+	}
+	if err := <-secondDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
