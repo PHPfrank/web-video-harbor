@@ -27,6 +27,8 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   const privacy = fs.readFileSync(path.join(repoRoot, 'PRIVACY.md'), 'utf8');
   const boundary = fs.readFileSync(path.join(repoRoot, 'docs', '使用边界.md'), 'utf8');
   const license = fs.readFileSync(path.join(repoRoot, 'LICENSE'), 'utf8');
+  const notice = fs.readFileSync(path.join(repoRoot, 'NOTICE'), 'utf8');
+  const trademarks = fs.readFileSync(path.join(repoRoot, 'TRADEMARKS.md'), 'utf8');
   const notices = fs.readFileSync(path.join(repoRoot, 'THIRD_PARTY_NOTICES.md'), 'utf8');
 
   assert.equal(version, '1.0.0\n');
@@ -34,22 +36,31 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   assert.match(manifest.description, /Community Edition/);
   assert.doesNotMatch(manifest.description, /YouTube|哔哩哔哩|Bilibili|微信视频号/);
 
-  assert.match(license, /^MIT License\n/);
-  assert.match(license, /Copyright \(c\) 2026 PHPfrank/);
-  assert.match(license, /Permission is hereby granted, free of charge, to any person obtaining a copy/);
-  assert.match(license, /THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND/);
+  assert.match(license, /^# PolyForm Noncommercial License 1\.0\.0\n/);
+  assert.match(license, /Any noncommercial purpose is a permitted purpose/);
+  assert.match(license, /Personal use for research, experiment, and testing/);
+  assert.match(license, /The software comes as is, without any warranty or condition/);
+  assert.match(notice, /Required Notice: Copyright 2026-present PHPfrank\./);
+  assert.match(notice, /https:\/\/github\.com\/PHPfrank\/web-video-harbor/);
+  assert.match(trademarks, /WebVideoHarbor/);
+  assert.match(trademarks, /网页视频港/);
+  assert.match(trademarks, /不授予.*商标/s);
+  assert.match(trademarks, /非官方版本/);
 
   assert.match(readme, /^# WebVideoHarbor（网页视频港）\n/);
   assert.match(readme, /Community Edition/);
   assert.match(readme, /v1\.0\.0/);
   assert.match(readme, /完全免费/);
-  assert.match(readme, /开源/);
+  assert.match(readme, /源码公开/);
   assert.match(readme, /本地运行/);
   assert.match(readme, /技术学习与交流/);
   assert.match(readme, /MP4/);
   assert.match(readme, /WebM/);
   assert.match(readme, /非加密.*M3U8|M3U8.*非加密/);
-  assert.match(readme, /\[MIT 许可证\]\(LICENSE\)/);
+  assert.match(readme, /\[PolyForm Noncommercial License 1\.0\.0\]\(LICENSE\)/);
+  assert.match(readme, /未经 PHPfrank 事先书面许可.*商业用途/s);
+  assert.match(readme, /b56aa8c.*MIT License/s);
+  assert.match(readme, /\[品牌政策\]\(TRADEMARKS\.md\)/);
   assert.match(readme, /\[隐私说明\]\(PRIVACY\.md\)/);
   assert.match(readme, /\[使用边界\]\(docs\/使用边界\.md\)/);
   assert.match(readme, /\[安装使用说明\]\(docs\/安装使用说明\.md\)/);
@@ -92,7 +103,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
     assert.match(boundary, new RegExp(topic), `usage boundary is missing: ${topic}`);
   }
 
-  assert.match(notices, /WebVideoHarbor.*MIT/s);
+  assert.match(notices, /WebVideoHarbor.*PolyForm Noncommercial/s);
   assert.match(notices, /yt-dlp 2026\.07\.04/);
   assert.match(notices, /Deno 2\.8\.1/);
   assert.match(notices, /FFmpeg/);
