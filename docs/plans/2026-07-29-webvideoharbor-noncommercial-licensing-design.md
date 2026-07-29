@@ -6,8 +6,6 @@ WebVideoHarbor 当前以 MIT License 发布。MIT 允许任何人保留版权与
 
 仓库在换证前的最后一个提交是 `b56aa8c`。该提交及更早修订已经在 MIT License 下公开，既有授权不因后续换证而追溯失效。
 
-Git 历史中的 `PHPfrank` 和 `lifeng` 提交身份已经由项目维护者确认为同一人。所有新增的对外版权、授权和品牌声明只使用 `PHPfrank`；历史作者信息保持不变。
-
 ## 目标
 
 - 从换证提交开始，以标准化的非商业软件许可证发布 WebVideoHarbor。
