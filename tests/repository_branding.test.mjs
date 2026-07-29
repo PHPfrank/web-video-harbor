@@ -39,7 +39,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   assert.match(license, /^# PolyForm Noncommercial License 1\.0\.0\n/);
   assert.match(license, /Any noncommercial purpose is a permitted purpose/);
   assert.match(license, /Personal use for research, experiment, and testing/);
-  assert.match(license, /The software comes as is, without any warranty or condition/);
+  assert.match(license, /the software comes as is, without any warranty or condition/);
   assert.match(notice, /Required Notice: Copyright 2026-present PHPfrank\./);
   assert.match(notice, /https:\/\/github\.com\/PHPfrank\/web-video-harbor/);
   assert.match(trademarks, /WebVideoHarbor/);
