@@ -182,4 +182,3 @@ Expected: 工作区干净，分支只领先远端本次设计、计划和实施�
 git add docs/plans/2026-07-29-webvideoharbor-noncommercial-licensing-implementation.md
 git commit -m "docs: plan noncommercial licensing transition"
 ```
-
