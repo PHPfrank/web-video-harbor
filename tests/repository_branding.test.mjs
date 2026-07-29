@@ -24,6 +24,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   const manifest = JSON.parse(fs.readFileSync(path.join(repoRoot, 'extension', 'manifest.json'), 'utf8'));
   const readme = fs.readFileSync(path.join(repoRoot, 'README.md'), 'utf8');
   const guide = fs.readFileSync(path.join(repoRoot, 'docs', '安装使用说明.md'), 'utf8');
+  const homepage = fs.readFileSync(path.join(repoRoot, 'docs', 'index.html'), 'utf8');
   const privacy = fs.readFileSync(path.join(repoRoot, 'PRIVACY.md'), 'utf8');
   const boundary = fs.readFileSync(path.join(repoRoot, 'docs', '使用边界.md'), 'utf8');
   const license = fs.readFileSync(path.join(repoRoot, 'LICENSE'), 'utf8');
@@ -69,6 +70,12 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
   assert.match(readme, /项目维护者可能获得佣金/);
   assert.match(readme, /不影响.*免费功能|免费功能.*不受影响/);
   assert.doesNotMatch(readme, /s\.click\.taobao\.com|userCode=c5z9bjlt/);
+
+  for (const publicDocument of [readme, guide, homepage, privacy, boundary]) {
+    assert.match(publicDocument, /源码公开/);
+    assert.doesNotMatch(publicDocument, /完全免费、开源|开源技术项目|开源工具|免费 · 开源|MIT 许可证授予/);
+  }
+  assert.match(homepage, /PolyForm Noncommercial/);
 
   const opening = readme.split(/^## /m, 1)[0];
   assert.doesNotMatch(opening, /YouTube|哔哩哔哩|Bilibili|微信视频号/);
@@ -123,6 +130,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
     ...filesUnder(path.join(repoRoot, 'scripts')),
     path.join(repoRoot, 'README.md'),
     path.join(repoRoot, 'PRIVACY.md'),
+    path.join(repoRoot, 'docs', 'index.html'),
     path.join(repoRoot, 'docs', '使用边界.md'),
     path.join(repoRoot, 'docs', '安装使用说明.md'),
   ];
@@ -135,7 +143,7 @@ test('community edition licensing, privacy, and usage boundaries stay aligned', 
     );
   }
 
-  const docs = `${readme}\n${guide}\n${privacy}\n${boundary}`;
+  const docs = `${readme}\n${guide}\n${homepage}\n${privacy}\n${boundary}`;
   for (const topic of [
     'MP4', 'WebM', 'M3U8', 'Cookie', '登录', '会员', 'DRM', 'yt-dlp', 'Deno',
     '默认关闭', '实验性平台兼容', '停止助手', '保留现有配对状态',

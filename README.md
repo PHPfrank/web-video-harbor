@@ -1,6 +1,6 @@
 # WebVideoHarbor（网页视频港）
 
-WebVideoHarbor Community Edition 是一个完全免费、开源、本地运行的网页媒体技术项目，用于技术学习与交流。它由 Chrome 扩展和 macOS 本地助手组成，用于学习网页媒体识别、非加密 HLS 分片处理以及浏览器与本地程序通信。
+WebVideoHarbor Community Edition 是一个完全免费、源码公开、本地运行的网页媒体技术项目，用于技术学习与交流。它由 Chrome 扩展和 macOS 本地助手组成，用于学习网页媒体识别、非加密 HLS 分片处理以及浏览器与本地程序通信。
 
 当前社区版本：**v1.0.0**。
 
@@ -48,11 +48,17 @@ M3U8/HLS 合并需要 FFmpeg。默认下载目录为 `~/Downloads/WebVideoHarbor
 
 该兼容模块只尝试处理无需登录便可公开访问的单个视频，或页面已向 Chrome 暴露的普通 MP4/非加密 M3U8。它不读取 Cookie，不支持登录、会员、付费、私有、加密、DRM、地区限制或机器人验证绕过。完整边界见 [使用边界](docs/使用边界.md)。
 
-请只下载自己创作、已获授权、已进入公有领域，或当地法律明确允许保存的内容。免费、开源或技术学习用途不等于获得第三方内容的下载授权。
+请只下载自己创作、已获授权、已进入公有领域，或当地法律明确允许保存的内容。免费、源码公开或技术学习用途不等于获得第三方内容的下载授权。
 
-## 开源与第三方组件
+## 源码许可与第三方组件
 
-WebVideoHarbor 源代码使用 [MIT 许可证](LICENSE)。完整 macOS 包含固定版本的 yt-dlp 和 Deno，并调用用户安装的 FFmpeg。这些组件各自适用其上游许可条款，不因 WebVideoHarbor 采用 MIT 而改变。详见 [第三方组件说明](THIRD_PARTY_NOTICES.md)。
+当前主分支以及未来版本中由 WebVideoHarbor 提供的源代码使用 [PolyForm Noncommercial License 1.0.0](LICENSE)。该许可证允许个人学习、研究、测试、业余项目及其中列出的其他非商业用途，也允许在非商业目的下修改和分发。
+
+未经 PHPfrank 事先书面许可，不得将这些版本用于商业产品、收费服务、广告获利、企业内部商业活动或其他商业用途。如果无法确定某项使用是否属于非商业用途，请在使用前通过官方仓库联系 PHPfrank。
+
+历史授权不追溯变更：`v1.0.0` 标签以及截至提交 [`b56aa8c`](https://github.com/PHPfrank/web-video-harbor/commit/b56aa8c) 的仓库修订仍按当时的 MIT License 使用。
+
+源码许可证不授予 WebVideoHarbor、网页视频港或官方视觉标识的品牌使用权，详见 [品牌政策](TRADEMARKS.md)。完整 macOS 包包含固定版本的 yt-dlp 和 Deno，并调用用户安装的 FFmpeg；这些组件继续适用其各自的上游许可条款，详见 [第三方组件说明](THIRD_PARTY_NOTICES.md)。
 
 ## 从旧版升级
 

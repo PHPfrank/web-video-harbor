@@ -128,11 +128,16 @@ rg -Fq 'javascriptRuntime.available' "$repo_root/scripts/helper-status.zsh" || \
   fail "helper-status.zsh 没有读取 JavaScript 解析环境状态"
 
 if case_enabled community_docs; then
-  for document_path in LICENSE PRIVACY.md 'docs/使用边界.md'; do
+  for document_path in LICENSE NOTICE TRADEMARKS.md PRIVACY.md 'docs/使用边界.md'; do
     [[ -f "$repo_root/$document_path" && ! -L "$repo_root/$document_path" ]] || \
       fail "缺少安全的社区版文档：$document_path"
   done
-  rg -Fq 'MIT License' "$repo_root/LICENSE" || fail "根目录许可证不是 MIT"
+  rg -Fq '# PolyForm Noncommercial License 1.0.0' "$repo_root/LICENSE" || \
+    fail "根目录许可证不是 PolyForm Noncommercial 1.0.0"
+  rg -Fq 'Required Notice: Copyright 2026-present PHPfrank.' "$repo_root/NOTICE" || \
+    fail "NOTICE 缺少 PHPfrank Required Notice"
+  rg -Fq '不授予 WebVideoHarbor' "$repo_root/TRADEMARKS.md" || \
+    fail "品牌政策没有保留 WebVideoHarbor 品牌权利"
   rg -Fq '不包含分析' "$repo_root/PRIVACY.md" || fail "隐私说明没有明确排除分析"
   rg -Fq '默认关闭' "$repo_root/docs/使用边界.md" || fail "使用边界没有说明兼容模块默认关闭"
   finish_focused_case community_docs

@@ -1,6 +1,6 @@
 # 第三方组件说明
 
-WebVideoHarbor 自身的源代码按根目录 [MIT 许可证](LICENSE) 发布。该 MIT 许可证不会替代、改变或扩展下列第三方组件及其所带组件的许可条款。完整 macOS 包会附带下列需要随包分发的许可文件。
+WebVideoHarbor 自身的源代码按根目录 [PolyForm Noncommercial License 1.0.0](LICENSE) 发布。该许可证不会替代、改变或扩展下列第三方组件及其所带组件的许可条款。完整 macOS 包会附带下列需要随包分发的许可文件。
 
 ## Go 与 golang.org/x/sys
 
@@ -18,7 +18,7 @@ WebVideoHarbor 自身的源代码按根目录 [MIT 许可证](LICENSE) 发布。
 - 许可：以上游该版本及其内置组件的完整许可清单为准
 - 安装包文件：`licenses/yt-dlp-THIRD_PARTY_LICENSES.txt`
 
-WebVideoHarbor 的 MIT 许可证不代表 yt-dlp 内置的所有第三方组件均采用 MIT。项目不会静默更新该可执行文件。
+WebVideoHarbor 的 PolyForm Noncommercial 许可证不代表 yt-dlp 内置的第三方组件采用相同许可证。项目不会静默更新该可执行文件。
 
 ## Deno 2.8.1
 
