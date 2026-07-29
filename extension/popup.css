@@ -334,6 +334,52 @@ h2 {
 .empty-state p { max-width: 300px; margin: 0 auto; font-size: 12px; line-height: 1.55; }
 .task-empty { margin: 0; padding: 10px 0; color: var(--color-muted); font-size: 12px; }
 
+.popup-recommendation {
+  position: sticky;
+  z-index: 3;
+  bottom: 0;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  min-height: 44px;
+  align-items: center;
+  gap: 9px;
+  margin: 14px -16px -16px;
+  padding: 10px 14px;
+  color: var(--color-ink);
+  border: 1px solid var(--color-border-strong);
+  border-radius: 9px 9px 0 0;
+  background: var(--color-surface);
+  box-shadow: 0 -5px 16px rgba(23, 33, 30, 0.08);
+  text-decoration: none;
+}
+
+.popup-recommendation:hover { border-color: var(--color-accent); }
+.popup-recommendation:focus-visible {
+  outline: 3px solid color-mix(in srgb, var(--color-focus) 38%, transparent);
+  outline-offset: -3px;
+}
+.popup-recommendation[data-state="completed"] {
+  border-color: var(--color-accent);
+  background: var(--color-accent-soft);
+}
+.popup-promotion-badge {
+  padding: 2px 5px;
+  color: var(--color-accent-hover);
+  border: 1px solid var(--color-accent);
+  border-radius: 4px;
+  background: var(--color-accent-soft);
+  font-size: 10px;
+  font-weight: 700;
+  line-height: 1.2;
+}
+.popup-recommendation-text {
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 620;
+  line-height: 1.45;
+}
+.popup-recommendation-arrow { flex: 0 0 auto; color: var(--color-accent); font-weight: 700; }
+
 .options-page { min-height: 100vh; }
 
 .options-shell {

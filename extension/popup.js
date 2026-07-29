@@ -18,6 +18,8 @@
     candidateEmptyText: document.getElementById('candidate-empty-text'),
     taskList: document.getElementById('task-list'),
     taskEmpty: document.getElementById('task-empty'),
+    recommendationLink: document.getElementById('popup-recommendation-link'),
+    recommendationText: document.getElementById('popup-recommendation-text'),
     rescanButton: document.getElementById('rescan-button'),
     optionsButton: document.getElementById('options-button'),
   };
@@ -229,6 +231,14 @@
         const control = card && card.querySelector(`[data-control="${view.focusedTask.action}"]`);
         if (control && !control.disabled) control.focus({ preventScroll: true });
       }
+      const recommendationState = view.recommendationHighlighted ? 'completed' : 'default';
+      elements.recommendationLink.dataset.state = recommendationState;
+      viewState.setText(
+        elements.recommendationText,
+        view.recommendationHighlighted
+          ? '下载完成，需要更多存储空间？查看推荐'
+          : '视频文件越来越多？查看存储与云服务推荐',
+      );
     },
     setNotice(message, tone) {
       viewState.setText(elements.notice, message || '');

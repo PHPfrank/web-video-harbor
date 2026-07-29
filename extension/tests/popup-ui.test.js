@@ -25,6 +25,7 @@ test('manifest wires a popup and options page with existing local resources', ()
 
 test('popup is semantic, keyboard accessible, and loads scripts without inline handlers', () => {
   const html = source('popup.html');
+  const projectUrl = 'https://phpfrank.github.io/web-video-harbor/recommendations.html';
 
   assert.match(html, /<main\b/);
   assert.match(html, /<section\b[^>]*aria-labelledby=/);
@@ -36,7 +37,26 @@ test('popup is semantic, keyboard accessible, and loads scripts without inline h
   assert.match(html, /<script src=["']lib\/popup-controller\.js["']><\/script>/);
   assert.match(html, /<script src=["']popup\.js["']><\/script>/);
   assert.doesNotMatch(html, /\son\w+=/i);
-  assert.doesNotMatch(html, /https?:\/\//i);
+  assert.doesNotMatch(html.replace(projectUrl, ''), /https?:\/\//i);
+});
+
+test('popup keeps a disclosed recommendation entry visible without merchant destinations', () => {
+  const html = source('popup.html');
+  const javascript = source('popup.js');
+  const css = source('popup.css');
+
+  assert.match(html, /id=["']popup-recommendation-link["']/);
+  assert.match(html, /href=["']https:\/\/phpfrank\.github\.io\/web-video-harbor\/recommendations\.html["']/);
+  assert.match(html, />推广</);
+  assert.match(html, /target=["']_blank["']/);
+  assert.match(html, /rel=["']noopener noreferrer["']/);
+  assert.match(html, /在新窗口打开/);
+  assert.match(javascript, /recommendationHighlighted/);
+  assert.match(javascript, /下载完成，需要更多存储空间？查看推荐/);
+  assert.match(css, /\.popup-recommendation\s*\{[^}]*position:\s*sticky/s);
+  assert.match(css, /\.popup-recommendation\s*\{[^}]*min-height:\s*44px/s);
+  assert.match(css, /\.popup-recommendation\[data-state=["']completed["']\]/);
+  assert.doesNotMatch(`${html}\n${javascript}`, /s\.click\.taobao\.com|userCode=c5z9bjlt/);
 });
 
 test('popup controller covers scan, inspect, download, polling, and task actions safely', () => {
