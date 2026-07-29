@@ -32,6 +32,10 @@ test('GitHub Pages site provides its homepage and recommendation entry point', a
   assert.match(homepage, /WebVideoHarbor/);
   assert.match(homepage, /网页视频港/);
   assert.match(homepage, /href=["']recommendations\.html["']/);
+  assert.match(
+    homepage,
+    /<nav\b[^>]*class=["'][^"']*site-nav[^"']*["'][^>]*>[\s\S]*href=["']recommendations\.html["'][^>]*>推荐资源·推广<\/a>/,
+  );
   for (const document of [homepage, recommendations]) {
     assert.match(
       document,
