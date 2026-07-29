@@ -4,6 +4,18 @@ WebVideoHarbor Community Edition 是一个完全免费、开源、本地运行�
 
 当前社区版本：**v1.0.0**。
 
+## 下载与安装
+
+- [下载 macOS v1.0.0 安装包](https://github.com/PHPfrank/web-video-harbor/releases/download/v1.0.0/WebVideoHarbor-macOS-v1.0.0.zip)
+- [查看 v1.0.0 发布说明](https://github.com/PHPfrank/web-video-harbor/releases/tag/v1.0.0)
+- [阅读安装使用说明](docs/安装使用说明.md)
+
+安装包同时支持 Apple Silicon 和 Intel Mac。下载后解压即可按安装说明操作，普通用户不需要安装 Go 或自行编译。安装包 SHA-256：
+
+```text
+6e877454e925317733fbad49fe3d802d8e85c80b05f54bf0e55139491d146979
+```
+
 ## 默认功能
 
 - 识别并下载网页直接暴露的 HTTP(S) MP4 和 WebM。
@@ -13,9 +25,9 @@ WebVideoHarbor Community Edition 是一个完全免费、开源、本地运行�
 
 M3U8/HLS 合并需要 FFmpeg。默认下载目录为 `~/Downloads/WebVideoHarbor/`，本地状态保存在 `~/Library/Application Support/WebVideoHarbor/`。
 
-## 快速开始
+## 从源码运行（开发者）
 
-详细操作请阅读 [安装使用说明](docs/安装使用说明.md)。从项目根目录开始：
+下面的步骤面向需要查看或修改源码的开发者。普通用户请直接使用上面的 macOS 安装包。详细操作请阅读 [安装使用说明](docs/安装使用说明.md)。从项目根目录开始：
 
 1. 安装 Go 和 FFmpeg，然后构建并启动本地助手。
 2. 在 Chrome 的扩展管理页中“加载已解压的扩展程序”，选择 `extension/` 文件夹。
