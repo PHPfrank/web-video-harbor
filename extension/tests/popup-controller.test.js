@@ -135,6 +135,59 @@ test('changed task data rerenders once and preserves focused action by task ID',
   assert.deepEqual(renderer.tasks.at(-1).focusedTask, { id: 'task-1', action: 'cancel' });
 });
 
+test('recommendation highlight starts only after an observed task completes', async () => {
+  const taskResults = [
+    [{ id: 'history', title: 'old', status: 'completed', progress: 100 }],
+    [
+      { id: 'history', title: 'old', status: 'completed', progress: 100 },
+      { id: 'active', title: 'new', status: 'downloading', progress: 80 },
+    ],
+    [
+      { id: 'history', title: 'old', status: 'completed', progress: 100 },
+      { id: 'active', title: 'new', status: 'completed', progress: 100 },
+    ],
+  ];
+  const { controller, renderer } = harness({
+    helper: { listTasks: async () => taskResults.shift() },
+  });
+
+  await controller.refreshTasks();
+  assert.equal(renderer.tasks.at(-1).recommendationHighlighted, false);
+
+  await controller.refreshTasks();
+  assert.equal(renderer.tasks.at(-1).recommendationHighlighted, false);
+
+  await controller.refreshTasks();
+  assert.equal(renderer.tasks.at(-1).recommendationHighlighted, true);
+
+  const fresh = harness({
+    helper: {
+      listTasks: async () => [
+        { id: 'active', title: 'new', status: 'completed', progress: 100 },
+      ],
+    },
+  });
+  await fresh.controller.refreshTasks();
+  assert.equal(fresh.renderer.tasks.at(-1).recommendationHighlighted, false);
+});
+
+test('failed and canceled task transitions do not highlight recommendations', async () => {
+  const taskResults = [
+    [{ id: 'task-1', title: 'task', status: 'downloading', progress: 50 }],
+    [{ id: 'task-1', title: 'task', status: 'failed', progress: 50 }],
+    [{ id: 'task-1', title: 'task', status: 'canceled', progress: 50 }],
+  ];
+  const { controller, renderer } = harness({
+    helper: { listTasks: async () => taskResults.shift() },
+  });
+
+  await controller.refreshTasks();
+  await controller.refreshTasks();
+  await controller.refreshTasks();
+
+  assert.equal(renderer.tasks.at(-1).recommendationHighlighted, false);
+});
+
 test('capability rerender preserves selected HLS variant and focused control by candidate URL', async () => {
   const healthResults = [
     { ready: true, ffmpeg: true },

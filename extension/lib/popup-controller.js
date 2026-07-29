@@ -42,6 +42,7 @@
       tasks: [],
       pageUrl: '',
       experimentalPlatformBlocked: false,
+      recommendationHighlighted: false,
     };
     const selectedVariants = new Map();
     const selectedQualities = new Map();
@@ -119,7 +120,11 @@
     }
 
     function renderTasks() {
-      renderer.renderTasks({ ...buildView(), focusedTask: focusedTask ? { ...focusedTask } : null });
+      renderer.renderTasks({
+        ...buildView(),
+        focusedTask: focusedTask ? { ...focusedTask } : null,
+        recommendationHighlighted: model.recommendationHighlighted,
+      });
     }
 
     function setNotice(message, tone) {
@@ -153,6 +158,17 @@
         task && task.error,
         task && task.errorCode,
       ]));
+    }
+
+    function didTaskComplete(previousTasks, nextTasks) {
+      const previousStatuses = new Map(
+        previousTasks
+          .filter((task) => task && typeof task.id === 'string')
+          .map((task) => [task.id, task.status]),
+      );
+      return nextTasks.some((task) => task && task.status === 'completed'
+        && previousStatuses.has(task.id)
+        && previousStatuses.get(task.id) !== 'completed');
     }
 
     function refreshCandidates() {
@@ -190,6 +206,9 @@
           const nextTasks = Array.isArray(tasks) ? tasks : [];
           const nextSnapshot = tasksFingerprint(nextTasks);
           if (nextSnapshot !== taskSnapshot) {
+            if (!model.recommendationHighlighted && didTaskComplete(model.tasks, nextTasks)) {
+              model.recommendationHighlighted = true;
+            }
             model.tasks = nextTasks;
             taskSnapshot = nextSnapshot;
             tasksChanged = true;
